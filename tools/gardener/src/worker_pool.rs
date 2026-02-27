@@ -2,9 +2,12 @@ use crate::backlog_store::BacklogStore;
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::structured_fallback_line;
+use crate::runtime::ProductionRuntime;
 use crate::scheduler::{SchedulerEngine, SchedulerRunSummary};
-use crate::tui::{render_dashboard, BacklogView, QueueStats, WorkerRow};
+use crate::startup::refresh_quality_report;
+use crate::tui::{render_dashboard, render_report_view, BacklogView, QueueStats, WorkerRow};
 use crate::runtime::Terminal;
+use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 
 pub fn run_worker_pool_stub(
@@ -17,12 +20,15 @@ pub fn run_worker_pool_stub(
 }
 
 pub fn run_worker_pool_fsm(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
     cfg: &AppConfig,
     store: &BacklogStore,
     terminal: &dyn Terminal,
     target: usize,
     task_override: Option<&str>,
 ) -> Result<usize, GardenerError> {
+    let mut report_visible = false;
     let parallelism = cfg.orchestrator.parallelism.max(1) as usize;
     let mut workers = (0..parallelism)
         .map(|idx| WorkerRow {
@@ -41,8 +47,28 @@ pub fn run_worker_pool_fsm(
     render(terminal, &workers, &dashboard_snapshot(store)?)?;
 
     while completed < target {
+        handle_hotkeys(
+            runtime,
+            scope,
+            cfg,
+            terminal,
+            &mut report_visible,
+        )?;
+        if report_visible {
+            continue;
+        }
         let mut claimed_any = false;
         for idx in 0..workers.len() {
+            handle_hotkeys(
+                runtime,
+                scope,
+                cfg,
+                terminal,
+                &mut report_visible,
+            )?;
+            if report_visible {
+                break;
+            }
             if completed >= target {
                 break;
             }
@@ -99,6 +125,40 @@ pub fn run_worker_pool_fsm(
         }
     }
     Ok(completed)
+}
+
+fn handle_hotkeys(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    terminal: &dyn Terminal,
+    report_visible: &mut bool,
+) -> Result<(), GardenerError> {
+    if !terminal.stdin_is_tty() {
+        return Ok(());
+    }
+    if let Some(key) = terminal.poll_key(10)? {
+        match key {
+            'v' => *report_visible = true,
+            'g' => {
+                let _ = refresh_quality_report(runtime, cfg, scope, true)?;
+                *report_visible = true;
+            }
+            'b' => *report_visible = false,
+            _ => {}
+        }
+    }
+    if *report_visible {
+        let report_path = quality_report_path(cfg, scope);
+        let report = if runtime.file_system.exists(&report_path) {
+            runtime.file_system.read_to_string(&report_path)?
+        } else {
+            "report not found".to_string()
+        };
+        let frame = render_report_view(&report_path.display().to_string(), &report, 120, 30);
+        terminal.draw(&frame)?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,4 +232,13 @@ fn render(
 
 fn short_task_id(task_id: &str) -> &str {
     task_id.get(0..6).unwrap_or(task_id)
+}
+
+fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(&cfg.quality_report.path);
+    if path.is_absolute() {
+        path
+    } else {
+        scope.working_dir.join(path)
+    }
 }

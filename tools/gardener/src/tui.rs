@@ -228,6 +228,48 @@ pub fn render_dashboard(
     out
 }
 
+pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    let lines = report
+        .lines()
+        .take(height.saturating_sub(8) as usize)
+        .collect::<Vec<_>>()
+        .join("\n");
+    terminal
+        .draw(|frame| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(3)])
+                .split(frame.size());
+            frame.render_widget(
+                Paragraph::new("Quality report view")
+                    .block(Block::default().borders(Borders::ALL).title("Report")),
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new(lines.clone())
+                    .block(Block::default().borders(Borders::ALL).title(path)),
+                chunks[1],
+            );
+            frame.render_widget(
+                Paragraph::new("Keys: b back  g regenerate report")
+                    .block(Block::default().borders(Borders::ALL)),
+                chunks[2],
+            );
+        })
+        .expect("draw");
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer.get(x, y).symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
 impl ProblemClass {
     fn as_str(self) -> &'static str {
         match self {

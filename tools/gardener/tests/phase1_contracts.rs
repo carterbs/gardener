@@ -18,12 +18,19 @@ use std::time::{Duration, UNIX_EPOCH};
 
 fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> ProductionRuntime {
     let fs = FakeFileSystem::with_file("/config.toml", config_text);
+    fs.write_string(
+        Path::new("/repo/.gardener/repo-intelligence.toml"),
+        include_str!("fixtures/triage/expected-profiles/phase03-profile.toml"),
+    )
+    .expect("seed profile");
     let process = FakeProcessRunner::default();
-    process.push_response(Ok(ProcessOutput {
-        exit_code: if git_root.is_some() { 0 } else { 1 },
-        stdout: git_root.map(|v| format!("{v}\n")).unwrap_or_default(),
-        stderr: String::new(),
-    }));
+    for _ in 0..12 {
+        process.push_response(Ok(ProcessOutput {
+            exit_code: if git_root.is_some() { 0 } else { 1 },
+            stdout: git_root.map(|v| format!("{v}\n")).unwrap_or_default(),
+            stderr: String::new(),
+        }));
+    }
     let terminal = FakeTerminal::new(tty);
 
     ProductionRuntime {
@@ -54,12 +61,19 @@ impl Terminal for FailingTerminal {
 
 fn runtime_with_failing_terminal() -> ProductionRuntime {
     let fs = FakeFileSystem::with_file("/config.toml", "");
+    fs.write_string(
+        Path::new("/repo/.gardener/repo-intelligence.toml"),
+        include_str!("fixtures/triage/expected-profiles/phase03-profile.toml"),
+    )
+    .expect("seed profile");
     let process = FakeProcessRunner::default();
-    process.push_response(Ok(ProcessOutput {
-        exit_code: 0,
-        stdout: "/repo\n".to_string(),
-        stderr: String::new(),
-    }));
+    for _ in 0..12 {
+        process.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "/repo\n".to_string(),
+            stderr: String::new(),
+        }));
+    }
 
     ProductionRuntime {
         clock: Arc::new(ProductionClock),

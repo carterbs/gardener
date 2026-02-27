@@ -37,6 +37,7 @@ pub struct AppConfig {
     pub seeding: SeedingConfig,
     pub execution: ExecutionConfig,
     pub triage: TriageConfig,
+    pub quality_report: QualityReportConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +123,13 @@ pub struct TriageConfig {
     pub discovery_max_turns: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QualityReportConfig {
+    pub path: String,
+    pub stale_after_days: u64,
+    pub stale_if_head_commit_differs: bool,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -174,6 +182,11 @@ impl Default for AppConfig {
                 stale_after_commits: 50,
                 discovery_max_turns: 12,
             },
+            quality_report: QualityReportConfig {
+                path: "docs/quality-grades.md".to_string(),
+                stale_after_days: 7,
+                stale_if_head_commit_differs: true,
+            },
         }
     }
 }
@@ -192,6 +205,7 @@ struct PartialAppConfig {
     seeding: Option<PartialSeedingConfig>,
     execution: Option<PartialExecutionConfig>,
     triage: Option<PartialTriageConfig>,
+    quality_report: Option<PartialQualityReportConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -264,6 +278,13 @@ struct PartialTriageConfig {
     output_path: Option<String>,
     stale_after_commits: Option<u64>,
     discovery_max_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PartialQualityReportConfig {
+    path: Option<String>,
+    stale_after_days: Option<u64>,
+    stale_if_head_commit_differs: Option<bool>,
 }
 
 pub fn load_config(
@@ -405,6 +426,18 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = triage.discovery_max_turns {
             cfg.triage.discovery_max_turns = value;
+        }
+    }
+
+    if let Some(quality) = partial.quality_report {
+        if let Some(value) = quality.path {
+            cfg.quality_report.path = value;
+        }
+        if let Some(value) = quality.stale_after_days {
+            cfg.quality_report.stale_after_days = value;
+        }
+        if let Some(value) = quality.stale_if_head_commit_differs {
+            cfg.quality_report.stale_if_head_commit_differs = value;
         }
     }
 }

@@ -3,20 +3,30 @@ pub mod backlog_store;
 pub mod config;
 pub mod errors;
 pub mod output_envelope;
+pub mod pr_audit;
 pub mod priority;
+pub mod quality_domain_catalog;
+pub mod quality_evidence;
+pub mod quality_grades;
+pub mod quality_scoring;
 pub mod repo_intelligence;
 pub mod runtime;
+pub mod seed_runner;
+pub mod seeding;
+pub mod startup;
 pub mod task_identity;
 pub mod triage;
 pub mod triage_agent_detection;
 pub mod triage_discovery;
 pub mod triage_interview;
 pub mod types;
+pub mod worktree_audit;
 
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use runtime::ProductionRuntime;
+use startup::run_startup_audits;
 use triage::ensure_profile_for_run;
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
@@ -165,12 +175,16 @@ pub fn run_with_runtime(
     }
 
     if cli.backlog_only {
-        runtime.terminal.write_line("phase1 backlog-only")?;
+        let mut cfg_for_startup = cfg.clone();
+        let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
+        runtime.terminal.write_line("phase3 backlog-only")?;
         return Ok(0);
     }
 
     if cli.quality_grades_only {
-        runtime.terminal.write_line("phase1 quality-grades-only")?;
+        let mut cfg_for_startup = cfg.clone();
+        let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+        runtime.terminal.write_line("phase3 quality-grades-only")?;
         return Ok(0);
     }
 

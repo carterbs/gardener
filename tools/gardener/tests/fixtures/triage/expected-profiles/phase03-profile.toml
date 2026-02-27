@@ -1,0 +1,72 @@
+[meta]
+schema_version = 1
+created_at = "0"
+head_sha = "unknown"
+working_dir = "/repo"
+repo_root = "/repo"
+discovery_used = false
+
+[detected_agent]
+primary = "codex"
+claude_signals = []
+codex_signals = [".codex/config.toml"]
+agents_md_present = false
+user_confirmed = true
+
+[discovery.agent_steering]
+grade = "unknown"
+summary = "n/a"
+issues = []
+strengths = []
+
+[discovery.knowledge_accessible]
+grade = "unknown"
+summary = "n/a"
+issues = []
+strengths = []
+
+[discovery.mechanical_guardrails]
+grade = "unknown"
+summary = "n/a"
+issues = []
+strengths = []
+
+[discovery.local_feedback_loop]
+grade = "unknown"
+summary = "n/a"
+issues = []
+strengths = []
+
+[discovery.coverage_signal]
+grade = "unknown"
+summary = "n/a"
+issues = []
+strengths = []
+
+[discovery]
+overall_readiness_score = 10
+overall_readiness_grade = "F"
+primary_gap = "agent_steering"
+notable_findings = "n/a"
+scope_notes = ""
+
+[user_validated]
+agent_steering_correction = ""
+external_docs_surface = ""
+external_docs_accessible = true
+guardrails_correction = ""
+validation_command = "npm run validate"
+coverage_grade_override = ""
+additional_context = ""
+corrections_made = 0
+validated_at = "0"
+
+[agent_readiness]
+agent_steering_score = 2
+knowledge_accessible_score = 2
+mechanical_guardrails_score = 2
+local_feedback_loop_score = 2
+coverage_signal_score = 2
+readiness_score = 10
+readiness_grade = "F"
+primary_gap = "agent_steering"

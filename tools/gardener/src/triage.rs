@@ -21,7 +21,11 @@ pub fn profile_path(scope: &RuntimeScope, cfg: &AppConfig) -> PathBuf {
     if configured.is_absolute() {
         configured
     } else {
-        scope.working_dir.join(configured)
+        scope
+            .repo_root
+            .as_ref()
+            .unwrap_or(&scope.working_dir)
+            .join(configured)
     }
 }
 

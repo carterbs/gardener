@@ -20,6 +20,21 @@ model = "gpt-5-codex"
 validate_on_boot = false
 validation_command = "npm run validate"
 
+[quality_report]
+path = "tools/gardener/tests/fixtures/quality-grades.md"
+stale_after_days = 7
+stale_if_head_commit_differs = true
+
+[triage]
+output_path = "tools/gardener/tests/fixtures/triage/expected-profiles/phase03-profile.toml"
+stale_after_commits = 50
+discovery_max_turns = 12
+
+[seeding]
+backend = "codex"
+model = "gpt-5-codex"
+max_turns = 12
+
 [execution]
 permissions_mode = "permissive_v1"
 worker_mode = "normal"

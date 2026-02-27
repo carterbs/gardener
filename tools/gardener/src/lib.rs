@@ -7,6 +7,8 @@ pub mod fsm;
 pub mod gh;
 pub mod git;
 pub mod learning_loop;
+pub mod log_retention;
+pub mod logging;
 pub mod output_envelope;
 pub mod postmerge_analysis;
 pub mod postmortem;
@@ -32,6 +34,7 @@ pub mod triage;
 pub mod triage_agent_detection;
 pub mod triage_discovery;
 pub mod triage_interview;
+pub mod tui;
 pub mod types;
 pub mod worker;
 pub mod worker_identity;
@@ -46,6 +49,7 @@ use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use runtime::ProductionRuntime;
+use logging::structured_fallback_line;
 use startup::run_startup_audits;
 use triage::ensure_profile_for_run;
 use triage_agent_detection::{is_non_interactive, EnvMap};
@@ -257,10 +261,18 @@ pub fn run_with_runtime(
             return Ok(0);
         }
         let completed = run_worker_pool_fsm(&cfg_for_startup, target as usize, cli.task.as_deref())?;
-        runtime.terminal.write_line(&format!(
-            "phase5 worker-fsm complete: target={} completed={}",
-            target, completed
-        ))?;
+        if runtime.terminal.stdin_is_tty() {
+            runtime.terminal.write_line(&format!(
+                "phase5 worker-fsm complete: target={} completed={}",
+                target, completed
+            ))?;
+        } else {
+            runtime.terminal.write_line(&structured_fallback_line(
+                "pool",
+                "complete",
+                &format!("target={target} completed={completed}"),
+            ))?;
+        }
         return Ok(0);
     }
 

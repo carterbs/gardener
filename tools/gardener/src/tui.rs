@@ -144,6 +144,7 @@ pub fn handle_key(key: char) -> &'static str {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoHealthWizardAnswers {
+    pub preferred_parallelism: u32,
     pub validation_command: String,
     pub external_docs_accessible: bool,
     pub additional_context: String,
@@ -160,6 +161,7 @@ pub fn run_repo_health_wizard(
     let mut terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
 
     let mut step = 0usize;
+    let mut parallelism_input = "3".to_string();
     let mut validation = default_validation_command.to_string();
     let mut docs_accessible = true;
     let mut notes = String::new();
@@ -173,16 +175,22 @@ pub fn run_repo_health_wizard(
                     .constraints([Constraint::Length(3), Constraint::Min(4), Constraint::Length(3)])
                     .split(area);
 
-                let title = Paragraph::new("Gardener Setup Wizard (Esc = keep defaults, Enter = next)")
+                let title = Paragraph::new(
+                    "Gardener Setup Wizard (Esc = keep defaults, Enter = next)",
+                )
                     .block(Block::default().borders(Borders::ALL).title("Repo Health"));
                 frame.render_widget(title, chunks[0]);
 
                 let body_text = match step {
                     0 => format!(
+                        "Worker parallelism:\n{}\n\nType a number from 1-32, Enter to continue.",
+                        parallelism_input
+                    ),
+                    1 => format!(
                         "Validation command:\n{}\n\nType to edit, Backspace to delete, Enter to continue.",
                         validation
                     ),
-                    1 => format!(
+                    2 => format!(
                         "Are architecture/quality docs available in repo?\nCurrent: {}\n\nPress 'y' or 'n', Enter to continue.",
                         if docs_accessible { "yes" } else { "no" }
                     ),
@@ -196,9 +204,10 @@ pub fn run_repo_health_wizard(
                 frame.render_widget(body, chunks[1]);
 
                 let footer = Paragraph::new(match step {
-                    0 => "Step 1/3",
-                    1 => "Step 2/3",
-                    _ => "Step 3/3",
+                    0 => "Step 1/4",
+                    1 => "Step 2/4",
+                    2 => "Step 3/4",
+                    _ => "Step 4/4",
                 })
                 .block(Block::default().borders(Borders::ALL));
                 frame.render_widget(footer, chunks[2]);
@@ -213,6 +222,18 @@ pub fn run_repo_health_wizard(
                 0 => match key.code {
                     KeyCode::Enter => step = 1,
                     KeyCode::Backspace => {
+                        parallelism_input.pop();
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_digit() =>
+                    {
+                        parallelism_input.push(c)
+                    }
+                    _ => {}
+                },
+                1 => match key.code {
+                    KeyCode::Enter => step = 2,
+                    KeyCode::Backspace => {
                         validation.pop();
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -220,8 +241,8 @@ pub fn run_repo_health_wizard(
                     }
                     _ => {}
                 },
-                1 => match key.code {
-                    KeyCode::Enter => step = 2,
+                2 => match key.code {
+                    KeyCode::Enter => step = 3,
                     KeyCode::Char('y') | KeyCode::Char('Y') => docs_accessible = true,
                     KeyCode::Char('n') | KeyCode::Char('N') => docs_accessible = false,
                     _ => {}
@@ -242,7 +263,15 @@ pub fn run_repo_health_wizard(
 
     teardown_terminal(terminal)?;
 
+    let preferred_parallelism = parallelism_input
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= 32)
+        .unwrap_or(3);
+
     Ok(RepoHealthWizardAnswers {
+        preferred_parallelism,
         validation_command: if validation.trim().is_empty() {
             default_validation_command.to_string()
         } else {

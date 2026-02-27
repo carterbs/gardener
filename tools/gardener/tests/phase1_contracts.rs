@@ -16,10 +16,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+const TEST_REPO_ROOT: &str = "/tmp/gardener-phase1-contracts";
+
 fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> ProductionRuntime {
     let fs = FakeFileSystem::with_file("/config.toml", config_text);
+    let profile_path = PathBuf::from(git_root.unwrap_or("/repo"))
+        .join(".gardener")
+        .join("repo-intelligence.toml");
     fs.write_string(
-        Path::new("/repo/.gardener/repo-intelligence.toml"),
+        profile_path.as_path(),
         include_str!("fixtures/triage/expected-profiles/phase03-profile.toml"),
     )
     .expect("seed profile");
@@ -138,7 +143,7 @@ fn binary_help_and_prune_smoke() {
 
 #[test]
 fn run_with_runtime_paths_and_errors() {
-    let runtime = runtime_with_config("", true, Some("/repo"));
+    let runtime = runtime_with_config("", true, Some(TEST_REPO_ROOT));
     let prune = vec![
         "gardener".into(),
         "--prune-only".into(),
@@ -189,7 +194,7 @@ fn run_with_runtime_paths_and_errors() {
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 
     let triage = vec!["gardener".into(), "--triage-only".into()];
-    let non_tty_runtime = runtime_with_config("", false, Some("/repo"));
+    let non_tty_runtime = runtime_with_config("", false, Some(TEST_REPO_ROOT));
     let err =
         gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).unwrap_err();
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
@@ -211,11 +216,11 @@ fn run_with_runtime_propagates_write_and_config_errors() {
     for args in [prune, backlog, quality, normal] {
         let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime).unwrap_err();
         assert!(
-            matches!(err, GardenerError::Io(message) if message.contains("terminal write failed"))
+            matches!(err, GardenerError::Io(message) if message.contains("terminal write failed") || message.contains("terminal draw failed"))
         );
     }
 
-    let ok_runtime = runtime_with_config("", true, Some("/repo"));
+    let ok_runtime = runtime_with_config("", true, Some(TEST_REPO_ROOT));
     let missing_cfg = vec![
         "gardener".into(),
         "--prune-only".into(),

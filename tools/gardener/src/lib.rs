@@ -257,7 +257,7 @@ pub fn run_with_runtime(
     if let Some(target) = cli.target.or(default_quit_after) {
         let mut cfg_for_startup = cfg.clone();
         if !cfg_for_startup.execution.test_mode {
-            let _profile = ensure_profile_for_run(
+            let profile = ensure_profile_for_run(
                 runtime,
                 &startup.scope,
                 &cfg_for_startup,
@@ -265,6 +265,7 @@ pub fn run_with_runtime(
                 false,
                 cli.agent.map(Into::into),
             )?;
+            apply_profile_runtime_preferences(&mut cfg_for_startup, profile.as_ref());
         }
         validate_model(&cfg_for_startup.seeding.model)?;
         if !cfg_for_startup.execution.test_mode {
@@ -290,7 +291,7 @@ pub fn run_with_runtime(
             )?;
         }
         if !cfg_for_startup.execution.test_mode {
-            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
         }
         if cfg_for_startup.execution.worker_mode == "stub_complete" {
             let db_path = startup
@@ -311,7 +312,20 @@ pub fn run_with_runtime(
             ))?;
             return Ok(0);
         }
-        let completed = run_worker_pool_fsm(&cfg_for_startup, target as usize, cli.task.as_deref())?;
+        let db_path = startup
+            .scope
+            .repo_root
+            .as_ref()
+            .unwrap_or(&startup.scope.working_dir)
+            .join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(db_path)?;
+        let completed = run_worker_pool_fsm(
+            &cfg_for_startup,
+            &store,
+            runtime.terminal.as_ref(),
+            target as usize,
+            cli.task.as_deref(),
+        )?;
         if runtime.terminal.stdin_is_tty() {
             runtime.terminal.write_line(&format!(
                 "phase5 worker-fsm complete: target={} completed={}",
@@ -341,6 +355,20 @@ pub fn run_with_runtime(
         .write_line("phase1 runtime skeleton initialized")?;
 
     Ok(0)
+}
+
+fn apply_profile_runtime_preferences(
+    cfg: &mut config::AppConfig,
+    profile: Option<&repo_intelligence::RepoIntelligenceProfile>,
+) {
+    let Some(profile) = profile else {
+        return;
+    };
+    if let Some(parallelism) = profile.user_validated.preferred_parallelism {
+        if parallelism > 0 {
+            cfg.orchestrator.parallelism = parallelism;
+        }
+    }
 }
 
 pub fn render_help() -> String {

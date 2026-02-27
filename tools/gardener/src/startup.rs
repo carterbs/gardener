@@ -1,10 +1,13 @@
+use crate::backlog_store::{BacklogStore, NewTask};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
+use crate::priority::Priority;
 use crate::pr_audit::reconcile_open_prs;
 use crate::quality_grades::render_quality_grade_document;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{ProcessRequest, ProductionRuntime};
 use crate::seeding::seed_backlog_if_needed;
+use crate::task_identity::TaskKind;
 use crate::triage::profile_path;
 use crate::types::RuntimeScope;
 use crate::worktree_audit::reconcile_worktrees;
@@ -18,6 +21,7 @@ pub struct StartupSummary {
     pub stale_worktrees_fixed: usize,
     pub pr_collisions_found: usize,
     pub pr_collisions_fixed: usize,
+    pub seeded_tasks_upserted: usize,
 }
 
 pub fn run_startup_audits(
@@ -80,23 +84,56 @@ pub fn run_startup_audits(
         }
     }
 
+    let mut seeded_tasks_upserted = 0usize;
     if run_seeding && !cfg.execution.test_mode {
-        let _ = seed_backlog_if_needed(
+        let seeded = match seed_backlog_if_needed(
             runtime.process_runner.as_ref(),
             scope,
             cfg,
             &profile,
             &quality_doc,
-        );
+        ) {
+            Ok(tasks) => tasks,
+            Err(err) => {
+                runtime
+                    .terminal
+                    .write_line(&format!("WARN backlog seeding failed: {err}"))?;
+                Vec::new()
+            }
+        };
+        if !seeded.is_empty() {
+            let db_path = scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&scope.working_dir)
+                .join(".cache/gardener/backlog.sqlite");
+            let store = BacklogStore::open(db_path)?;
+            for task in seeded {
+                let row = store.upsert_task(NewTask {
+                    kind: TaskKind::QualityGap,
+                    title: task.title,
+                    details: task.details,
+                    scope_key: profile.agent_readiness.primary_gap.clone(),
+                    priority: Priority::P1,
+                    source: "seed_runner_v1".to_string(),
+                    related_pr: None,
+                    related_branch: None,
+                })?;
+                if !row.task_id.is_empty() {
+                    seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
+                }
+            }
+        }
     }
 
     runtime.terminal.write_line(&format!(
-        "startup health summary: quality={} stale_worktrees={}/{} pr_collisions={}/{}",
+        "startup health summary: quality={} stale_worktrees={}/{} pr_collisions={}/{} seeded_tasks={}",
         quality_path.display(),
         wt.stale_found,
         wt.stale_fixed,
         prs.collisions_found,
-        prs.collisions_fixed
+        prs.collisions_fixed,
+        seeded_tasks_upserted
     ))?;
 
     Ok(StartupSummary {
@@ -106,5 +143,6 @@ pub fn run_startup_audits(
         stale_worktrees_fixed: wt.stale_fixed,
         pr_collisions_found: prs.collisions_found,
         pr_collisions_fixed: prs.collisions_fixed,
+        seeded_tasks_upserted,
     })
 }

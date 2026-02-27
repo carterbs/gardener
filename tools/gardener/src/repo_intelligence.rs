@@ -43,6 +43,8 @@ pub struct UserValidated {
     pub validation_command: String,
     pub coverage_grade_override: String,
     pub additional_context: String,
+    #[serde(default)]
+    pub preferred_parallelism: Option<u32>,
     pub corrections_made: u32,
     pub validated_at: String,
 }
@@ -185,6 +187,7 @@ pub fn build_profile(
             validation_command,
             coverage_grade_override: String::new(),
             additional_context: String::new(),
+            preferred_parallelism: None,
             corrections_made: 0,
             validated_at: now,
         },

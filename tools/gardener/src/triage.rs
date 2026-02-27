@@ -91,10 +91,11 @@ pub fn run_triage(
     let interview = run_interview(
         runtime.terminal.as_ref(),
         &discovery,
+        cfg.orchestrator.parallelism,
         &cfg.validation.command,
     )?;
 
-    let profile = build_profile(
+    let mut profile = build_profile(
         runtime.clock.as_ref(),
         &scope.working_dir,
         repo_root,
@@ -107,6 +108,9 @@ pub fn run_triage(
         detected.codex_signals,
         interview.validation_command,
     );
+    profile.user_validated.additional_context = interview.additional_context;
+    profile.user_validated.external_docs_accessible = interview.external_docs_accessible;
+    profile.user_validated.preferred_parallelism = interview.preferred_parallelism;
     let path = profile_path(scope, cfg);
     write_profile(runtime.file_system.as_ref(), &path, &profile)?;
     Ok(profile)

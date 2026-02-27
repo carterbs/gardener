@@ -5,6 +5,7 @@ use crate::triage_discovery::DiscoveryAssessment;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterviewResult {
+    pub preferred_parallelism: Option<u32>,
     pub validation_command: String,
     pub additional_context: String,
     pub external_docs_accessible: bool,
@@ -13,6 +14,7 @@ pub struct InterviewResult {
 pub fn run_interview(
     terminal: &dyn Terminal,
     discovery: &DiscoveryAssessment,
+    default_parallelism: u32,
     default_validation_command: &str,
 ) -> Result<InterviewResult, GardenerError> {
     terminal.write_line("━━━ Agent Steering ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
@@ -41,17 +43,21 @@ pub fn run_interview(
     ))?;
     terminal.write_line("━━━ Anything Else? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
 
+    let mut preferred_parallelism = Some(default_parallelism);
     let mut validation_command = default_validation_command.to_string();
     let mut additional_context = String::new();
     let mut external_docs_accessible = true;
-    if needs_repo_health_wizard(discovery) {
+    if terminal.stdin_is_tty() {
         terminal.write_line("━━━ Repo Health Setup Wizard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
-        terminal.write_line(
-            "Discovery could not confirm repo-health docs and guardrails automatically.",
-        )?;
+        if needs_repo_health_wizard(discovery) {
+            terminal.write_line(
+                "Discovery could not confirm repo-health docs and guardrails automatically.",
+            )?;
+        }
         terminal.write_line("Let's capture a few basics so Gardener can bootstrap safely.")?;
         match run_repo_health_wizard(default_validation_command) {
             Ok(answers) => {
+                preferred_parallelism = Some(answers.preferred_parallelism);
                 validation_command = answers.validation_command;
                 external_docs_accessible = answers.external_docs_accessible;
                 additional_context = answers.additional_context;
@@ -65,6 +71,7 @@ pub fn run_interview(
     }
 
     Ok(InterviewResult {
+        preferred_parallelism,
         validation_command,
         additional_context,
         external_docs_accessible,

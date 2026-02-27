@@ -3,10 +3,10 @@ use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::structured_fallback_line;
 use crate::runtime::ProductionRuntime;
+use crate::runtime::Terminal;
 use crate::scheduler::{SchedulerEngine, SchedulerRunSummary};
 use crate::startup::refresh_quality_report;
-use crate::tui::{render_dashboard, render_report_view, BacklogView, QueueStats, WorkerRow};
-use crate::runtime::Terminal;
+use crate::tui::{BacklogView, QueueStats, WorkerRow};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 
@@ -47,25 +47,13 @@ pub fn run_worker_pool_fsm(
     render(terminal, &workers, &dashboard_snapshot(store)?)?;
 
     while completed < target {
-        handle_hotkeys(
-            runtime,
-            scope,
-            cfg,
-            terminal,
-            &mut report_visible,
-        )?;
+        handle_hotkeys(runtime, scope, cfg, terminal, &mut report_visible)?;
         if report_visible {
             continue;
         }
         let mut claimed_any = false;
         for idx in 0..workers.len() {
-            handle_hotkeys(
-                runtime,
-                scope,
-                cfg,
-                terminal,
-                &mut report_visible,
-            )?;
+            handle_hotkeys(runtime, scope, cfg, terminal, &mut report_visible)?;
             if report_visible {
                 break;
             }
@@ -74,10 +62,8 @@ pub fn run_worker_pool_fsm(
             }
 
             let worker_id = workers[idx].worker_id.clone();
-            let claimed = store.claim_next(
-                &worker_id,
-                cfg.scheduler.lease_timeout_seconds as i64,
-            )?;
+            let claimed =
+                store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
             let Some(task) = claimed else {
                 workers[idx].state = "idle".to_string();
                 workers[idx].task_title = "idle".to_string();
@@ -138,14 +124,14 @@ fn handle_hotkeys(
         return Ok(());
     }
     if let Some(key) = terminal.poll_key(10)? {
-        match key {
-            'v' => *report_visible = true,
-            'g' => {
+        match report_hotkey_action(key) {
+            ReportHotkeyAction::ShowReport => *report_visible = true,
+            ReportHotkeyAction::RegenerateReport => {
                 let _ = refresh_quality_report(runtime, cfg, scope, true)?;
                 *report_visible = true;
             }
-            'b' => *report_visible = false,
-            _ => {}
+            ReportHotkeyAction::HideReport => *report_visible = false,
+            ReportHotkeyAction::Noop => {}
         }
     }
     if *report_visible {
@@ -155,10 +141,26 @@ fn handle_hotkeys(
         } else {
             "report not found".to_string()
         };
-        let frame = render_report_view(&report_path.display().to_string(), &report, 120, 30);
-        terminal.draw(&frame)?;
+        terminal.draw_report(&report_path.display().to_string(), &report)?;
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportHotkeyAction {
+    ShowReport,
+    RegenerateReport,
+    HideReport,
+    Noop,
+}
+
+fn report_hotkey_action(key: char) -> ReportHotkeyAction {
+    match key {
+        'v' => ReportHotkeyAction::ShowReport,
+        'g' => ReportHotkeyAction::RegenerateReport,
+        'b' => ReportHotkeyAction::HideReport,
+        _ => ReportHotkeyAction::Noop,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +183,8 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
     for task in tasks {
         match task.status {
             crate::backlog_store::TaskStatus::Ready => stats.ready += 1,
-            crate::backlog_store::TaskStatus::Leased | crate::backlog_store::TaskStatus::InProgress => {
+            crate::backlog_store::TaskStatus::Leased
+            | crate::backlog_store::TaskStatus::InProgress => {
                 stats.active += 1;
                 backlog.in_progress.push(format!(
                     "INP {} {} {}",
@@ -216,8 +219,7 @@ fn render(
     snapshot: &DashboardSnapshot,
 ) -> Result<(), GardenerError> {
     if terminal.stdin_is_tty() {
-        let frame = render_dashboard(workers, &snapshot.stats, &snapshot.backlog, 120, 30);
-        terminal.draw(&frame)?;
+        terminal.draw_dashboard(workers, &snapshot.stats, &snapshot.backlog)?;
     } else {
         for row in workers {
             terminal.write_line(&structured_fallback_line(
@@ -240,5 +242,180 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
         path
     } else {
         scope.working_dir.join(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{report_hotkey_action, run_worker_pool_fsm, ReportHotkeyAction};
+    use crate::backlog_store::{BacklogStore, NewTask};
+    use crate::config::AppConfig;
+    use crate::hotkeys::{REPORT_BINDINGS, WORKER_POOL_HOTKEYS};
+    use crate::priority::Priority;
+    use crate::runtime::{
+        FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
+    };
+    use crate::task_identity::TaskKind;
+    use crate::types::RuntimeScope;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    fn seed_task(store: &BacklogStore, title: &str) {
+        let _ = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: title.to_string(),
+                details: "details".to_string(),
+                scope_key: "scope".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })
+            .expect("seed task");
+    }
+
+    fn test_scope(dir: &TempDir) -> RuntimeScope {
+        RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        }
+    }
+
+    fn write_file(path: &PathBuf, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent");
+        }
+        std::fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn report_hotkey_actions_cover_report_bindings() {
+        for binding in REPORT_BINDINGS {
+            let action = report_hotkey_action(binding.key);
+            assert_ne!(action, ReportHotkeyAction::Noop);
+        }
+    }
+
+    #[test]
+    fn report_hotkey_actions_match_contract() {
+        assert_eq!(report_hotkey_action('v'), ReportHotkeyAction::ShowReport);
+        assert_eq!(
+            report_hotkey_action('g'),
+            ReportHotkeyAction::RegenerateReport
+        );
+        assert_eq!(report_hotkey_action('b'), ReportHotkeyAction::HideReport);
+        assert_eq!(report_hotkey_action('x'), ReportHotkeyAction::Noop);
+    }
+
+    #[test]
+    fn worker_pool_hotkeys_have_behavioral_coverage() {
+        // hotkey:v
+        assert_eq!(report_hotkey_action('v'), ReportHotkeyAction::ShowReport);
+        // hotkey:g
+        assert_eq!(
+            report_hotkey_action('g'),
+            ReportHotkeyAction::RegenerateReport
+        );
+        // hotkey:b
+        assert_eq!(report_hotkey_action('b'), ReportHotkeyAction::HideReport);
+        for key in WORKER_POOL_HOTKEYS {
+            assert_ne!(report_hotkey_action(key), ReportHotkeyAction::Noop);
+        }
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_handles_v_and_b_with_report_draws() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "hotkey task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.triage.output_path = dir
+            .path()
+            .join(".gardener/repo-intelligence.toml")
+            .display()
+            .to_string();
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        write_file(
+            &dir.path().join(".gardener/repo-intelligence.toml"),
+            include_str!("../tests/fixtures/triage/expected-profiles/phase03-profile.toml"),
+        );
+        write_file(&dir.path().join(".gardener/quality.md"), "existing report");
+
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['v', 'b']);
+
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        assert_eq!(completed, 1);
+        assert!(!terminal.report_draws().is_empty());
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_handles_g_and_regenerates_report() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "regenerate report task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.triage.output_path = dir
+            .path()
+            .join(".gardener/repo-intelligence.toml")
+            .display()
+            .to_string();
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        write_file(
+            &dir.path().join(".gardener/repo-intelligence.toml"),
+            include_str!("../tests/fixtures/triage/expected-profiles/phase03-profile.toml"),
+        );
+        write_file(&dir.path().join(".gardener/quality.md"), "OLD_MARKER");
+
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['g', 'b']);
+
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        assert_eq!(completed, 1);
+        let report = std::fs::read_to_string(dir.path().join(".gardener/quality.md"))
+            .expect("read regenerated report");
+        assert!(!report.contains("OLD_MARKER"));
+        assert!(!terminal.report_draws().is_empty());
     }
 }

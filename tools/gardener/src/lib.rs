@@ -6,6 +6,7 @@ pub mod errors;
 pub mod fsm;
 pub mod gh;
 pub mod git;
+pub mod hotkeys;
 pub mod learning_loop;
 pub mod log_retention;
 pub mod logging;
@@ -14,11 +15,11 @@ pub mod postmerge_analysis;
 pub mod postmortem;
 pub mod pr_audit;
 pub mod priority;
-pub mod protocol;
 pub mod prompt_context;
 pub mod prompt_knowledge;
 pub mod prompt_registry;
 pub mod prompts;
+pub mod protocol;
 pub mod quality_domain_catalog;
 pub mod quality_evidence;
 pub mod quality_grades;
@@ -42,19 +43,19 @@ pub mod worker_pool;
 pub mod worktree;
 pub mod worktree_audit;
 
-use backlog_store::BacklogStore;
-use backlog_snapshot::export_markdown_snapshot;
 use agent::factory::AdapterFactory;
 use agent::{probe_and_persist, validate_model};
+use backlog_snapshot::export_markdown_snapshot;
+use backlog_store::BacklogStore;
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
-use runtime::ProductionRuntime;
 use logging::structured_fallback_line;
+use runtime::ProductionRuntime;
 use startup::run_startup_audits;
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
-use tui::{render_dashboard, BacklogView, QueueStats, WorkerRow};
+use tui::{BacklogView, QueueStats, WorkerRow};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
 use worker_pool::{run_worker_pool_fsm, run_worker_pool_stub};
 
@@ -124,6 +125,7 @@ pub fn run_with_runtime(
     cwd: &std::path::Path,
     runtime: &ProductionRuntime,
 ) -> Result<i32, GardenerError> {
+    let _ui_guard = UiGuard::new(runtime.terminal.as_ref());
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) => match error.kind() {
@@ -229,7 +231,10 @@ pub fn run_with_runtime(
             .as_ref()
             .unwrap_or(&startup.scope.working_dir)
             .join(".cache/gardener/backlog.sqlite");
-        let snapshot_path = startup.scope.working_dir.join(".cache/gardener/backlog-snapshot.md");
+        let snapshot_path = startup
+            .scope
+            .working_dir
+            .join(".cache/gardener/backlog-snapshot.md");
         if let Some(parent) = snapshot_path.parent() {
             runtime.file_system.create_dir_all(parent)?;
         }
@@ -421,8 +426,23 @@ fn draw_boot_stage(
         in_progress: vec![format!("INP SYS {stage}")],
         queued: vec![],
     };
-    let frame = render_dashboard(&workers, &stats, &backlog, 120, 30);
-    runtime.terminal.draw(&frame)
+    runtime.terminal.draw_dashboard(&workers, &stats, &backlog)
+}
+
+struct UiGuard<'a> {
+    terminal: &'a dyn runtime::Terminal,
+}
+
+impl<'a> UiGuard<'a> {
+    fn new(terminal: &'a dyn runtime::Terminal) -> Self {
+        Self { terminal }
+    }
+}
+
+impl Drop for UiGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.terminal.close_ui();
+    }
 }
 
 fn apply_profile_runtime_preferences(

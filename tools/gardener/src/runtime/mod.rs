@@ -1,4 +1,8 @@
 use crate::errors::GardenerError;
+use crate::tui::{
+    close_live_terminal, draw_dashboard_live, draw_report_live, render_dashboard, BacklogView,
+    QueueStats, WorkerRow,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -46,6 +50,22 @@ pub trait Terminal: Send + Sync {
     fn stdin_is_tty(&self) -> bool;
     fn write_line(&self, line: &str) -> Result<(), GardenerError>;
     fn draw(&self, frame: &str) -> Result<(), GardenerError>;
+    fn draw_dashboard(
+        &self,
+        workers: &[WorkerRow],
+        stats: &QueueStats,
+        backlog: &BacklogView,
+    ) -> Result<(), GardenerError> {
+        let frame = render_dashboard(workers, stats, backlog, 120, 30);
+        self.draw(&frame)
+    }
+    fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
+        let frame = crate::tui::render_report_view(report_path, report, 120, 30);
+        self.draw(&frame)
+    }
+    fn close_ui(&self) -> Result<(), GardenerError> {
+        Ok(())
+    }
     fn poll_key(&self, _timeout_ms: u64) -> Result<Option<char>, GardenerError> {
         Ok(None)
     }
@@ -169,7 +189,14 @@ pub struct ProductionTerminal;
 
 impl Terminal for ProductionTerminal {
     fn stdin_is_tty(&self) -> bool {
+        if std::env::var("GARDENER_FORCE_TTY")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            return true;
+        }
         std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || std::io::IsTerminal::is_terminal(&std::io::stdout())
     }
 
     fn write_line(&self, line: &str) -> Result<(), GardenerError> {
@@ -180,6 +207,23 @@ impl Terminal for ProductionTerminal {
 
     fn draw(&self, frame: &str) -> Result<(), GardenerError> {
         self.write_line(frame)
+    }
+
+    fn draw_dashboard(
+        &self,
+        workers: &[WorkerRow],
+        stats: &QueueStats,
+        backlog: &BacklogView,
+    ) -> Result<(), GardenerError> {
+        draw_dashboard_live(workers, stats, backlog)
+    }
+
+    fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
+        draw_report_live(report_path, report)
+    }
+
+    fn close_ui(&self) -> Result<(), GardenerError> {
+        close_live_terminal()
     }
 
     fn poll_key(&self, timeout_ms: u64) -> Result<Option<char>, GardenerError> {
@@ -193,6 +237,13 @@ impl Terminal for ProductionTerminal {
         }
         match crossterm::event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
             crossterm::event::Event::Key(key) => match key.code {
+                crossterm::event::KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    Ok(Some('q'))
+                }
                 crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
             },
@@ -337,6 +388,9 @@ pub struct FakeTerminal {
     pub is_tty: bool,
     writes: Arc<Mutex<Vec<String>>>,
     draws: Arc<Mutex<Vec<String>>>,
+    dashboard_draws: Arc<Mutex<usize>>,
+    report_draws: Arc<Mutex<Vec<(String, String)>>>,
+    key_queue: Arc<Mutex<Vec<char>>>,
 }
 
 impl FakeTerminal {
@@ -353,6 +407,18 @@ impl FakeTerminal {
 
     pub fn drawn_frames(&self) -> Vec<String> {
         self.draws.lock().expect("draw lock").clone()
+    }
+
+    pub fn dashboard_draw_count(&self) -> usize {
+        *self.dashboard_draws.lock().expect("dashboard draw lock")
+    }
+
+    pub fn report_draws(&self) -> Vec<(String, String)> {
+        self.report_draws.lock().expect("report draw lock").clone()
+    }
+
+    pub fn enqueue_keys(&self, keys: impl IntoIterator<Item = char>) {
+        self.key_queue.lock().expect("key lock").extend(keys);
     }
 }
 
@@ -375,6 +441,39 @@ impl Terminal for FakeTerminal {
             .expect("draw lock")
             .push(frame.to_string());
         Ok(())
+    }
+
+    fn draw_dashboard(
+        &self,
+        workers: &[WorkerRow],
+        stats: &QueueStats,
+        backlog: &BacklogView,
+    ) -> Result<(), GardenerError> {
+        let frame = render_dashboard(workers, stats, backlog, 120, 30);
+        self.draw(&frame)?;
+        let mut count = self.dashboard_draws.lock().expect("dashboard draw lock");
+        *count = count.saturating_add(1);
+        Ok(())
+    }
+
+    fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
+        self.report_draws
+            .lock()
+            .expect("report draw lock")
+            .push((report_path.to_string(), report.to_string()));
+        let frame = crate::tui::render_report_view(report_path, report, 120, 30);
+        self.draw(&frame)
+    }
+
+    fn poll_key(&self, _timeout_ms: u64) -> Result<Option<char>, GardenerError> {
+        if !self.is_tty {
+            return Ok(None);
+        }
+        let mut queue = self.key_queue.lock().expect("key lock");
+        if queue.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(queue.remove(0)))
     }
 }
 

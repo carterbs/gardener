@@ -179,7 +179,9 @@ mod tests {
     fn transition_validator_rejects_invalid_edges() {
         let err = validate_transition(WorkerState::Understand, WorkerState::Merging)
             .expect_err("must reject");
-        assert!(matches!(err, GardenerError::InvalidConfig(message) if message.contains("illegal transition")));
+        assert!(
+            matches!(err, GardenerError::InvalidConfig(message) if message.contains("illegal transition"))
+        );
     }
 
     #[test]

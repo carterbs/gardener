@@ -165,7 +165,9 @@ mod tests {
         let adapter = ClaudeAdapter;
         let mut ctx = context();
         ctx.cancel_requested = true;
-        let err = adapter.execute(&runner, &ctx, "prompt").expect_err("canceled");
+        let err = adapter
+            .execute(&runner, &ctx, "prompt")
+            .expect_err("canceled");
         assert!(format!("{err}").contains("canceled"));
         assert_eq!(runner.kills(), vec![0]);
     }

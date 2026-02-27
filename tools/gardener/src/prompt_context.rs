@@ -171,14 +171,31 @@ mod tests {
         let items = vec![
             ctx("task_packet", "a", "h3", "task", 100, "task line"),
             ctx("repo_context", "b", "h2", "repo", 90, "repo line"),
-            ctx("evidence_context", "c", "h4", "evidence", 80, "evidence line"),
+            ctx(
+                "evidence_context",
+                "c",
+                "h4",
+                "evidence",
+                80,
+                "evidence line",
+            ),
             ctx("execution_context", "d", "h1", "exec", 70, "execution line"),
-            ctx("knowledge_context", "e", "h5", "knowledge", 60, "knowledge line"),
+            ctx(
+                "knowledge_context",
+                "e",
+                "h5",
+                "knowledge",
+                60,
+                "knowledge line",
+            ),
         ];
 
         let p1 = build_prompt_packet(WorkerState::Doing, items.clone(), 1000).expect("packet");
         let p2 = build_prompt_packet(WorkerState::Doing, items, 1000).expect("packet");
-        assert_eq!(p1.context_manifest.manifest_hash, p2.context_manifest.manifest_hash);
+        assert_eq!(
+            p1.context_manifest.manifest_hash,
+            p2.context_manifest.manifest_hash
+        );
         assert!(!p1.task_packet.is_empty());
         assert!(!p1.repo_context.is_empty());
         assert!(!p1.evidence_context.is_empty());

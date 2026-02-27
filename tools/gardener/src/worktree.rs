@@ -25,11 +25,17 @@ impl<'a> WorktreeClient<'a> {
     pub fn list(&self) -> Result<Vec<WorktreeEntry>, GardenerError> {
         let out = self.runner.run(ProcessRequest {
             program: "git".to_string(),
-            args: vec!["worktree".to_string(), "list".to_string(), "--porcelain".to_string()],
+            args: vec![
+                "worktree".to_string(),
+                "list".to_string(),
+                "--porcelain".to_string(),
+            ],
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
-            return Err(GardenerError::Process("git worktree list failed".to_string()));
+            return Err(GardenerError::Process(
+                "git worktree list failed".to_string(),
+            ));
         }
         parse_porcelain(&out.stdout)
     }
@@ -60,10 +66,19 @@ impl<'a> WorktreeClient<'a> {
         Ok(())
     }
 
-    pub fn remove_recreate_if_stale_empty(&self, path: &Path, branch: &str) -> Result<(), GardenerError> {
+    pub fn remove_recreate_if_stale_empty(
+        &self,
+        path: &Path,
+        branch: &str,
+    ) -> Result<(), GardenerError> {
         let remove = self.runner.run(ProcessRequest {
             program: "git".to_string(),
-            args: vec!["worktree".to_string(), "remove".to_string(), "--force".to_string(), path.display().to_string()],
+            args: vec![
+                "worktree".to_string(),
+                "remove".to_string(),
+                "--force".to_string(),
+                path.display().to_string(),
+            ],
             cwd: Some(self.cwd.clone()),
         })?;
         if remove.exit_code != 0 {
@@ -75,11 +90,18 @@ impl<'a> WorktreeClient<'a> {
     pub fn cleanup_on_completion(&self, path: &Path) -> Result<(), GardenerError> {
         let out = self.runner.run(ProcessRequest {
             program: "git".to_string(),
-            args: vec!["worktree".to_string(), "remove".to_string(), "--force".to_string(), path.display().to_string()],
+            args: vec![
+                "worktree".to_string(),
+                "remove".to_string(),
+                "--force".to_string(),
+                path.display().to_string(),
+            ],
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
-            return Err(GardenerError::Process("worktree cleanup failed".to_string()));
+            return Err(GardenerError::Process(
+                "worktree cleanup failed".to_string(),
+            ));
         }
         Ok(())
     }

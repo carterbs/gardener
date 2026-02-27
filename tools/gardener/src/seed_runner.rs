@@ -4,7 +4,6 @@ use crate::errors::GardenerError;
 use crate::runtime::ProcessRunner;
 use crate::types::{AgentKind, RuntimeScope, WorkerState};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeedTask {
@@ -41,8 +40,12 @@ pub fn run_legacy_seed_runner_v1(
             prompt_version: "seeding-v1".to_string(),
             context_manifest_hash: "seeding-context".to_string(),
             knowledge_refs: vec![],
-            output_schema: Some(PathBuf::from("tools/gardener/schemas/seeding.json")),
-            output_file: Some(scope.working_dir.join(".cache/gardener/seed-last-message.json")),
+            output_schema: None,
+            output_file: Some(
+                scope
+                    .working_dir
+                    .join(".cache/gardener/seed-last-message.json"),
+            ),
             permissive_mode: true,
             max_turns: Some(12),
             cancel_requested: false,

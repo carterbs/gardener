@@ -107,9 +107,6 @@ mod tests {
     #[test]
     fn fallback_line_is_deterministic() {
         let line = structured_fallback_line("w1", "doing", "hello\nworld");
-        assert_eq!(
-            line,
-            "worker_id=w1 state=doing message=hello\\nworld "
-        );
+        assert_eq!(line, "worker_id=w1 state=doing message=hello\\nworld ");
     }
 }

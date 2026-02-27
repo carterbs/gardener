@@ -1,8 +1,8 @@
 use crate::backlog_store::{BacklogStore, NewTask};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
-use crate::priority::Priority;
 use crate::pr_audit::reconcile_open_prs;
+use crate::priority::Priority;
 use crate::quality_grades::render_quality_grade_document;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{ProcessRequest, ProductionRuntime};
@@ -43,13 +43,16 @@ pub fn refresh_quality_report(
     let stamp_path = quality_stamp_path(&quality_path);
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
-        || report_stamp_is_stale(runtime, &stamp_path)?;
+        || report_stamp_is_stale(runtime, cfg, &stamp_path)?;
     if should_regen {
-        let quality_doc = render_quality_grade_document(&profile_loc.display().to_string(), &profile);
+        let quality_doc =
+            render_quality_grade_document(&profile_loc.display().to_string(), &profile);
         if let Some(parent) = quality_path.parent() {
             runtime.file_system.create_dir_all(parent)?;
         }
-        runtime.file_system.write_string(&quality_path, &quality_doc)?;
+        runtime
+            .file_system
+            .write_string(&quality_path, &quality_doc)?;
         let now = runtime
             .clock
             .now()
@@ -114,6 +117,7 @@ pub fn run_startup_audits(
 
     let mut seeded_tasks_upserted = 0usize;
     if run_seeding && !cfg.execution.test_mode {
+        let fallback_target = cfg.orchestrator.parallelism.max(3) as usize;
         let seeded = match seed_backlog_if_needed(
             runtime.process_runner.as_ref(),
             scope,
@@ -158,22 +162,11 @@ pub fn run_startup_audits(
                 .unwrap_or(&scope.working_dir)
                 .join(".cache/gardener/backlog.sqlite");
             let store = BacklogStore::open(db_path)?;
-            let bootstrap = store.upsert_task(NewTask {
-                kind: TaskKind::QualityGap,
-                title: format!(
-                    "Bootstrap backlog for {}",
-                    profile.agent_readiness.primary_gap
-                ),
-                details: "Seeding returned no tasks; investigate current repo gaps and create follow-up tasks."
-                    .to_string(),
-                scope_key: profile.agent_readiness.primary_gap.clone(),
-                priority: Priority::P1,
-                source: "seed_runner_v1_fallback".to_string(),
-                related_pr: None,
-                related_branch: None,
-            })?;
-            if !bootstrap.task_id.is_empty() {
-                seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
+            for task in fallback_seed_tasks(&profile.agent_readiness.primary_gap, fallback_target) {
+                let bootstrap = store.upsert_task(task)?;
+                if !bootstrap.task_id.is_empty() {
+                    seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
+                }
             }
         }
     }
@@ -205,8 +198,42 @@ fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("{}.stamp", quality_path.display()))
 }
 
+fn fallback_seed_tasks(primary_gap: &str, target: usize) -> Vec<NewTask> {
+    let templates = [
+        (
+            "Bootstrap backlog",
+            "Seed runner returned no tasks; map the repo and identify concrete work items.",
+        ),
+        (
+            "Stabilize validation loop",
+            "Audit failing validations and convert findings into prioritized remediation tasks.",
+        ),
+        (
+            "Rank quality risks",
+            "Review quality grades and convert the top risks into actionable backlog items.",
+        ),
+    ];
+    let count = target.max(3);
+    (0..count)
+        .map(|idx| {
+            let (title, details) = templates[idx % templates.len()];
+            NewTask {
+                kind: TaskKind::QualityGap,
+                title: format!("{title} for {primary_gap} #{}", idx + 1),
+                details: details.to_string(),
+                scope_key: primary_gap.to_string(),
+                priority: Priority::P1,
+                source: "seed_runner_v1_fallback".to_string(),
+                related_pr: None,
+                related_branch: None,
+            }
+        })
+        .collect()
+}
+
 fn report_stamp_is_stale(
     runtime: &ProductionRuntime,
+    cfg: &AppConfig,
     stamp_path: &std::path::Path,
 ) -> Result<bool, GardenerError> {
     if !runtime.file_system.exists(stamp_path) {
@@ -220,5 +247,23 @@ fn report_stamp_is_stale(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    Ok(now.saturating_sub(stamp) > REPORT_TTL_SECONDS)
+    let ttl_seconds = cfg
+        .quality_report
+        .stale_after_days
+        .saturating_mul(24 * 60 * 60)
+        .max(REPORT_TTL_SECONDS);
+    Ok(now.saturating_sub(stamp) > ttl_seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fallback_seed_tasks;
+
+    #[test]
+    fn fallback_seed_tasks_generate_multiple_unique_items() {
+        let tasks = fallback_seed_tasks("agent_steering", 3);
+        assert_eq!(tasks.len(), 3);
+        assert_ne!(tasks[0].title, tasks[1].title);
+        assert_ne!(tasks[1].title, tasks[2].title);
+    }
 }

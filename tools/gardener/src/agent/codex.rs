@@ -39,7 +39,8 @@ impl AgentAdapter for CodexAdapter {
             supports_json: text.contains("--json"),
             supports_stream_json: false,
             supports_output_schema: text.contains("--output-schema"),
-            supports_output_last_message: text.contains("--output-last-message") || text.contains(" -o "),
+            supports_output_last_message: text.contains("--output-last-message")
+                || text.contains(" -o "),
             supports_max_turns: text.contains("--max-turns"),
             supports_listen_stdio: text.contains("--listen stdio://") || text.contains("websocket"),
             supports_stdin_prompt: true,
@@ -50,7 +51,7 @@ impl AgentAdapter for CodexAdapter {
         &self,
         process_runner: &dyn ProcessRunner,
         context: &AdapterContext,
-        _prompt: &str,
+        prompt: &str,
     ) -> Result<StepResult, GardenerError> {
         validate_model(&context.model)?;
 
@@ -76,7 +77,7 @@ impl AgentAdapter for CodexAdapter {
             args.push(schema.display().to_string());
         }
 
-        args.push("-".to_string());
+        args.push(prompt.to_string());
 
         let handle = process_runner.spawn(ProcessRequest {
             program: "codex".to_string(),
@@ -92,6 +93,9 @@ impl AgentAdapter for CodexAdapter {
         }
 
         let output = process_runner.wait(handle)?;
+        if output.exit_code != 0 {
+            return Err(GardenerError::Process(output.stderr));
+        }
         let raw_events = parse_jsonl(&output.stdout)?;
         let events = raw_events.iter().map(map_codex_event).collect::<Vec<_>>();
 
@@ -173,7 +177,9 @@ mod tests {
         assert_eq!(result.terminal, AgentTerminal::Success);
         assert_eq!(result.payload["ok"], true);
         assert_eq!(runner.spawned()[0].program, "codex");
-        assert!(runner.spawned()[0].args.contains(&"--output-schema".to_string()));
+        assert!(runner.spawned()[0]
+            .args
+            .contains(&"--output-schema".to_string()));
     }
 
     #[test]
@@ -219,7 +225,9 @@ mod tests {
         let adapter = CodexAdapter;
         let mut ctx = context();
         ctx.cancel_requested = true;
-        let err = adapter.execute(&runner, &ctx, "prompt").expect_err("canceled");
+        let err = adapter
+            .execute(&runner, &ctx, "prompt")
+            .expect_err("canceled");
         assert!(format!("{err}").contains("canceled"));
         assert_eq!(runner.kills(), vec![0]);
     }

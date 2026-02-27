@@ -982,7 +982,10 @@ mod tests {
     fn sanitize_for_branch_strips_colons_and_other_invalid_chars() {
         // Colons in task IDs (e.g. "manual:tui:GARD-03") caused git to reject
         // the branch name with "not a valid branch name".
-        assert_eq!(sanitize_for_branch("manual:tui:GARD-03"), "manual-tui-GARD-03");
+        assert_eq!(
+            sanitize_for_branch("manual:tui:GARD-03"),
+            "manual-tui-GARD-03"
+        );
         assert_eq!(sanitize_for_branch("simple"), "simple");
         assert_eq!(sanitize_for_branch("abc-123"), "abc-123");
         // Spaces, dots, and slashes are also invalid in branch name components.
@@ -1005,8 +1008,15 @@ mod tests {
         );
         assert_eq!(branch, "gardener/worker-1-manual-tui-GARD-03");
 
-        let path = worktree_path_for(std::path::Path::new("/repo"), "worker-1", "manual:tui:GARD-03");
+        let path = worktree_path_for(
+            std::path::Path::new("/repo"),
+            "worker-1",
+            "manual:tui:GARD-03",
+        );
         let dir_name = path.file_name().unwrap().to_str().unwrap();
-        assert!(!dir_name.contains(':'), "path component must not contain colon: {dir_name}");
+        assert!(
+            !dir_name.contains(':'),
+            "path component must not contain colon: {dir_name}"
+        );
     }
 }

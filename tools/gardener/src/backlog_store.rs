@@ -429,7 +429,11 @@ impl BacklogStore {
                     "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated, \
                             lease_owner, lease_expires_at, source, related_pr, related_branch, attempt_count, created_at \
                      FROM backlog_tasks \
-                     ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END, last_updated ASC, created_at ASC",
+                     ORDER BY
+                        CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                        CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                        last_updated ASC,
+                        created_at ASC",
                 )
                 .map_err(db_err)?;
             let rows = statement
@@ -615,7 +619,11 @@ fn claim_next_in_tx(
                 SELECT task_id
                 FROM backlog_tasks
                 WHERE status = 'ready'
-                ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END, last_updated ASC, created_at ASC
+                ORDER BY
+                    CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                    CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                    last_updated ASC,
+                    created_at ASC
                 LIMIT 1
             )
             UPDATE backlog_tasks
@@ -884,6 +892,39 @@ mod tests {
         assert_eq!(first.title, "task-2");
         assert_eq!(second.title, "task-3");
         assert_eq!(third.title, "task-1");
+    }
+
+    #[test]
+    fn claim_prioritizes_retries_within_same_priority() {
+        let store = temp_store();
+        let first = store
+            .upsert_task(task("retry-me-first", Priority::P1))
+            .expect("seed retry");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let _second = store
+            .upsert_task(task("fresh-task", Priority::P1))
+            .expect("seed fresh");
+
+        let leased = store
+            .claim_next("worker-a", 60)
+            .expect("claim retry")
+            .expect("retry row");
+        assert_eq!(leased.task_id, first.task_id);
+        let transitioned = store
+            .mark_in_progress(&first.task_id, "worker-a")
+            .expect("mark in progress");
+        assert!(transitioned);
+        let recovered = store
+            .recover_stale_leases(i64::MAX)
+            .expect("recover stale");
+        assert_eq!(recovered, 1);
+
+        let claimed = store
+            .claim_next("worker-b", 60)
+            .expect("claim after retry")
+            .expect("task");
+        assert_eq!(claimed.task_id, first.task_id);
+        assert_eq!(claimed.attempt_count, 2);
     }
 
     #[test]

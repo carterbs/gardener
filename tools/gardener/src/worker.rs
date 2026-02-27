@@ -1,4 +1,5 @@
 use crate::agent::factory::AdapterFactory;
+use crate::git::GitClient;
 use crate::config::{effective_agent_for_state, effective_model_for_state, AppConfig};
 use crate::errors::GardenerError;
 use crate::fsm::{
@@ -17,8 +18,10 @@ use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerState};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
+use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLogEvent {
@@ -44,6 +47,15 @@ pub struct WorkerRunSummary {
     pub logs: Vec<WorkerLogEvent>,
     pub teardown: Option<TeardownReport>,
     pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ReviewArtifact {
+    task_id: String,
+    worker_id: String,
+    verdict: String,
+    suggestions: Vec<String>,
+    recorded_at_unix_ms: i64,
 }
 
 fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
@@ -101,7 +113,7 @@ fn execute_task_live(
             "task_summary": task_summary
         }),
     );
-    let registry = PromptRegistry::v1();
+    let registry = PromptRegistry::v1().with_gitting_mode(&cfg.execution.git_output_mode);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
     let learning_loop = LearningLoop::default();
@@ -113,22 +125,51 @@ fn execute_task_live(
     let worktree_client = WorktreeClient::new(process_runner, repo_root);
     worktree_client.create_or_resume(&worktree_path, &branch)?;
 
-    let task_type = classify_task(task_summary);
+    let understand_result = run_agent_turn(
+        cfg,
+        process_runner,
+        scope,
+        &worktree_path,
+        &factory,
+        &registry,
+        &learning_loop,
+        &identity,
+        WorkerState::Understand,
+        task_summary,
+    )?;
+    logs.push(understand_result.log_event);
+    if understand_result.terminal == AgentTerminal::Failure {
+        let failure_reason = extract_failure_reason(&understand_result.payload);
+        append_run_log(
+            "error",
+            "worker.task.terminal_failure",
+            json!({
+                "worker_id": identity.worker_id,
+                "state": "understand"
+            }),
+        );
+        return Ok(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Failed,
+            logs,
+            teardown: None,
+            failure_reason,
+        });
+    }
+    let understand = parse_understand_output(&understand_result.payload, task_summary);
     append_run_log(
         "debug",
         "worker.task.classified",
         json!({
             "worker_id": worker_id,
             "task_id": task_id,
-            "task_type": format!("{task_type:?}"),
+            "task_type": format!("{:?}", understand.task_type),
+            "reasoning": understand.reasoning,
             "worktree_path": worktree_path.display().to_string(),
             "branch": branch
         }),
     );
-    let understand = UnderstandOutput {
-        task_type,
-        reasoning: "deterministic keyword classifier".to_string(),
-    };
     fsm.apply_understand(&understand)?;
 
     if fsm.state == WorkerState::Planning {
@@ -253,6 +294,29 @@ fn execute_task_live(
         });
     }
 
+    let git = GitClient::new(process_runner, &worktree_path);
+    if !git.worktree_is_clean()? {
+        append_run_log(
+            "error",
+            "worker.gitting.dirty_worktree",
+            json!({
+                "worker_id": identity.worker_id,
+                "worktree": worktree_path.display().to_string()
+            }),
+        );
+        return Ok(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Failed,
+            logs,
+            teardown: None,
+            failure_reason: Some(
+                "gitting agent exited cleanly but left uncommitted changes in worktree"
+                    .to_string(),
+            ),
+        });
+    }
+
     fsm.transition(WorkerState::Reviewing)?;
     let reviewing_result = run_agent_turn(
         cfg,
@@ -288,6 +352,7 @@ fn execute_task_live(
     }
 
     let reviewing_output = parse_reviewing_output(&reviewing_result.payload);
+    log_and_persist_review_output(scope, task_id, &identity.worker_id, &reviewing_output);
     if reviewing_output.verdict == ReviewVerdict::NeedsChanges {
         append_run_log(
             "info",
@@ -297,7 +362,8 @@ fn execute_task_live(
                 "task_id": task_id,
                 "review_loops": fsm.review_loops,
                 "max_review_loops": MAX_REVIEW_LOOPS,
-                "suggestions_count": reviewing_output.suggestions.len()
+                "suggestions_count": reviewing_output.suggestions.len(),
+                "suggestions": reviewing_output.suggestions
             }),
         );
         if fsm.review_loops >= MAX_REVIEW_LOOPS {
@@ -329,10 +395,34 @@ fn execute_task_live(
             json!({
                 "worker_id": identity.worker_id,
                 "task_id": task_id,
-                "review_loops": fsm.review_loops
+                "review_loops": fsm.review_loops,
+                "suggestions_count": reviewing_output.suggestions.len(),
+                "suggestions": reviewing_output.suggestions
             }),
         );
         fsm.transition(WorkerState::Merging)?;
+    }
+
+    let git = GitClient::new(process_runner, &worktree_path);
+    if !git.worktree_is_clean()? {
+        append_run_log(
+            "error",
+            "worker.merging.dirty_worktree",
+            json!({
+                "worker_id": identity.worker_id,
+                "worktree": worktree_path.display().to_string()
+            }),
+        );
+        return Ok(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Failed,
+            logs,
+            teardown: None,
+            failure_reason: Some(
+                "worktree has uncommitted changes; cannot merge".to_string(),
+            ),
+        });
     }
 
     let merging_result = run_agent_turn(
@@ -429,7 +519,7 @@ fn execute_task_simulated(
 
     let _doing_output: DoingOutput = parse_typed_payload(
         &format!(
-            "{START_MARKER}{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"summary\":\"implementation complete\",\"files_changed\":[\"src/lib.rs\"]}}}}{END_MARKER}"
+            "{START_MARKER}{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"summary\":\"implementation complete\",\"files_changed\":[\"src/lib.rs\"],\"commit_message\":\"feat: implement task\"}}}}{END_MARKER}"
         ),
         WorkerState::Doing,
     )?;
@@ -601,6 +691,10 @@ fn run_agent_turn(
             "output_file": output_file.display().to_string()
         }),
     );
+    let max_turns = match state {
+        WorkerState::Gitting => Some(50),
+        _ => Some(cfg.seeding.max_turns),
+    };
     let step = adapter.execute(
         process_runner,
         &crate::agent::AdapterContext {
@@ -614,7 +708,7 @@ fn run_agent_turn(
             output_schema: None,
             output_file: Some(output_file),
             permissive_mode: cfg.execution.permissions_mode == "permissive_v1",
-            max_turns: Some(cfg.seeding.max_turns),
+            max_turns,
         },
         &prepared.rendered,
         None,
@@ -700,10 +794,18 @@ fn prepare_prompt(
                 "exec-hash",
                 "state+identity",
                 70,
-                &format!(
-                    "state={state:?};backend={:?}",
-                    effective_agent_for_state(cfg, state)
-                ),
+                &if state == WorkerState::Gitting {
+                    format!(
+                        "state={state:?};backend={:?};git_output_mode={}",
+                        effective_agent_for_state(cfg, state),
+                        cfg.execution.git_output_mode.as_str()
+                    )
+                } else {
+                    format!(
+                        "state={state:?};backend={:?}",
+                        effective_agent_for_state(cfg, state)
+                    )
+                },
             ),
             ctx_item(
                 "knowledge_context",
@@ -750,6 +852,27 @@ fn prepare_prompt(
     })
 }
 
+fn parse_understand_output(payload: &serde_json::Value, task_summary: &str) -> UnderstandOutput {
+    if let Ok(parsed) = serde_json::from_value::<UnderstandOutput>(payload.clone()) {
+        return parsed;
+    }
+    let fallback = classify_task(task_summary);
+    append_run_log(
+        "warn",
+        "worker.understand.payload_invalid",
+        json!({
+            "task_summary": task_summary,
+            "fallback_task_type": format!("{fallback:?}"),
+            "payload": payload,
+        }),
+    );
+    UnderstandOutput {
+        task_type: fallback,
+        reasoning: "fallback deterministic keyword classifier (invalid understand payload)"
+            .to_string(),
+    }
+}
+
 fn parse_reviewing_output(payload: &serde_json::Value) -> ReviewingOutput {
     let verdict = payload
         .get("verdict")
@@ -787,6 +910,90 @@ fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
             .map(ToString::to_string)
             .or_else(|| Some("unknown".to_string())),
     }
+}
+
+fn log_and_persist_review_output(
+    scope: &RuntimeScope,
+    task_id: &str,
+    worker_id: &str,
+    reviewing_output: &ReviewingOutput,
+) {
+    let artifact = ReviewArtifact {
+        task_id: task_id.to_string(),
+        worker_id: worker_id.to_string(),
+        verdict: match reviewing_output.verdict {
+            ReviewVerdict::Approve => "approve".to_string(),
+            ReviewVerdict::NeedsChanges => "needs_changes".to_string(),
+        },
+        suggestions: reviewing_output.suggestions.clone(),
+        recorded_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+    };
+    let artifact_path = review_artifact_path(scope, task_id);
+    if let Some(parent) = artifact_path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            append_run_log(
+                "warn",
+                "worker.review.persist_failed",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "path": artifact_path.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            );
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(&artifact) {
+        Ok(payload) => {
+            if let Err(err) = std::fs::write(&artifact_path, payload) {
+                append_run_log(
+                    "warn",
+                    "worker.review.persist_failed",
+                    json!({
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                        "path": artifact_path.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                );
+                return;
+            }
+            append_run_log(
+                "info",
+                "worker.review.persisted",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "verdict": artifact.verdict,
+                    "suggestions_count": artifact.suggestions.len(),
+                    "path": artifact_path.display().to_string(),
+                }),
+            );
+        }
+        Err(err) => {
+            append_run_log(
+                "warn",
+                "worker.review.persist_failed",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "path": artifact_path.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            );
+        }
+    }
+}
+
+fn review_artifact_path(scope: &RuntimeScope, task_id: &str) -> PathBuf {
+    scope
+        .working_dir
+        .join(".cache/gardener/reviews")
+        .join(format!("{}.json", sanitize_for_branch(task_id).to_ascii_lowercase()))
 }
 
 fn verify_gitting_output(output: &GittingOutput) -> Result<(), GardenerError> {
@@ -899,7 +1106,11 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
         crate::fsm::TaskCategory::Bugfix
     } else if lower.contains("refactor") {
         crate::fsm::TaskCategory::Refactor
-    } else if lower.contains("feature") {
+    } else if lower.contains("feature")
+        || lower.contains("build")
+        || lower.contains("implement")
+        || lower.contains("replace")
+    {
         crate::fsm::TaskCategory::Feature
     } else if lower.contains("infra") {
         crate::fsm::TaskCategory::Infra
@@ -913,8 +1124,8 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_task, sanitize_for_branch, verify_gitting_output, verify_merge_output,
-        worktree_branch_for, worktree_path_for,
+        execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
+        verify_merge_output, worktree_branch_for, worktree_path_for,
     };
     use crate::config::AppConfig;
     use crate::fsm::{GittingOutput, MergingOutput};
@@ -958,6 +1169,18 @@ mod tests {
         assert!(teardown.sandbox_torn_down);
         assert!(teardown.worktree_cleaned);
         assert!(teardown.state_cleared);
+    }
+
+    #[test]
+    fn classify_build_and_implement_as_feature_for_planning() {
+        assert_eq!(
+            super::classify_task("GARD-04: Build Triage mode — Live activity and Triage artifacts cards"),
+            crate::fsm::TaskCategory::Feature
+        );
+        assert_eq!(
+            super::classify_task("GARD-02: Implement global frame — header, footer, and mode switching"),
+            crate::fsm::TaskCategory::Feature
+        );
     }
 
     #[test]
@@ -1008,5 +1231,19 @@ mod tests {
         let path = worktree_path_for(std::path::Path::new("/repo"), "worker-1", "manual:tui:GARD-03");
         let dir_name = path.file_name().unwrap().to_str().unwrap();
         assert!(!dir_name.contains(':'), "path component must not contain colon: {dir_name}");
+    }
+
+    #[test]
+    fn review_artifact_path_is_task_scoped_and_git_safe() {
+        let scope = RuntimeScope {
+            process_cwd: PathBuf::from("/repo"),
+            repo_root: Some(PathBuf::from("/repo")),
+            working_dir: PathBuf::from("/repo"),
+        };
+        let path = review_artifact_path(&scope, "manual:tui:GARD-01");
+        assert_eq!(
+            path.display().to_string(),
+            "/repo/.cache/gardener/reviews/manual-tui-gard-01.json"
+        );
     }
 }

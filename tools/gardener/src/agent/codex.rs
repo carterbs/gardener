@@ -81,6 +81,7 @@ impl AgentAdapter for CodexAdapter {
                 "worker_id": context.worker_id,
                 "session_id": context.session_id,
                 "sandbox_id": context.sandbox_id,
+                "backend": "codex",
                 "model": context.model,
                 "cwd": context.cwd.display().to_string(),
                 "prompt_version": context.prompt_version,
@@ -120,6 +121,8 @@ impl AgentAdapter for CodexAdapter {
             json!({
                 "worker_id": context.worker_id,
                 "session_id": context.session_id,
+                "backend": "codex",
+                "model": context.model,
                 "program": "codex",
                 "cwd": context.cwd.display().to_string(),
                 "output_file": context.output_file.as_ref().map(|p| p.display().to_string())
@@ -141,6 +144,23 @@ impl AgentAdapter for CodexAdapter {
             match serde_json::from_str::<Value>(line) {
                 Ok(raw) => {
                     let event = map_codex_event(&raw);
+                    let kind = format!("{:?}", event.kind);
+                    let raw_type = event.raw_type.clone();
+                    let command = extract_action_command(&event.payload);
+                    append_run_log(
+                        "debug",
+                        "adapter.codex.event",
+                        json!({
+                            "worker_id": context.worker_id,
+                            "session_id": context.session_id,
+                            "backend": "codex",
+                            "model": context.model,
+                            "kind": kind,
+                            "raw_type": raw_type,
+                            "command": command,
+                            "payload": event.payload.clone()
+                        }),
+                    );
                     if let Some(sink) = on_event.as_deref_mut() {
                         sink(&event);
                     }
@@ -151,6 +171,10 @@ impl AgentAdapter for CodexAdapter {
                         "warn",
                         "adapter.codex.stdout_non_json",
                         json!({
+                            "worker_id": context.worker_id,
+                            "session_id": context.session_id,
+                            "backend": "codex",
+                            "model": context.model,
                             "error": err.to_string(),
                             "line": line
                         }),
@@ -170,6 +194,8 @@ impl AgentAdapter for CodexAdapter {
                 json!({
                     "worker_id": context.worker_id,
                     "session_id": context.session_id,
+                    "backend": "codex",
+                    "model": context.model,
                     "line": line
                 }),
             );
@@ -202,6 +228,8 @@ impl AgentAdapter for CodexAdapter {
                 json!({
                     "worker_id": context.worker_id,
                     "session_id": context.session_id,
+                    "backend": "codex",
+                    "model": context.model,
                     "failure_type": failure_type,
                     "failure_reason": failure_reason,
                     "event_count": raw_events.len(),
@@ -227,6 +255,8 @@ impl AgentAdapter for CodexAdapter {
                 json!({
                     "worker_id": context.worker_id,
                     "session_id": context.session_id,
+                    "backend": "codex",
+                    "model": context.model,
                     "event_count": raw_events.len(),
                     "stderr_line_count": diagnostics.len(),
                     "exit_code": output.exit_code
@@ -252,6 +282,8 @@ impl AgentAdapter for CodexAdapter {
                 json!({
                     "worker_id": context.worker_id,
                     "session_id": context.session_id,
+                    "backend": "codex",
+                    "model": context.model,
                     "exit_code": output.exit_code,
                     "error": reason
                 }),
@@ -265,6 +297,8 @@ impl AgentAdapter for CodexAdapter {
             json!({
                 "worker_id": context.worker_id,
                 "session_id": context.session_id,
+                "backend": "codex",
+                "model": context.model,
                 "event_count": raw_events.len(),
                 "stderr_line_count": diagnostics.len(),
                 "exit_code": output.exit_code
@@ -274,6 +308,20 @@ impl AgentAdapter for CodexAdapter {
             "missing turn.completed or turn.failed event".to_string(),
         ))
     }
+}
+
+fn extract_action_command(payload: &Value) -> Option<String> {
+    payload
+        .get("item")
+        .and_then(|item| item.get("command"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .or_else(|| {
+            payload
+                .get("command")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
 }
 
 #[cfg(test)]

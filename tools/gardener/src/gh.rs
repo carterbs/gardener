@@ -36,6 +36,61 @@ impl<'a> GhClient<'a> {
         }
     }
 
+    pub fn create_pr(&self, title: &str, body: &str) -> Result<(u64, String), GardenerError> {
+        #[derive(Deserialize)]
+        struct PrCreateOutput {
+            number: u64,
+            url: String,
+        }
+        append_run_log(
+            "info",
+            "gh.pr.create.started",
+            json!({ "cwd": self.cwd.display().to_string(), "title": title }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "create".to_string(),
+                "--title".to_string(),
+                title.to_string(),
+                "--body".to_string(),
+                body.to_string(),
+                "--json".to_string(),
+                "number,url".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "gh.pr.create.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "title": title,
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "gh pr create failed: {}",
+                out.stderr
+            )));
+        }
+        let parsed: PrCreateOutput = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid gh pr create json: {e}")))?;
+        append_run_log(
+            "info",
+            "gh.pr.create.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "pr_number": parsed.number,
+                "pr_url": parsed.url
+            }),
+        );
+        Ok((parsed.number, parsed.url))
+    }
+
     pub fn view_pr(&self, pr_number: u64) -> Result<PrView, GardenerError> {
         append_run_log(
             "info",

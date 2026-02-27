@@ -23,6 +23,68 @@ impl<'a> GitClient<'a> {
         }
     }
 
+    pub fn commit_all(&self, message: &str) -> Result<(), GardenerError> {
+        if self.worktree_is_clean()? {
+            append_run_log(
+                "info",
+                "git.commit.skipped_clean",
+                json!({ "cwd": self.cwd.display().to_string() }),
+            );
+            return Ok(());
+        }
+        append_run_log(
+            "info",
+            "git.commit.started",
+            json!({ "cwd": self.cwd.display().to_string(), "message": message }),
+        );
+        let add = self.run(["git", "add", "-A"])?;
+        if add.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.commit.add_failed",
+                json!({ "cwd": self.cwd.display().to_string(), "stderr": add.stderr }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git add -A failed: {}",
+                add.stderr
+            )));
+        }
+        let commit = self.run(["git", "commit", "-m", message])?;
+        if commit.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.commit.failed",
+                json!({ "cwd": self.cwd.display().to_string(), "stderr": commit.stderr }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git commit failed: {}",
+                commit.stderr
+            )));
+        }
+        append_run_log(
+            "info",
+            "git.commit.succeeded",
+            json!({ "cwd": self.cwd.display().to_string(), "message": message }),
+        );
+        Ok(())
+    }
+
+    pub fn worktree_is_clean(&self) -> Result<bool, GardenerError> {
+        let out = self.run(["git", "status", "--porcelain"])?;
+        let clean = out.exit_code == 0 && out.stdout.trim().is_empty();
+        append_run_log(
+            "debug",
+            "git.worktree.clean_check",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "clean": clean,
+                "exit_code": out.exit_code,
+                "dirty_lines": out.stdout.lines().count()
+            }),
+        );
+        Ok(clean)
+    }
+
     pub fn detect_detached_head(&self) -> Result<bool, GardenerError> {
         let out = self.run(["git", "symbolic-ref", "--short", "HEAD"])?;
         let detached = out.exit_code != 0;
@@ -230,6 +292,28 @@ mod tests {
         GitClient::new(&runner, "/repo")
             .push_with_rebase_recovery("feature/x")
             .expect("recovered");
+    }
+
+    #[test]
+    fn worktree_clean_when_status_empty() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        assert!(GitClient::new(&runner, "/repo").worktree_is_clean().unwrap());
+    }
+
+    #[test]
+    fn worktree_dirty_when_status_has_output() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: " M tools/gardener/src/tui.rs\n".to_string(),
+            stderr: String::new(),
+        }));
+        assert!(!GitClient::new(&runner, "/repo").worktree_is_clean().unwrap());
     }
 
     #[test]

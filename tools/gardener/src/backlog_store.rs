@@ -900,10 +900,6 @@ mod tests {
         let first = store
             .upsert_task(task("retry-me-first", Priority::P1))
             .expect("seed retry");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let _second = store
-            .upsert_task(task("fresh-task", Priority::P1))
-            .expect("seed fresh");
 
         let leased = store
             .claim_next("worker-a", 60)
@@ -918,6 +914,10 @@ mod tests {
             .recover_stale_leases(i64::MAX)
             .expect("recover stale");
         assert_eq!(recovered, 1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let _second = store
+            .upsert_task(task("fresh-task", Priority::P1))
+            .expect("seed fresh");
 
         let claimed = store
             .claim_next("worker-b", 60)

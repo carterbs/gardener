@@ -13,6 +13,27 @@ use crate::types::{AgentKind, RuntimeScope};
 use serde_json::json;
 use std::path::PathBuf;
 
+fn push_triage_update(
+    runtime: &ProductionRuntime,
+    activity: &mut Vec<String>,
+    artifacts: &mut Vec<String>,
+    activity_line: impl Into<String>,
+    artifact_line: Option<String>,
+) -> Result<(), GardenerError> {
+    if !runtime.terminal.stdin_is_tty() {
+        return Ok(());
+    }
+    activity.push(activity_line.into());
+    if activity.len() > 10 {
+        let drop = activity.len() - 10;
+        activity.drain(0..drop);
+    }
+    if let Some(line) = artifact_line {
+        artifacts.push(line);
+    }
+    runtime.terminal.draw_triage(activity, artifacts)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriageDecision {
     Needed,
@@ -106,6 +127,8 @@ pub fn run_triage(
     env: &EnvMap,
     agent_override: Option<AgentKind>,
 ) -> Result<RepoIntelligenceProfile, GardenerError> {
+    let mut activity = Vec::new();
+    let mut artifacts = Vec::new();
     append_run_log(
         "info",
         "triage.started",
@@ -115,6 +138,13 @@ pub fn run_triage(
             "output_path": cfg.triage.output_path
         }),
     );
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Starting triage session",
+        None,
+    )?;
 
     if let Some(reason) = is_non_interactive(env, runtime.terminal.as_ref()) {
         append_run_log(
@@ -131,6 +161,13 @@ pub fn run_triage(
     }
 
     let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Detecting coding agent signals",
+        None,
+    )?;
     let detected = detect_agent(runtime.file_system.as_ref(), &scope.working_dir, repo_root);
     let chosen_agent = agent_override.unwrap_or_else(|| match detected.detected {
         DetectedAgent::Claude => AgentKind::Claude,
@@ -148,6 +185,13 @@ pub fn run_triage(
             "agents_md_present": detected.agents_md_present
         }),
     );
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Agent detection complete",
+        Some(format!("Detected agent: {}", chosen_agent.as_str())),
+    )?;
 
     if !runtime.terminal.stdin_is_tty() {
         runtime
@@ -167,6 +211,13 @@ pub fn run_triage(
             "max_turns": cfg.triage.discovery_max_turns
         }),
     );
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Running repository discovery assessment",
+        None,
+    )?;
     let discovery = run_discovery(
         runtime.process_runner.as_ref(),
         scope,
@@ -200,8 +251,26 @@ pub fn run_triage(
             "coverage_signal_grade": discovery.coverage_signal.grade
         }),
     );
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Discovery assessment complete",
+        Some(format!(
+            "Readiness: {} ({})",
+            discovery.overall_readiness_grade, discovery.overall_readiness_score
+        )),
+    )?;
 
     append_run_log("info", "triage.interview.started", json!({}));
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Collecting human-validated repository context",
+        None,
+    )?;
+    runtime.terminal.close_ui()?;
     let interview = run_interview(
         runtime.terminal.as_ref(),
         &discovery,
@@ -219,6 +288,16 @@ pub fn run_triage(
             "coverage_grade_override": interview.coverage_grade_override
         }),
     );
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Interview complete",
+        Some(format!(
+            "Validation command: {}",
+            interview.validation_command
+        )),
+    )?;
 
     let agents_md = detected.agents_md_present;
     let mut profile = build_profile(
@@ -244,6 +323,13 @@ pub fn run_triage(
     profile.user_validated.coverage_grade_override = interview.coverage_grade_override;
     let path = profile_path(scope, cfg);
     write_profile(runtime.file_system.as_ref(), &path, &profile)?;
+    push_triage_update(
+        runtime,
+        &mut activity,
+        &mut artifacts,
+        "Persisted triage profile",
+        Some(format!("Repo intelligence profile: {}", path.display())),
+    )?;
     append_run_log(
         "info",
         "triage.completed",

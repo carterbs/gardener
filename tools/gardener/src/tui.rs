@@ -95,6 +95,24 @@ pub fn render_dashboard(
     out
 }
 
+pub fn render_triage(activity: &[String], artifacts: &[String], width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| draw_triage_frame(frame, activity, artifacts))
+        .expect("draw");
+
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn draw_dashboard_frame(
     frame: &mut ratatui::Frame<'_>,
     workers: &[WorkerRow],
@@ -324,6 +342,79 @@ fn draw_dashboard_frame(
     frame.render_widget(footer, chunks[chunks.len() - 1]);
 }
 
+fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifacts: &[String]) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(chunks[1]);
+
+    let summary = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "triage mode",
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(summary, chunks[0]);
+
+    let activity_items = if activity.is_empty() {
+        vec![ListItem::new("- waiting for triage updates")]
+    } else {
+        activity
+            .iter()
+            .map(|line| ListItem::new(format!("- {line}")))
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(activity_items).block(
+            Block::default()
+                .title("Live Activity")
+                .borders(Borders::RIGHT),
+        ),
+        body[0],
+    );
+
+    let artifact_items = if artifacts.is_empty() {
+        vec![ListItem::new("- no triage artifacts yet")]
+    } else {
+        artifacts
+            .iter()
+            .map(|line| ListItem::new(format!("- {line}")))
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(artifact_items).block(Block::default().title("Triage Artifacts")),
+        body[1],
+    );
+
+    let footer = Paragraph::new("Controls: triage in progress; follow prompts in terminal").block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(footer, chunks[2]);
+}
+
 pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -410,6 +501,15 @@ pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
     })
 }
 
+pub fn draw_triage_live(activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(|frame| draw_triage_frame(frame, activity, artifacts))
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
 pub fn draw_shutdown_screen_live(title: &str, message: &str) -> Result<(), GardenerError> {
     with_live_terminal(|terminal| {
         terminal
@@ -420,8 +520,8 @@ pub fn draw_shutdown_screen_live(title: &str, message: &str) -> Result<(), Garde
 }
 
 fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {
-    let is_error = title.to_ascii_lowercase().contains("error")
-        || title.to_ascii_lowercase().contains("fail");
+    let is_error =
+        title.to_ascii_lowercase().contains("error") || title.to_ascii_lowercase().contains("fail");
     let accent = if is_error {
         Color::Red
     } else {
@@ -766,7 +866,7 @@ fn teardown_terminal(
 mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
-        BacklogView, ProblemClass, QueueStats, WorkerRow,
+        render_triage, BacklogView, ProblemClass, QueueStats, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -864,5 +964,19 @@ mod tests {
             humanize_breadcrumb("boot>backlog_sync"),
             "Boot > Backlog Sync"
         );
+    }
+
+    #[test]
+    fn triage_mode_renders_activity_and_artifact_cards() {
+        let frame = render_triage(
+            &["Detecting coding agent signals".to_string()],
+            &["repo-intelligence.toml (pending)".to_string()],
+            80,
+            20,
+        );
+        assert!(frame.contains("triage mode"));
+        assert!(frame.contains("Live Activity"));
+        assert!(frame.contains("Triage Artifacts"));
+        assert!(frame.contains("Detecting coding agent signals"));
     }
 }

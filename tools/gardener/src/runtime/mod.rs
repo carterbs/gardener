@@ -1,8 +1,8 @@
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::tui::{
-    close_live_terminal, draw_dashboard_live, draw_report_live, render_dashboard, BacklogView,
-    QueueStats, WorkerRow,
+    close_live_terminal, draw_dashboard_live, draw_report_live, draw_triage_live, render_dashboard,
+    render_triage, BacklogView, QueueStats, WorkerRow,
 };
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -92,6 +92,10 @@ pub trait Terminal: Send + Sync {
     }
     fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
         let frame = crate::tui::render_report_view(report_path, report, 120, 30);
+        self.draw(&frame)
+    }
+    fn draw_triage(&self, activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
+        let frame = render_triage(activity, artifacts, 120, 30);
         self.draw(&frame)
     }
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
@@ -254,8 +258,7 @@ impl FileSystem for ProductionFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), GardenerError> {
-        let result =
-            std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
+        let result = std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
         match &result {
             Ok(()) => append_run_log(
                 "debug",
@@ -633,6 +636,11 @@ impl Terminal for ProductionTerminal {
         draw_report_live(report_path, report)
     }
 
+    fn draw_triage(&self, activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
+        start_key_listener_if_needed();
+        draw_triage_live(activity, artifacts)
+    }
+
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
         start_key_listener_if_needed();
         crate::tui::draw_shutdown_screen_live(title, message)
@@ -856,10 +864,7 @@ impl FakeTerminal {
     }
 
     pub fn shutdown_screens(&self) -> Vec<(String, String)> {
-        self.shutdown_screens
-            .lock()
-            .expect("shutdown lock")
-            .clone()
+        self.shutdown_screens.lock().expect("shutdown lock").clone()
     }
 }
 

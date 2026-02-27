@@ -37,10 +37,13 @@ fn prune_only_with_scoped_working_dir_succeeds() {
 
 #[test]
 fn sync_only_exports_snapshot_and_exits_zero() {
+    let temp = tempfile::tempdir().expect("tempdir");
     let mut cmd = Command::cargo_bin("gardener").expect("bin");
     cmd.arg("--sync-only")
         .arg("--config")
-        .arg(fixture("configs/phase09-cutover.toml"));
+        .arg(fixture("configs/phase09-cutover.toml"))
+        .arg("--working-dir")
+        .arg(temp.path());
     let out = cmd.assert().success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("sync complete: snapshot="));

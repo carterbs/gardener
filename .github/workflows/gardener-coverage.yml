@@ -1,0 +1,23 @@
+name: Gardener Coverage Gate
+
+on:
+  push:
+    paths:
+      - 'tools/gardener/**'
+      - 'scripts/**'
+      - 'package.json'
+      - '.github/workflows/gardener-coverage.yml'
+  pull_request:
+    paths:
+      - 'tools/gardener/**'
+      - 'scripts/**'
+      - 'package.json'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-llvm-cov --locked
+      - run: npm run validate

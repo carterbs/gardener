@@ -4,6 +4,8 @@ pub mod backlog_store;
 pub mod config;
 pub mod errors;
 pub mod fsm;
+pub mod gh;
+pub mod git;
 pub mod learning_loop;
 pub mod output_envelope;
 pub mod postmerge_analysis;
@@ -34,6 +36,7 @@ pub mod types;
 pub mod worker;
 pub mod worker_identity;
 pub mod worker_pool;
+pub mod worktree;
 pub mod worktree_audit;
 
 use backlog_store::BacklogStore;

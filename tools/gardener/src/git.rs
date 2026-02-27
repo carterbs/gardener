@@ -302,7 +302,9 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
-        assert!(GitClient::new(&runner, "/repo").worktree_is_clean().unwrap());
+        assert!(GitClient::new(&runner, "/repo")
+            .worktree_is_clean()
+            .unwrap());
     }
 
     #[test]
@@ -313,7 +315,9 @@ mod tests {
             stdout: " M tools/gardener/src/tui.rs\n".to_string(),
             stderr: String::new(),
         }));
-        assert!(!GitClient::new(&runner, "/repo").worktree_is_clean().unwrap());
+        assert!(!GitClient::new(&runner, "/repo")
+            .worktree_is_clean()
+            .unwrap());
     }
 
     #[test]

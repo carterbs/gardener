@@ -254,8 +254,7 @@ impl FileSystem for ProductionFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), GardenerError> {
-        let result =
-            std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
+        let result = std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
         match &result {
             Ok(()) => append_run_log(
                 "debug",
@@ -856,10 +855,7 @@ impl FakeTerminal {
     }
 
     pub fn shutdown_screens(&self) -> Vec<(String, String)> {
-        self.shutdown_screens
-            .lock()
-            .expect("shutdown lock")
-            .clone()
+        self.shutdown_screens.lock().expect("shutdown lock").clone()
     }
 }
 

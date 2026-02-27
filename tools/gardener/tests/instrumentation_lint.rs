@@ -295,9 +295,7 @@ fn is_eligible_function(function: &FunctionStats) -> bool {
         return false;
     }
 
-    if function
-        .name
-        .starts_with("parse_")
+    if function.name.starts_with("parse_")
         || function.name.starts_with("extract_")
         || function.name.starts_with("render_")
         || function.name.starts_with("build_")
@@ -341,11 +339,7 @@ fn looks_like_fn_start(line: &str) -> bool {
 }
 
 fn extract_fn_name(signature: &str) -> String {
-    let after_fn = signature
-        .split("fn ")
-        .nth(1)
-        .unwrap_or("<unknown>")
-        .trim();
+    let after_fn = signature.split("fn ").nth(1).unwrap_or("<unknown>").trim();
     after_fn
         .split(|ch: char| ch == '(' || ch.is_whitespace() || ch == '<')
         .next()

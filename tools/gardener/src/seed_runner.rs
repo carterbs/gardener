@@ -110,15 +110,14 @@ pub fn run_legacy_seed_runner_v1_with_events(
         }
     };
 
-    let payload: SeedPayload = serde_json::from_value(exec_result.payload)
-        .map_err(|e| {
-            append_run_log(
-                "error",
-                "seed_runner.parse_failed",
-                json!({ "error": e.to_string() }),
-            );
-            GardenerError::OutputEnvelope(e.to_string())
-        })?;
+    let payload: SeedPayload = serde_json::from_value(exec_result.payload).map_err(|e| {
+        append_run_log(
+            "error",
+            "seed_runner.parse_failed",
+            json!({ "error": e.to_string() }),
+        );
+        GardenerError::OutputEnvelope(e.to_string())
+    })?;
 
     append_run_log(
         "info",

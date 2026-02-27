@@ -1,11 +1,11 @@
 use crate::agent::factory::AdapterFactory;
-use crate::git::GitClient;
 use crate::config::{effective_agent_for_state, effective_model_for_state, AppConfig};
 use crate::errors::GardenerError;
 use crate::fsm::{
     DoingOutput, FsmSnapshot, GittingOutput, MergingOutput, ReviewVerdict, ReviewingOutput,
     UnderstandOutput, MAX_REVIEW_LOOPS,
 };
+use crate::git::GitClient;
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
@@ -311,8 +311,7 @@ fn execute_task_live(
             logs,
             teardown: None,
             failure_reason: Some(
-                "gitting agent exited cleanly but left uncommitted changes in worktree"
-                    .to_string(),
+                "gitting agent exited cleanly but left uncommitted changes in worktree".to_string(),
             ),
         });
     }
@@ -419,9 +418,7 @@ fn execute_task_live(
             final_state: WorkerState::Failed,
             logs,
             teardown: None,
-            failure_reason: Some(
-                "worktree has uncommitted changes; cannot merge".to_string(),
-            ),
+            failure_reason: Some("worktree has uncommitted changes; cannot merge".to_string()),
         });
     }
 
@@ -993,7 +990,10 @@ fn review_artifact_path(scope: &RuntimeScope, task_id: &str) -> PathBuf {
     scope
         .working_dir
         .join(".cache/gardener/reviews")
-        .join(format!("{}.json", sanitize_for_branch(task_id).to_ascii_lowercase()))
+        .join(format!(
+            "{}.json",
+            sanitize_for_branch(task_id).to_ascii_lowercase()
+        ))
 }
 
 fn verify_gitting_output(output: &GittingOutput) -> Result<(), GardenerError> {
@@ -1174,11 +1174,15 @@ mod tests {
     #[test]
     fn classify_build_and_implement_as_feature_for_planning() {
         assert_eq!(
-            super::classify_task("GARD-04: Build Triage mode — Live activity and Triage artifacts cards"),
+            super::classify_task(
+                "GARD-04: Build Triage mode — Live activity and Triage artifacts cards"
+            ),
             crate::fsm::TaskCategory::Feature
         );
         assert_eq!(
-            super::classify_task("GARD-02: Implement global frame — header, footer, and mode switching"),
+            super::classify_task(
+                "GARD-02: Implement global frame — header, footer, and mode switching"
+            ),
             crate::fsm::TaskCategory::Feature
         );
     }
@@ -1205,7 +1209,10 @@ mod tests {
     fn sanitize_for_branch_strips_colons_and_other_invalid_chars() {
         // Colons in task IDs (e.g. "manual:tui:GARD-03") caused git to reject
         // the branch name with "not a valid branch name".
-        assert_eq!(sanitize_for_branch("manual:tui:GARD-03"), "manual-tui-GARD-03");
+        assert_eq!(
+            sanitize_for_branch("manual:tui:GARD-03"),
+            "manual-tui-GARD-03"
+        );
         assert_eq!(sanitize_for_branch("simple"), "simple");
         assert_eq!(sanitize_for_branch("abc-123"), "abc-123");
         // Spaces, dots, and slashes are also invalid in branch name components.
@@ -1228,9 +1235,16 @@ mod tests {
         );
         assert_eq!(branch, "gardener/worker-1-manual-tui-GARD-03");
 
-        let path = worktree_path_for(std::path::Path::new("/repo"), "worker-1", "manual:tui:GARD-03");
+        let path = worktree_path_for(
+            std::path::Path::new("/repo"),
+            "worker-1",
+            "manual:tui:GARD-03",
+        );
         let dir_name = path.file_name().unwrap().to_str().unwrap();
-        assert!(!dir_name.contains(':'), "path component must not contain colon: {dir_name}");
+        assert!(
+            !dir_name.contains(':'),
+            "path component must not contain colon: {dir_name}"
+        );
     }
 
     #[test]

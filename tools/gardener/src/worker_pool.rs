@@ -11,8 +11,8 @@ use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
-    reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
-    WorkerRow,
+    reset_workers_scroll, scroll_workers_down, scroll_workers_up,
+    toggle_selected_worker_command_detail, BacklogView, QueueStats, WorkerRow,
 };
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
@@ -54,6 +54,8 @@ pub fn run_worker_pool_fsm(
             session_age_secs: 0,
             lease_held: false,
             session_missing: false,
+            commands_expanded: false,
+            command_details: Vec::new(),
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;
@@ -65,7 +67,7 @@ pub fn run_worker_pool_fsm(
             scope,
             cfg,
             store,
-            &workers,
+            &mut workers,
             operator_hotkeys,
             terminal,
             &mut report_visible,
@@ -82,7 +84,7 @@ pub fn run_worker_pool_fsm(
                 scope,
                 cfg,
                 store,
-                &workers,
+                &mut workers,
                 operator_hotkeys,
                 terminal,
                 &mut report_visible,
@@ -159,7 +161,7 @@ pub fn run_worker_pool_fsm(
                                 scope,
                                 cfg,
                                 store,
-                                &workers,
+                                &mut workers,
                                 operator_hotkeys,
                                 terminal,
                                 &mut report_visible,
@@ -206,6 +208,12 @@ pub fn run_worker_pool_fsm(
                 return Ok(completed);
             }
             for event in summary.logs {
+                if let Some(command) = event.command {
+                    workers[idx].command_details.push((
+                        worker_command_timestamp(now_unix_millis()),
+                        command,
+                    ));
+                }
                 workers[idx].state = event.state.as_str().to_string();
                 workers[idx].tool_line = format!("prompt {}", event.prompt_version);
                 workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
@@ -314,7 +322,7 @@ fn handle_hotkeys(
     scope: &RuntimeScope,
     cfg: &AppConfig,
     store: &BacklogStore,
-    workers: &[WorkerRow],
+    workers: &mut [WorkerRow],
     operator_hotkeys: bool,
     terminal: &dyn Terminal,
     report_visible: &mut bool,
@@ -397,6 +405,9 @@ fn handle_hotkeys(
                 let _ = refresh_quality_report(runtime, cfg, scope, true)?;
                 *report_visible = true;
             }
+            Some(AppHotkeyAction::ToggleCommandDetail) => {
+                redraw_dashboard = toggle_selected_worker_command_detail(workers);
+            }
             Some(AppHotkeyAction::Back) => {
                 *report_visible = false;
                 redraw_dashboard = true;
@@ -430,6 +441,17 @@ fn now_unix_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn worker_command_timestamp(now_ms: i64) -> String {
+    let secs = now_ms.max(0) as u64;
+    let in_day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        in_day / 3600,
+        (in_day % 3600) / 60,
+        in_day % 60
+    )
 }
 
 fn hotkey_action(key: char, operator_hotkeys: bool) -> Option<AppHotkeyAction> {
@@ -599,11 +621,16 @@ mod tests {
         assert_eq!(hotkey_action('j', false), Some(HotkeyAction::ScrollDown)); // hotkey:j
         assert_eq!(hotkey_action('k', false), Some(HotkeyAction::ScrollUp)); // hotkey:k
         assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
-        assert_eq!(
-            hotkey_action('g', false),
-            Some(HotkeyAction::RegenerateReport)
-        ); // hotkey:g
+        assert_eq!(hotkey_action('g', false), Some(HotkeyAction::RegenerateReport)); // hotkey:g
         assert_eq!(hotkey_action('b', false), Some(HotkeyAction::Back)); // hotkey:b
+        assert_eq!(
+            hotkey_action('e', false),
+            Some(HotkeyAction::ToggleCommandDetail)
+        ); // hotkey:e
+        assert_eq!(
+            hotkey_action('\n', false),
+            Some(HotkeyAction::ToggleCommandDetail)
+        ); // hotkey:enter
         assert_eq!(hotkey_action('r', false), None);
         assert_eq!(hotkey_action('l', false), None);
         assert_eq!(hotkey_action('p', false), None);

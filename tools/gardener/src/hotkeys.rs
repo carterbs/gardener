@@ -15,9 +15,10 @@ pub enum HotkeyAction {
     ViewReport,
     RegenerateReport,
     Back,
+    ToggleCommandDetail,
 }
 
-pub const DASHBOARD_BINDINGS: [HotkeyBinding; 5] = [
+pub const DASHBOARD_BINDINGS: [HotkeyBinding; 6] = [
     HotkeyBinding {
         key: 'q',
         action: "quit",
@@ -29,6 +30,10 @@ pub const DASHBOARD_BINDINGS: [HotkeyBinding; 5] = [
     HotkeyBinding {
         key: 'k',
         action: "scroll up",
+    },
+    HotkeyBinding {
+        key: 'e',
+        action: "toggle command detail",
     },
     HotkeyBinding {
         key: 'v',
@@ -97,6 +102,7 @@ pub fn action_for_key_with_mode(key: char, operator_hotkeys: bool) -> Option<Hot
         'v' => Some(HotkeyAction::ViewReport),
         'g' => Some(HotkeyAction::RegenerateReport),
         'b' => Some(HotkeyAction::Back),
+        'e' | '\n' | '\r' => Some(HotkeyAction::ToggleCommandDetail),
         _ => None,
     }
 }

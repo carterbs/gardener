@@ -101,6 +101,19 @@ struct WorkerMetrics {
     idle: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ParsedBacklogPriority {
+    P0,
+    P1,
+    P2,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedBacklogItem {
+    priority: ParsedBacklogPriority,
+    title: String,
+}
+
 impl WorkerMetrics {
     fn from_workers(workers: &[WorkerRow]) -> Self {
         let mut metrics = Self {
@@ -120,6 +133,90 @@ impl WorkerMetrics {
         }
         metrics
     }
+}
+
+impl ParsedBacklogPriority {
+    fn span_style(self) -> Style {
+        match self {
+            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
+            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
+            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
+        }
+    }
+}
+
+fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
+    match token {
+        "P0" | "p0" => Some(ParsedBacklogPriority::P0),
+        "P1" | "p1" => Some(ParsedBacklogPriority::P1),
+        "P2" | "p2" => Some(ParsedBacklogPriority::P2),
+        _ => None,
+    }
+}
+
+fn is_backlog_status_token(token: &str) -> bool {
+    matches!(token, "INP" | "inp" | "Q" | "q")
+}
+
+fn is_short_task_id(token: &str) -> bool {
+    token.len() >= 6
+        && token.len() <= 12
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch.is_ascii_alphanumeric())
+}
+
+fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    if is_backlog_status_token(tokens[idx]) {
+        idx += 1;
+    }
+    if idx >= tokens.len() {
+        return None;
+    }
+    let priority = parse_backlog_priority(tokens[idx])?;
+    idx += 1;
+    if idx >= tokens.len() {
+        return None;
+    }
+    if tokens.len() >= idx + 2 && is_short_task_id(tokens[idx]) {
+        idx += 1;
+    }
+    let title = tokens[idx..].join(" ");
+    if title.is_empty() {
+        None
+    } else {
+        Some(ParsedBacklogItem {
+            priority,
+            title,
+        })
+    }
+}
+
+fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<ParsedBacklogItem> {
+    let mut p0 = Vec::new();
+    let mut p1 = Vec::new();
+    let mut p2 = Vec::new();
+
+    for raw in in_progress.iter().chain(queued.iter()) {
+        if let Some(item) = parse_backlog_item(raw) {
+            match item.priority {
+                ParsedBacklogPriority::P0 => p0.push(item),
+                ParsedBacklogPriority::P1 => p1.push(item),
+                ParsedBacklogPriority::P2 => p2.push(item),
+            }
+        }
+    }
+
+    let mut ordered = Vec::new();
+    ordered.extend(p0);
+    ordered.extend(p1);
+    ordered.extend(p2);
+    ordered
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -322,14 +419,19 @@ fn draw_dashboard_frame(
         .direction(Direction::Vertical)
         .constraints(layout_constraints)
         .split(frame.area());
+    let body_height = chunks[1].height;
+    let now_rows: u16 = 7;
+    let remaining = body_height.saturating_sub(now_rows);
+    let backlog_rows = if remaining > 8 { remaining - 8 } else { 1 };
+    let workers_rows = remaining.saturating_sub(backlog_rows).max(1);
     let body = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(now_rows),
+            Constraint::Length(workers_rows),
+            Constraint::Length(backlog_rows),
+        ])
         .split(chunks[1]);
-    let body_columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(body[1]);
 
     let summary = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -439,7 +541,7 @@ fn draw_dashboard_frame(
     let workers_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body_columns[0]);
+        .split(body[1]);
     let viewport_height = workers_panel[1]
         .height
         .min(frame.area().height.saturating_sub(12).max(1));
@@ -574,62 +676,54 @@ fn draw_dashboard_frame(
         workers_panel[0],
     );
     frame.render_widget(
-        List::new(worker_items).block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
-        ),
+        List::new(worker_items),
         workers_panel[1],
     );
 
-    let mut backlog_items = Vec::new();
-    backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
-        "In Progress",
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )])));
-    if backlog.in_progress.is_empty() {
-        backlog_items.push(ListItem::new("- none"));
+    let ordered_backlog = ordered_backlog_items(&backlog.in_progress, &backlog.queued);
+    let content_capacity = body[2].height.saturating_sub(2) as usize;
+    let max_visible = if content_capacity == 0 {
+        0
+    } else if ordered_backlog.len() > content_capacity {
+        content_capacity.saturating_sub(1)
     } else {
-        backlog_items.extend(
-            backlog
-                .in_progress
-                .iter()
-                .map(|line| ListItem::new(format!("- {line}"))),
-        );
+        ordered_backlog.len()
+    };
+    let mut list_items = Vec::new();
+    for item in ordered_backlog.iter().take(max_visible) {
+        let badge = match item.priority {
+            ParsedBacklogPriority::P0 => "P0",
+            ParsedBacklogPriority::P1 => "P1",
+            ParsedBacklogPriority::P2 => "P2",
+        };
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("{badge: <2}"), item.priority.span_style()),
+            Span::raw(" "),
+            Span::raw(item.title.clone()),
+        ])));
     }
-    backlog_items.push(ListItem::new(""));
-    backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
-        "Queued",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )])));
-    if backlog.queued.is_empty() {
-        backlog_items.push(ListItem::new("- none"));
-    } else {
-        backlog_items.extend(
-            backlog
-                .queued
-                .iter()
-                .map(|line| ListItem::new(format!("- {line}"))),
-        );
+    if ordered_backlog.len() > max_visible && content_capacity > 0 {
+        let hidden = ordered_backlog.len().saturating_sub(max_visible);
+        list_items.push(ListItem::new(format!("... and {hidden} more")));
     }
-    let backlog_panel = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body_columns[1]);
+    if list_items.is_empty() {
+        list_items.push(ListItem::new("No backlog items"));
+    }
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "Backlog",
+            "BACKLOG (PRIORITY ORDER)",
             Style::default()
                 .fg(Color::Rgb(245, 196, 95))
                 .add_modifier(Modifier::BOLD),
         )])),
-        backlog_panel[0],
+        body[2],
     );
-    frame.render_widget(List::new(backlog_items), backlog_panel[1]);
+    let backlog_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(body[2]);
+    frame.render_widget(List::new(list_items), backlog_panel[1]);
 
     if has_human_problems {
         frame.render_widget(
@@ -1349,23 +1443,60 @@ mod tests {
                 queued: vec!["P2 def456 tune logs".to_string()],
             },
             80,
-            20,
+            40,
         );
-        assert!(frame.contains("Queue"));
+        assert!(frame.contains("GARDENER"));
         assert!(frame.contains("Now"));
         assert!(frame.contains("Scanning"));
         assert!(frame.contains("parallel workers"));
         assert!(frame.contains("Workers"));
         assert!(!frame.contains("Problems"));
-        assert!(frame.contains("Backlog"));
-        assert!(frame.contains("In Progress"));
-        assert!(frame.contains("Queued"));
         assert!(frame.contains("State:"));
         assert!(frame.contains("Action:"));
+        assert!(frame.contains("P0"));
+        assert!(frame.contains("P2"));
         assert!(!frame.contains("status="));
         assert!(!frame.contains("action="));
 
         // handle_key removed — real dispatch uses hotkeys::action_for_key
+    }
+
+    #[test]
+    fn backlog_rendering_is_priority_ordered() {
+        let frame = render_dashboard(
+            &[worker(10, false)],
+            &QueueStats {
+                ready: 1,
+                active: 1,
+                failed: 0,
+                p0: 1,
+                p1: 2,
+                p2: 2,
+            },
+            &BacklogView {
+                in_progress: vec![
+                    "INP P1 alpha task".to_string(),
+                    "INP P0 bravo task".to_string(),
+                    "INP P2 charlie task".to_string(),
+                ],
+                queued: vec![],
+            },
+            80,
+            40,
+        );
+        let backlog_section_start = frame.find("BACKLOG (PRIORITY ORDER)").expect("backlog heading");
+        let backlog_section = &frame[backlog_section_start..];
+        let p0 = backlog_section.find("P0").expect("p0 row");
+        let p1 = backlog_section.find("P1").expect("p1 row");
+        let p2 = backlog_section.find("P2").expect("p2 row");
+        assert!(
+            p0 < p1,
+            "P0 rows should render before P1 rows in Backlog panel"
+        );
+        assert!(
+            p1 < p2,
+            "P1 rows should render before P2 rows in Backlog panel"
+        );
     }
 
     #[test]

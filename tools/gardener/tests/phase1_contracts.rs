@@ -91,7 +91,7 @@ fn cli_help_contract() {
         "--working-dir",
         "--parallelism",
         "--task",
-        "--target",
+        "--quit-after",
         "--prune-only",
         "--backlog-only",
         "--quality-grades-only",

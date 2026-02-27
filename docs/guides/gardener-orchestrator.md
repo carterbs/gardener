@@ -2,7 +2,7 @@
 
 ## Commands
 
-- `npm run gardener:run -- --target 1 --config tools/gardener/tests/fixtures/configs/phase09-cutover.toml`
+- `npm run gardener:run -- --quit-after 1 --config tools/gardener/tests/fixtures/configs/phase09-cutover.toml`
 - `npm run gardener:sync`
 
 ## `gardener:sync` Contract

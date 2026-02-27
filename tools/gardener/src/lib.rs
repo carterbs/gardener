@@ -69,7 +69,7 @@ pub struct Cli {
     pub parallelism: Option<u32>,
     #[arg(long)]
     pub task: Option<String>,
-    #[arg(long)]
+    #[arg(long = "quit-after")]
     pub target: Option<u32>,
     #[arg(long, default_value_t = false)]
     pub prune_only: bool,

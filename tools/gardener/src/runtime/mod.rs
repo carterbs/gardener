@@ -174,6 +174,9 @@ fn start_key_listener_if_needed() {
                     enqueue_key('q');
                     request_interrupt();
                 }
+                crossterm::event::KeyCode::Enter => {
+                    enqueue_key('\n');
+                }
                 crossterm::event::KeyCode::Char(c) => {
                     enqueue_key(c);
                     if c == 'q' {
@@ -684,6 +687,7 @@ impl Terminal for ProductionTerminal {
                 {
                     Ok(Some('q'))
                 }
+                crossterm::event::KeyCode::Enter => Ok(Some('\n')),
                 crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
             },

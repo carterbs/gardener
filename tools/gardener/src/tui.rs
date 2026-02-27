@@ -547,6 +547,90 @@ fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
     WORKER_EQUIPMENT_NAMES[(acc as usize) % WORKER_EQUIPMENT_NAMES.len()].to_string()
 }
 
+impl ParsedBacklogPriority {
+    fn span_style(self) -> Style {
+        match self {
+            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
+            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
+            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
+        }
+    }
+}
+
+fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
+    match token {
+        "P0" | "p0" => Some(ParsedBacklogPriority::P0),
+        "P1" | "p1" => Some(ParsedBacklogPriority::P1),
+        "P2" | "p2" => Some(ParsedBacklogPriority::P2),
+        _ => None,
+    }
+}
+
+fn is_backlog_status_token(token: &str) -> bool {
+    matches!(token, "INP" | "inp" | "Q" | "q")
+}
+
+fn is_short_task_id(token: &str) -> bool {
+    token.len() >= 6
+        && token.len() <= 12
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch.is_ascii_alphanumeric())
+}
+
+fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    if is_backlog_status_token(tokens[idx]) {
+        idx += 1;
+    }
+    if idx >= tokens.len() {
+        return None;
+    }
+    let priority = parse_backlog_priority(tokens[idx])?;
+    idx += 1;
+    if idx >= tokens.len() {
+        return None;
+    }
+    if tokens.len() >= idx + 2 && is_short_task_id(tokens[idx]) {
+        idx += 1;
+    }
+    let title = tokens[idx..].join(" ");
+    if title.is_empty() {
+        None
+    } else {
+        Some(ParsedBacklogItem {
+            priority,
+            title,
+        })
+    }
+}
+
+fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<ParsedBacklogItem> {
+    let mut p0 = Vec::new();
+    let mut p1 = Vec::new();
+    let mut p2 = Vec::new();
+
+    for raw in in_progress.iter().chain(queued.iter()) {
+        if let Some(item) = parse_backlog_item(raw) {
+            match item.priority {
+                ParsedBacklogPriority::P0 => p0.push(item),
+                ParsedBacklogPriority::P1 => p1.push(item),
+                ParsedBacklogPriority::P2 => p2.push(item),
+            }
+        }
+    }
+
+    let mut ordered = Vec::new();
+    ordered.extend(p0);
+    ordered.extend(p1);
+    ordered.extend(p2);
+    ordered
+}
+
 #[derive(Debug, Clone, Copy)]
 struct StartupHeadlineView {
     spinner_frame: usize,

@@ -46,6 +46,9 @@ pub trait Terminal: Send + Sync {
     fn stdin_is_tty(&self) -> bool;
     fn write_line(&self, line: &str) -> Result<(), GardenerError>;
     fn draw(&self, frame: &str) -> Result<(), GardenerError>;
+    fn poll_key(&self, _timeout_ms: u64) -> Result<Option<char>, GardenerError> {
+        Ok(None)
+    }
 }
 
 pub struct ProductionClock;
@@ -177,6 +180,24 @@ impl Terminal for ProductionTerminal {
 
     fn draw(&self, frame: &str) -> Result<(), GardenerError> {
         self.write_line(frame)
+    }
+
+    fn poll_key(&self, timeout_ms: u64) -> Result<Option<char>, GardenerError> {
+        if !self.stdin_is_tty() {
+            return Ok(None);
+        }
+        let polled = crossterm::event::poll(std::time::Duration::from_millis(timeout_ms))
+            .map_err(|e| GardenerError::Io(e.to_string()))?;
+        if !polled {
+            return Ok(None);
+        }
+        match crossterm::event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
+            crossterm::event::Event::Key(key) => match key.code {
+                crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        }
     }
 }
 

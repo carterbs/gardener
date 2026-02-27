@@ -12,6 +12,9 @@ use crate::triage::profile_path;
 use crate::types::RuntimeScope;
 use crate::worktree_audit::reconcile_worktrees;
 use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
+
+const REPORT_TTL_SECONDS: u64 = 3600;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupSummary {
@@ -22,6 +25,42 @@ pub struct StartupSummary {
     pub pr_collisions_found: usize,
     pub pr_collisions_fixed: usize,
     pub seeded_tasks_upserted: usize,
+}
+
+pub fn refresh_quality_report(
+    runtime: &ProductionRuntime,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+    force: bool,
+) -> Result<(PathBuf, bool), GardenerError> {
+    let profile_loc = profile_path(scope, cfg);
+    let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
+    let quality_path = if PathBuf::from(&cfg.quality_report.path).is_absolute() {
+        PathBuf::from(&cfg.quality_report.path)
+    } else {
+        scope.working_dir.join(&cfg.quality_report.path)
+    };
+    let stamp_path = quality_stamp_path(&quality_path);
+    let should_regen = force
+        || !runtime.file_system.exists(&quality_path)
+        || report_stamp_is_stale(runtime, &stamp_path)?;
+    if should_regen {
+        let quality_doc = render_quality_grade_document(&profile_loc.display().to_string(), &profile);
+        if let Some(parent) = quality_path.parent() {
+            runtime.file_system.create_dir_all(parent)?;
+        }
+        runtime.file_system.write_string(&quality_path, &quality_doc)?;
+        let now = runtime
+            .clock
+            .now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        runtime
+            .file_system
+            .write_string(&stamp_path, &now.to_string())?;
+    }
+    Ok((quality_path, should_regen))
 }
 
 pub fn run_startup_audits(
@@ -49,19 +88,8 @@ pub fn run_startup_audits(
         cfg.startup.validation_command = Some(profile.user_validated.validation_command.clone());
     }
 
-    let quality_path = if PathBuf::from(&cfg.quality_report.path).is_absolute() {
-        PathBuf::from(&cfg.quality_report.path)
-    } else {
-        scope.working_dir.join(&cfg.quality_report.path)
-    };
-
-    let quality_doc = render_quality_grade_document(&profile_loc.display().to_string(), &profile);
-    if let Some(parent) = quality_path.parent() {
-        runtime.file_system.create_dir_all(parent)?;
-    }
-    runtime
-        .file_system
-        .write_string(&quality_path, &quality_doc)?;
+    let (quality_path, quality_written) = refresh_quality_report(runtime, cfg, scope, false)?;
+    let quality_doc = runtime.file_system.read_to_string(&quality_path)?;
 
     let wt = reconcile_worktrees();
     let prs = reconcile_open_prs();
@@ -150,23 +178,47 @@ pub fn run_startup_audits(
         }
     }
 
-    runtime.terminal.write_line(&format!(
-        "startup health summary: quality={} stale_worktrees={}/{} pr_collisions={}/{} seeded_tasks={}",
-        quality_path.display(),
-        wt.stale_found,
-        wt.stale_fixed,
-        prs.collisions_found,
-        prs.collisions_fixed,
-        seeded_tasks_upserted
-    ))?;
+    if !runtime.terminal.stdin_is_tty() {
+        runtime.terminal.write_line(&format!(
+            "startup health summary: quality={} stale_worktrees={}/{} pr_collisions={}/{} seeded_tasks={}",
+            quality_path.display(),
+            wt.stale_found,
+            wt.stale_fixed,
+            prs.collisions_found,
+            prs.collisions_fixed,
+            seeded_tasks_upserted
+        ))?;
+    }
 
     Ok(StartupSummary {
         quality_path,
-        quality_written: true,
+        quality_written,
         stale_worktrees_found: wt.stale_found,
         stale_worktrees_fixed: wt.stale_fixed,
         pr_collisions_found: prs.collisions_found,
         pr_collisions_fixed: prs.collisions_fixed,
         seeded_tasks_upserted,
     })
+}
+
+fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
+    PathBuf::from(format!("{}.stamp", quality_path.display()))
+}
+
+fn report_stamp_is_stale(
+    runtime: &ProductionRuntime,
+    stamp_path: &std::path::Path,
+) -> Result<bool, GardenerError> {
+    if !runtime.file_system.exists(stamp_path) {
+        return Ok(true);
+    }
+    let raw = runtime.file_system.read_to_string(stamp_path)?;
+    let stamp = raw.trim().parse::<u64>().unwrap_or(0);
+    let now = runtime
+        .clock
+        .now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok(now.saturating_sub(stamp) > REPORT_TTL_SECONDS)
 }

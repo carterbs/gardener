@@ -355,18 +355,15 @@ pub fn run_with_runtime(
             "Dispatching tasks to workers and streaming progress",
         )?;
         let completed = run_worker_pool_fsm(
+            runtime,
+            &startup.scope,
             &cfg_for_startup,
             &store,
             runtime.terminal.as_ref(),
             target as usize,
             cli.task.as_deref(),
         )?;
-        if runtime.terminal.stdin_is_tty() {
-            runtime.terminal.write_line(&format!(
-                "phase5 worker-fsm complete: target={} completed={}",
-                target, completed
-            ))?;
-        } else {
+        if !runtime.terminal.stdin_is_tty() {
             runtime.terminal.write_line(&structured_fallback_line(
                 "pool",
                 "complete",

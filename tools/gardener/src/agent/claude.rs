@@ -75,13 +75,6 @@ impl AgentAdapter for ClaudeAdapter {
             cwd: Some(context.cwd.clone()),
         })?;
 
-        if context.cancel_requested {
-            process_runner.kill(handle)?;
-            return Err(GardenerError::Process(
-                "claude adapter canceled: child terminated".to_string(),
-            ));
-        }
-
         let output = process_runner.wait(handle)?;
         if output.exit_code != 0 {
             return Err(GardenerError::Process(output.stderr));
@@ -133,12 +126,10 @@ mod tests {
             cwd: PathBuf::from("/repo"),
             prompt_version: "v1".to_string(),
             context_manifest_hash: "hash".to_string(),
-            knowledge_refs: vec![],
             output_schema: None,
             output_file: None,
             permissive_mode: true,
             max_turns: Some(4),
-            cancel_requested: false,
         }
     }
 
@@ -157,19 +148,6 @@ mod tests {
         assert_eq!(result.payload["ok"], true);
         assert_eq!(runner.spawned()[0].program, "claude");
         assert!(runner.spawned()[0].args.contains(&"-p".to_string()));
-    }
-
-    #[test]
-    fn cancel_path_kills_child() {
-        let runner = FakeProcessRunner::default();
-        let adapter = ClaudeAdapter;
-        let mut ctx = context();
-        ctx.cancel_requested = true;
-        let err = adapter
-            .execute(&runner, &ctx, "prompt")
-            .expect_err("canceled");
-        assert!(format!("{err}").contains("canceled"));
-        assert_eq!(runner.kills(), vec![0]);
     }
 
     #[test]

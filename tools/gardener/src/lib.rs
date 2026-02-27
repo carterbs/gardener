@@ -26,7 +26,6 @@ pub mod quality_grades;
 pub mod quality_scoring;
 pub mod repo_intelligence;
 pub mod runtime;
-pub mod scheduler;
 pub mod seed_runner;
 pub mod seeding;
 pub mod startup;
@@ -57,7 +56,7 @@ use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
-use worker_pool::{run_worker_pool_fsm, run_worker_pool_stub};
+use worker_pool::run_worker_pool_fsm;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gardener")]
@@ -317,6 +316,7 @@ pub fn run_with_runtime(
                 &refs,
                 runtime.process_runner.as_ref(),
                 runtime.file_system.as_ref(),
+                runtime.clock.as_ref(),
                 &startup.scope.working_dir,
             )?;
         }
@@ -327,25 +327,6 @@ pub fn run_with_runtime(
         )?;
         if !cfg_for_startup.execution.test_mode {
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
-        }
-        if cfg_for_startup.execution.worker_mode == "stub_complete" {
-            let db_path = startup
-                .scope
-                .repo_root
-                .as_ref()
-                .unwrap_or(&startup.scope.working_dir)
-                .join(".cache/gardener/backlog.sqlite");
-            let store = BacklogStore::open(db_path)?;
-            let summary = run_worker_pool_stub(
-                &store,
-                cfg_for_startup.orchestrator.parallelism as usize,
-                target as usize,
-            )?;
-            runtime.terminal.write_line(&format!(
-                "phase4 scheduler-stub complete: target={} completed={}",
-                target, summary.completed_count
-            ))?;
-            return Ok(0);
         }
         let db_path = startup
             .scope

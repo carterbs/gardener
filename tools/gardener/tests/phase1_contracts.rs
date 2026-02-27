@@ -11,7 +11,7 @@ use gardener::runtime::{
     ProductionRuntime, Terminal,
 };
 use gardener::triage_agent_detection::{is_non_interactive, EnvMap};
-use gardener::types::{AgentKind, NonInteractiveReason, ValidationCommandSource, WorkerState};
+use gardener::types::{AgentKind, NonInteractiveReason, WorkerState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -29,7 +29,7 @@ fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> 
     )
     .expect("seed profile");
     let process = FakeProcessRunner::default();
-    for _ in 0..12 {
+    for _ in 0..20 {
         process.push_response(Ok(ProcessOutput {
             exit_code: if git_root.is_some() { 0 } else { 1 },
             stdout: git_root.map(|v| format!("{v}\n")).unwrap_or_default(),
@@ -143,7 +143,15 @@ fn binary_help_and_prune_smoke() {
 
 #[test]
 fn run_with_runtime_paths_and_errors() {
-    let runtime = runtime_with_config("", true, Some(TEST_REPO_ROOT));
+    // Clean stale SQLite from prior runs to avoid claiming leftover tasks
+    let _ = std::fs::remove_file(
+        PathBuf::from(TEST_REPO_ROOT).join(".cache/gardener/backlog.sqlite"),
+    );
+    let runtime = runtime_with_config(
+        "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n",
+        true,
+        Some(TEST_REPO_ROOT),
+    );
     let prune = vec![
         "gardener".into(),
         "--prune-only".into(),
@@ -155,23 +163,34 @@ fn run_with_runtime_paths_and_errors() {
         0
     );
 
-    let backlog = vec!["gardener".into(), "--backlog-only".into()];
-    assert_eq!(
-        gardener::run_with_runtime(&backlog, &[], Path::new("/cwd"), &runtime).unwrap(),
-        0
-    );
+    let backlog = vec![
+        "gardener".into(),
+        "--backlog-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let backlog_result = gardener::run_with_runtime(&backlog, &[], Path::new("/cwd"), &runtime);
+    eprintln!("backlog result: {backlog_result:?}");
+    assert_eq!(backlog_result.unwrap(), 0);
 
-    let quality = vec!["gardener".into(), "--quality-grades-only".into()];
-    assert_eq!(
-        gardener::run_with_runtime(&quality, &[], Path::new("/cwd"), &runtime).unwrap(),
-        0
-    );
+    let quality = vec![
+        "gardener".into(),
+        "--quality-grades-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let quality_result = gardener::run_with_runtime(&quality, &[], Path::new("/cwd"), &runtime);
+    eprintln!("quality result: {quality_result:?}");
+    assert_eq!(quality_result.unwrap(), 0);
 
-    let normal = vec!["gardener".into()];
-    assert_eq!(
-        gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime).unwrap(),
-        0
-    );
+    let normal = vec![
+        "gardener".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let normal_result = gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime);
+    eprintln!("normal result: {normal_result:?}");
+    assert_eq!(normal_result.unwrap(), 0);
 
     let help = vec!["gardener".into(), "--help".into()];
     assert_eq!(
@@ -284,16 +303,16 @@ default = "claude"
     );
 
     let resolved = resolve_validation_command(&cfg2, Some("npm run custom"));
-    assert_eq!(resolved.source, ValidationCommandSource::CliOverride);
+    assert_eq!(resolved.command, "npm run custom");
 
     cfg2.validation.command.clear();
     cfg2.startup.validation_command = Some("npm run startup".to_string());
     let resolved = resolve_validation_command(&cfg2, None);
-    assert_eq!(resolved.source, ValidationCommandSource::StartupValidation);
+    assert_eq!(resolved.command, "npm run startup");
 
     cfg2.startup.validation_command = None;
     let resolved = resolve_validation_command(&cfg2, None);
-    assert_eq!(resolved.source, ValidationCommandSource::AutoDiscovery);
+    assert_eq!(resolved.command, "true");
 }
 
 #[test]
@@ -302,8 +321,6 @@ fn config_exhaustive_overrides_and_validation_paths() {
 [scheduler]
 lease_timeout_seconds = 111
 heartbeat_interval_seconds = 22
-starvation_threshold_seconds = 33
-reconcile_interval_seconds = 44
 
 [prompts.token_budget]
 understand = 1
@@ -324,7 +341,7 @@ max_turns = 99
 
 [execution]
 permissions_mode = "custom"
-worker_mode = "stub_complete"
+worker_mode = "normal"
 test_mode = true
 "#;
     let fs = FakeFileSystem::with_file("/cfg.toml", config_toml);
@@ -341,8 +358,6 @@ test_mode = true
     let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).unwrap();
     assert_eq!(cfg.scheduler.lease_timeout_seconds, 111);
     assert_eq!(cfg.scheduler.heartbeat_interval_seconds, 22);
-    assert_eq!(cfg.scheduler.starvation_threshold_seconds, 33);
-    assert_eq!(cfg.scheduler.reconcile_interval_seconds, 44);
     assert_eq!(cfg.prompts.token_budget.understand, 1);
     assert_eq!(cfg.prompts.token_budget.planning, 2);
     assert_eq!(cfg.prompts.token_budget.doing, 3);
@@ -355,7 +370,7 @@ test_mode = true
     assert_eq!(cfg.seeding.model, "claude-sonnet-4-6");
     assert_eq!(cfg.seeding.max_turns, 99);
     assert_eq!(cfg.execution.permissions_mode, "custom");
-    assert_eq!(cfg.execution.worker_mode, "stub_complete");
+    assert_eq!(cfg.execution.worker_mode, "normal");
     assert!(cfg.execution.test_mode);
     assert_eq!(scope.repo_root, None);
 
@@ -741,9 +756,6 @@ fn cli_agent_from_impl_covers_both_variants() {
 
 #[test]
 fn agent_kind_helpers() {
-    assert_eq!(AgentKind::parse_cli("claude"), Some(AgentKind::Claude));
-    assert_eq!(AgentKind::parse_cli("codex"), Some(AgentKind::Codex));
-    assert_eq!(AgentKind::parse_cli("x"), None);
     assert_eq!(AgentKind::Claude.as_str(), "claude");
     assert_eq!(AgentKind::Codex.as_str(), "codex");
 }

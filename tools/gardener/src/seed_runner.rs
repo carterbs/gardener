@@ -2,7 +2,7 @@ use crate::agent::factory::AdapterFactory;
 use crate::agent::AdapterContext;
 use crate::errors::GardenerError;
 use crate::runtime::ProcessRunner;
-use crate::types::{AgentKind, RuntimeScope, WorkerState};
+use crate::types::{AgentKind, RuntimeScope};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,7 +39,6 @@ pub fn run_legacy_seed_runner_v1(
             cwd: scope.working_dir.clone(),
             prompt_version: "seeding-v1".to_string(),
             context_manifest_hash: "seeding-context".to_string(),
-            knowledge_refs: vec![],
             output_schema: None,
             output_file: Some(
                 scope
@@ -48,12 +47,9 @@ pub fn run_legacy_seed_runner_v1(
             ),
             permissive_mode: true,
             max_turns: Some(12),
-            cancel_requested: false,
         },
         prompt,
     )?;
-    let _ = WorkerState::Seeding;
-
     let payload: SeedPayload = serde_json::from_value(result.payload)
         .map_err(|e| GardenerError::OutputEnvelope(e.to_string()))?;
     Ok(payload.tasks)

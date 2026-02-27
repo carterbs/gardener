@@ -9,7 +9,7 @@ use crate::triage_agent_detection::{detect_agent, is_non_interactive, DetectedAg
 use crate::triage_discovery::{run_discovery, DiscoveryAssessment};
 use crate::triage_interview::run_interview;
 use crate::types::{AgentKind, RuntimeScope};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriageDecision {
@@ -107,6 +107,7 @@ pub fn run_triage(
         &cfg.validation.command,
     )?;
 
+    let agents_md = detected.agents_md_present;
     let mut profile = build_profile(
         runtime.clock.as_ref(),
         &scope.working_dir,
@@ -119,10 +120,15 @@ pub fn run_triage(
         detected.claude_signals,
         detected.codex_signals,
         interview.validation_command,
+        agents_md,
     );
     profile.user_validated.additional_context = interview.additional_context;
     profile.user_validated.external_docs_accessible = interview.external_docs_accessible;
     profile.user_validated.preferred_parallelism = interview.preferred_parallelism;
+    profile.user_validated.agent_steering_correction = interview.agent_steering_correction;
+    profile.user_validated.external_docs_surface = interview.external_docs_surface;
+    profile.user_validated.guardrails_correction = interview.guardrails_correction;
+    profile.user_validated.coverage_grade_override = interview.coverage_grade_override;
     let path = profile_path(scope, cfg);
     write_profile(runtime.file_system.as_ref(), &path, &profile)?;
     Ok(profile)
@@ -152,9 +158,4 @@ pub fn ensure_profile_for_run(
             run_triage(runtime, scope, cfg, env, agent_override).map(Some)
         }
     }
-}
-
-pub fn profile_exists(runtime: &ProductionRuntime, scope: &RuntimeScope, cfg: &AppConfig) -> bool {
-    let path = profile_path(scope, cfg);
-    runtime.file_system.exists(Path::new(&path))
 }

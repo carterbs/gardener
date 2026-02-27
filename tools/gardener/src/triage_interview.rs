@@ -9,6 +9,10 @@ pub struct InterviewResult {
     pub validation_command: String,
     pub additional_context: String,
     pub external_docs_accessible: bool,
+    pub agent_steering_correction: String,
+    pub external_docs_surface: String,
+    pub guardrails_correction: String,
+    pub coverage_grade_override: String,
 }
 
 pub fn run_interview(
@@ -55,6 +59,19 @@ pub fn run_interview(
     let mut validation_command = default_validation_command.to_string();
     let mut additional_context = String::new();
     let mut external_docs_accessible = true;
+    let agent_steering_correction = format!(
+        "{}: {}",
+        discovery.agent_steering.grade, discovery.agent_steering.summary
+    );
+    let external_docs_surface = format!(
+        "{}: {}",
+        discovery.knowledge_accessible.grade, discovery.knowledge_accessible.summary
+    );
+    let guardrails_correction = format!(
+        "{}: {}",
+        discovery.mechanical_guardrails.grade, discovery.mechanical_guardrails.summary
+    );
+    let coverage_grade_override = discovery.coverage_signal.grade.clone();
     if terminal.stdin_is_tty() {
         match run_repo_health_wizard(default_validation_command) {
             Ok(answers) => {
@@ -76,5 +93,9 @@ pub fn run_interview(
         validation_command,
         additional_context,
         external_docs_accessible,
+        agent_steering_correction,
+        external_docs_surface,
+        guardrails_correction,
+        coverage_grade_override,
     })
 }

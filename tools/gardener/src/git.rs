@@ -21,20 +21,6 @@ impl<'a> GitClient<'a> {
         }
     }
 
-    pub fn clear_stale_lock_file(&self) -> Result<(), GardenerError> {
-        let out = self.run([
-            "sh",
-            "-lc",
-            "test -f .git/index.lock && rm .git/index.lock || true",
-        ])?;
-        if out.exit_code != 0 {
-            return Err(GardenerError::Process(
-                "failed to clear stale lock file".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     pub fn detect_detached_head(&self) -> Result<bool, GardenerError> {
         let out = self.run(["git", "symbolic-ref", "--short", "HEAD"])?;
         Ok(out.exit_code != 0)

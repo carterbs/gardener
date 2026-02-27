@@ -87,8 +87,12 @@ impl<'a> GhClient<'a> {
     }
 }
 
-pub fn upgrade_unmerged_collision_priority(_existing: Priority) -> Priority {
-    Priority::P0
+pub fn upgrade_unmerged_collision_priority(existing: Priority) -> Priority {
+    match existing {
+        Priority::P0 => Priority::P0,
+        Priority::P1 => Priority::P0,
+        Priority::P2 => Priority::P1,
+    }
 }
 
 #[cfg(test)]
@@ -126,10 +130,18 @@ mod tests {
     }
 
     #[test]
-    fn unmerged_collision_always_upgrades_to_p0() {
+    fn unmerged_collision_priority_escalates_one_level() {
+        assert_eq!(
+            upgrade_unmerged_collision_priority(Priority::P0),
+            Priority::P0
+        );
+        assert_eq!(
+            upgrade_unmerged_collision_priority(Priority::P1),
+            Priority::P0
+        );
         assert_eq!(
             upgrade_unmerged_collision_priority(Priority::P2),
-            Priority::P0
+            Priority::P1
         );
     }
 }

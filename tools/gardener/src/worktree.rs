@@ -151,12 +151,6 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
         });
     }
 
-    if entries.is_empty() {
-        return Err(GardenerError::Process(
-            "no worktree entries found in porcelain output".to_string(),
-        ));
-    }
-
     Ok(entries)
 }
 

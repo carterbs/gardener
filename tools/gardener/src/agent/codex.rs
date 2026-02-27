@@ -85,13 +85,6 @@ impl AgentAdapter for CodexAdapter {
             cwd: Some(context.cwd.clone()),
         })?;
 
-        if context.cancel_requested {
-            process_runner.kill(handle)?;
-            return Err(GardenerError::Process(
-                "codex adapter canceled: child terminated".to_string(),
-            ));
-        }
-
         let output = process_runner.wait(handle)?;
         if output.exit_code != 0 {
             return Err(GardenerError::Process(output.stderr));
@@ -152,12 +145,10 @@ mod tests {
             cwd: PathBuf::from("/repo"),
             prompt_version: "v1".to_string(),
             context_manifest_hash: "hash".to_string(),
-            knowledge_refs: vec![],
             output_schema: Some(PathBuf::from("/repo/schema.json")),
             output_file: Some(PathBuf::from("/repo/out.json")),
             permissive_mode: true,
             max_turns: None,
-            cancel_requested: false,
         }
     }
 
@@ -217,19 +208,6 @@ mod tests {
         assert!(caps.supports_output_schema);
         assert!(caps.supports_output_last_message);
         assert!(caps.supports_listen_stdio);
-    }
-
-    #[test]
-    fn cancel_path_kills_child() {
-        let runner = FakeProcessRunner::default();
-        let adapter = CodexAdapter;
-        let mut ctx = context();
-        ctx.cancel_requested = true;
-        let err = adapter
-            .execute(&runner, &ctx, "prompt")
-            .expect_err("canceled");
-        assert!(format!("{err}").contains("canceled"));
-        assert_eq!(runner.kills(), vec![0]);
     }
 
     #[test]

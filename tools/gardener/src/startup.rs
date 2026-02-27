@@ -43,10 +43,11 @@ pub fn refresh_quality_report(
     let stamp_path = quality_stamp_path(&quality_path);
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
-        || report_stamp_is_stale(runtime, cfg, &stamp_path)?;
+        || report_stamp_is_stale(runtime, cfg, &stamp_path, scope)?;
     if should_regen {
+        let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
         let quality_doc =
-            render_quality_grade_document(&profile_loc.display().to_string(), &profile);
+            render_quality_grade_document(&profile_loc.display().to_string(), &profile, repo_root);
         if let Some(parent) = quality_path.parent() {
             runtime.file_system.create_dir_all(parent)?;
         }
@@ -111,7 +112,23 @@ pub fn run_startup_audits(
         if out.exit_code != 0 {
             runtime
                 .terminal
-                .write_line("WARN startup validation failed; enqueue P0 recovery task")?;
+                .write_line("WARN startup validation failed; enqueueing P0 recovery task")?;
+            let db_path = scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&scope.working_dir)
+                .join(".cache/gardener/backlog.sqlite");
+            let store = BacklogStore::open(db_path)?;
+            store.upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: "Recovery: startup validation failed".to_string(),
+                details: format!("Validation command exited with code {}", out.exit_code),
+                scope_key: "startup".to_string(),
+                priority: Priority::P0,
+                source: "validate_on_boot".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })?;
         }
     }
 
@@ -235,6 +252,7 @@ fn report_stamp_is_stale(
     runtime: &ProductionRuntime,
     cfg: &AppConfig,
     stamp_path: &std::path::Path,
+    scope: &RuntimeScope,
 ) -> Result<bool, GardenerError> {
     if !runtime.file_system.exists(stamp_path) {
         return Ok(true);
@@ -252,7 +270,25 @@ fn report_stamp_is_stale(
         .stale_after_days
         .saturating_mul(24 * 60 * 60)
         .max(REPORT_TTL_SECONDS);
-    Ok(now.saturating_sub(stamp) > ttl_seconds)
+    if now.saturating_sub(stamp) > ttl_seconds {
+        return Ok(true);
+    }
+    if cfg.quality_report.stale_if_head_commit_differs {
+        let profile_loc = crate::triage::profile_path(scope, cfg);
+        if let Ok(profile) = read_profile(runtime.file_system.as_ref(), &profile_loc) {
+            if let Ok(current_head) =
+                crate::repo_intelligence::current_head_sha(
+                    runtime.process_runner.as_ref(),
+                    &scope.working_dir,
+                )
+            {
+                if current_head != profile.meta.head_sha {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

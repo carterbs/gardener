@@ -1,9 +1,9 @@
 use crate::errors::GardenerError;
 use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner};
-use crate::triage_discovery::{DimensionAssessment, DiscoveryAssessment};
+use crate::triage_discovery::DiscoveryAssessment;
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -117,24 +117,6 @@ pub fn commits_since_profile_head(
     Ok(out.stdout.trim().parse::<u64>().unwrap_or(0))
 }
 
-pub fn is_stale(
-    profile: &RepoIntelligenceProfile,
-    process_runner: &dyn ProcessRunner,
-    cwd: &Path,
-    stale_after_commits: u64,
-) -> bool {
-    if let Ok(current) = current_head_sha(process_runner, cwd) {
-        if current == profile.meta.head_sha {
-            return false;
-        }
-        if let Ok(diff) = commits_since_profile_head(process_runner, cwd, &profile.meta.head_sha) {
-            return diff > stale_after_commits;
-        }
-        return true;
-    }
-    false
-}
-
 pub fn build_profile(
     clock: &dyn Clock,
     working_dir: &Path,
@@ -146,6 +128,7 @@ pub fn build_profile(
     claude_signals: Vec<String>,
     codex_signals: Vec<String>,
     validation_command: String,
+    agents_md_present: bool,
 ) -> RepoIntelligenceProfile {
     let now_secs = clock
         .now()
@@ -175,7 +158,7 @@ pub fn build_profile(
                 .unwrap_or_else(|| "unknown".to_string()),
             claude_signals,
             codex_signals,
-            agents_md_present: false,
+            agents_md_present,
             user_confirmed: true,
         },
         discovery: effective_discovery,
@@ -247,17 +230,3 @@ fn readiness_grade(score: i64) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
-pub fn profile_path_from_config(path: &str, working_dir: &PathBuf) -> PathBuf {
-    let profile = PathBuf::from(path);
-    if profile.is_absolute() {
-        profile
-    } else {
-        working_dir.join(profile)
-    }
-}
-
-#[allow(dead_code)]
-fn _is_unknown(dim: &DimensionAssessment) -> bool {
-    dim.grade == "unknown"
-}

@@ -1,8 +1,6 @@
 use crate::errors::GardenerError;
 use crate::runtime::{FileSystem, ProcessRequest, ProcessRunner};
-use crate::types::{
-    AgentKind, RuntimeScope, ValidationCommandResolution, ValidationCommandSource, WorkerState,
-};
+use crate::types::{AgentKind, RuntimeScope, ValidationCommandResolution, WorkerState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,7 +58,6 @@ pub struct StartupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationConfig {
     pub command: String,
-    pub allow_agent_discovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,8 +75,6 @@ pub struct StateConfig {
 pub struct SchedulerConfig {
     pub lease_timeout_seconds: u64,
     pub heartbeat_interval_seconds: u64,
-    pub starvation_threshold_seconds: u64,
-    pub reconcile_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,7 +137,6 @@ impl Default for AppConfig {
             },
             validation: ValidationConfig {
                 command: "npm run validate".to_string(),
-                allow_agent_discovery: true,
             },
             agent: AgentConfig {
                 default: Some(AgentKind::Codex),
@@ -151,8 +145,6 @@ impl Default for AppConfig {
             scheduler: SchedulerConfig {
                 lease_timeout_seconds: 900,
                 heartbeat_interval_seconds: 15,
-                starvation_threshold_seconds: 180,
-                reconcile_interval_seconds: 30,
             },
             prompts: PromptsConfig {
                 token_budget: TokenBudgetConfig {
@@ -228,15 +220,12 @@ struct PartialStartupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PartialValidationConfig {
     command: Option<String>,
-    allow_agent_discovery: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PartialSchedulerConfig {
     lease_timeout_seconds: Option<u64>,
     heartbeat_interval_seconds: Option<u64>,
-    starvation_threshold_seconds: Option<u64>,
-    reconcile_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -334,9 +323,6 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         if let Some(command) = validation.command {
             cfg.validation.command = command;
         }
-        if let Some(allow_agent_discovery) = validation.allow_agent_discovery {
-            cfg.validation.allow_agent_discovery = allow_agent_discovery;
-        }
     }
 
     if let Some(agent) = partial.agent {
@@ -353,12 +339,6 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = scheduler.heartbeat_interval_seconds {
             cfg.scheduler.heartbeat_interval_seconds = value;
-        }
-        if let Some(value) = scheduler.starvation_threshold_seconds {
-            cfg.scheduler.starvation_threshold_seconds = value;
-        }
-        if let Some(value) = scheduler.reconcile_interval_seconds {
-            cfg.scheduler.reconcile_interval_seconds = value;
         }
     }
 
@@ -517,7 +497,6 @@ pub fn resolve_validation_command(
     if let Some(cli) = cli_override {
         return ValidationCommandResolution {
             command: cli.to_string(),
-            source: ValidationCommandSource::CliOverride,
             startup_validate_on_boot: cfg.startup.validate_on_boot,
             startup_validation_command: cfg.startup.validation_command.clone(),
         };
@@ -526,7 +505,6 @@ pub fn resolve_validation_command(
     if !cfg.validation.command.trim().is_empty() {
         return ValidationCommandResolution {
             command: cfg.validation.command.clone(),
-            source: ValidationCommandSource::ConfigValidation,
             startup_validate_on_boot: cfg.startup.validate_on_boot,
             startup_validation_command: cfg.startup.validation_command.clone(),
         };
@@ -535,7 +513,6 @@ pub fn resolve_validation_command(
     if let Some(startup) = &cfg.startup.validation_command {
         return ValidationCommandResolution {
             command: startup.clone(),
-            source: ValidationCommandSource::StartupValidation,
             startup_validate_on_boot: cfg.startup.validate_on_boot,
             startup_validation_command: cfg.startup.validation_command.clone(),
         };
@@ -543,7 +520,6 @@ pub fn resolve_validation_command(
 
     ValidationCommandResolution {
         command: "true".to_string(),
-        source: ValidationCommandSource::AutoDiscovery,
         startup_validate_on_boot: cfg.startup.validate_on_boot,
         startup_validation_command: cfg.startup.validation_command.clone(),
     }

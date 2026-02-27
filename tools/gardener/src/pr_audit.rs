@@ -39,7 +39,6 @@ pub fn reconcile_open_prs() -> PrAuditSummary {
     };
     let mut by_branch: HashMap<String, usize> = HashMap::new();
     for pr in prs {
-        let _ = pr.number;
         *by_branch.entry(pr.head_ref_name).or_insert(0) += 1;
     }
     let collisions_found = by_branch
@@ -48,8 +47,12 @@ pub fn reconcile_open_prs() -> PrAuditSummary {
         .map(|count| count - 1)
         .sum::<usize>();
     let collisions_fixed = if collisions_found > 0 {
-        let _ = upgrade_unmerged_collision_priority(Priority::P2);
-        collisions_found
+        let upgraded = upgrade_unmerged_collision_priority(Priority::P2);
+        if upgraded != Priority::P2 {
+            collisions_found
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -61,8 +64,6 @@ pub fn reconcile_open_prs() -> PrAuditSummary {
 
 #[derive(Debug, Clone, Deserialize)]
 struct OpenPr {
-    #[serde(rename = "number")]
-    number: u64,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
 }

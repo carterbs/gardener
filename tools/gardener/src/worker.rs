@@ -268,12 +268,16 @@ fn execute_task_simulated(
         fsm.transition(WorkerState::Doing)?;
     }
 
-    let doing_payload = DoingOutput {
-        summary: "implementation complete".to_string(),
-        files_changed: vec!["src/lib.rs".to_string()],
-    };
     let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
     logs.push(prepared.log_event(fsm.state));
+
+    let _doing_output: DoingOutput = parse_typed_payload(
+        &format!(
+            "{START_MARKER}{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"summary\":\"implementation complete\",\"files_changed\":[\"src/lib.rs\"]}}}}{END_MARKER}"
+        ),
+        WorkerState::Doing,
+    )?;
+
     fsm.on_doing_turn_completed()?;
     if fsm.state == WorkerState::Parked {
         return Ok(WorkerRunSummary {
@@ -284,7 +288,6 @@ fn execute_task_simulated(
             teardown: None,
         });
     }
-    let _ = doing_payload;
 
     fsm.transition(WorkerState::Gitting)?;
     let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
@@ -419,12 +422,10 @@ fn run_agent_turn(
             cwd: worktree_path.to_path_buf(),
             prompt_version: prepared.prompt_version.clone(),
             context_manifest_hash: prepared.context_manifest_hash.clone(),
-            knowledge_refs: vec![],
             output_schema: None,
             output_file: Some(output_file),
             permissive_mode: cfg.execution.permissions_mode == "permissive_v1",
             max_turns: Some(cfg.seeding.max_turns),
-            cancel_requested: false,
         },
         &prepared.rendered,
     )?;
@@ -586,15 +587,20 @@ fn verify_merge_output(output: &MergingOutput) -> Result<(), GardenerError> {
 }
 
 fn teardown_after_completion(
-    _worktree_client: &WorktreeClient<'_>,
-    _worktree_path: &Path,
+    worktree_client: &WorktreeClient<'_>,
+    worktree_path: &Path,
     output: &MergingOutput,
 ) -> TeardownReport {
+    let worktree_cleaned = if output.merged {
+        worktree_client.cleanup_on_completion(worktree_path).is_ok()
+    } else {
+        false
+    };
     TeardownReport {
         merge_verified: output.merged,
         session_torn_down: output.merged,
         sandbox_torn_down: output.merged,
-        worktree_cleaned: false,
+        worktree_cleaned,
         state_cleared: output.merged,
     }
 }

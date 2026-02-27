@@ -1,6 +1,6 @@
 use gardener::logging::structured_fallback_line;
 use gardener::runtime::{FakeTerminal, Terminal};
-use gardener::tui::{handle_key, render_dashboard, BacklogView, QueueStats, WorkerRow};
+use gardener::tui::{render_dashboard, BacklogView, QueueStats, WorkerRow};
 
 #[test]
 fn fake_terminal_captures_tui_frames_and_interactions() {
@@ -38,16 +38,10 @@ fn fake_terminal_captures_tui_frames_and_interactions() {
     );
 
     terminal.draw(&frame).expect("draw");
-    terminal
-        .write_line(handle_key('q'))
-        .expect("interaction command");
 
     let frames = terminal.drawn_frames();
     assert_eq!(frames.len(), 1);
     assert!(frames[0].contains("worker-1"));
-
-    let lines = terminal.written_lines();
-    assert_eq!(lines, vec!["quit".to_string()]);
 }
 
 #[test]

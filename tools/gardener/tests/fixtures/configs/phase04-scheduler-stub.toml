@@ -32,5 +32,5 @@ max_turns = 12
 
 [execution]
 permissions_mode = "permissive_v1"
-worker_mode = "stub_complete"
+worker_mode = "normal"
 test_mode = true

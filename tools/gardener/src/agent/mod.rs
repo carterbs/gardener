@@ -1,10 +1,10 @@
 use crate::errors::GardenerError;
 use crate::protocol::StepResult;
-use crate::runtime::{FileSystem, ProcessRunner};
+use crate::runtime::{Clock, FileSystem, ProcessRunner};
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 pub mod claude;
 pub mod codex;
@@ -19,12 +19,10 @@ pub struct AdapterContext {
     pub cwd: PathBuf,
     pub prompt_version: String,
     pub context_manifest_hash: String,
-    pub knowledge_refs: Vec<String>,
     pub output_schema: Option<PathBuf>,
     pub output_file: Option<PathBuf>,
     pub permissive_mode: bool,
     pub max_turns: Option<u32>,
-    pub cancel_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -64,6 +62,7 @@ pub fn probe_and_persist(
     adapters: &[&dyn AgentAdapter],
     process_runner: &dyn ProcessRunner,
     file_system: &dyn FileSystem,
+    clock: &dyn Clock,
     cache_root: &Path,
 ) -> Result<CapabilitySnapshot, GardenerError> {
     let mut caps = Vec::new();
@@ -71,7 +70,8 @@ pub fn probe_and_persist(
         caps.push(adapter.probe_capabilities(process_runner)?);
     }
 
-    let generated_at_unix = SystemTime::now()
+    let generated_at_unix = clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
@@ -106,7 +106,7 @@ mod tests {
         probe_and_persist, validate_model, AdapterCapabilities, AdapterContext, AgentAdapter,
     };
     use crate::protocol::{AgentTerminal, StepResult};
-    use crate::runtime::{FakeFileSystem, FakeProcessRunner, FileSystem};
+    use crate::runtime::{FakeClock, FakeFileSystem, FakeProcessRunner, FileSystem};
     use crate::types::AgentKind;
     use serde_json::json;
     use std::path::Path;
@@ -148,9 +148,11 @@ mod tests {
     fn probe_persists_capability_snapshot() {
         let fs = FakeFileSystem::default();
         let runner = FakeProcessRunner::default();
+        let clock = FakeClock::default();
         let adapter = TestAdapter;
         let snapshot =
-            probe_and_persist(&[&adapter], &runner, &fs, Path::new("/repo")).expect("snapshot");
+            probe_and_persist(&[&adapter], &runner, &fs, &clock, Path::new("/repo"))
+                .expect("snapshot");
         assert_eq!(snapshot.adapters.len(), 1);
         assert!(fs.exists(Path::new("/repo/.cache/gardener/adapter-capabilities.json")));
     }

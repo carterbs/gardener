@@ -81,7 +81,7 @@ pub fn render_dashboard(
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
-        .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog))
+        .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog, 15, 900))
         .expect("draw");
 
     let mut out = String::new();
@@ -100,6 +100,8 @@ fn draw_dashboard_frame(
     workers: &[WorkerRow],
     stats: &QueueStats,
     backlog: &BacklogView,
+    heartbeat_interval_seconds: u64,
+    lease_timeout_seconds: u64,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -231,12 +233,12 @@ fn draw_dashboard_frame(
     let mut problems = workers
         .iter()
         .filter_map(|row| {
-            let class = classify_problem(row, 15, 900);
+            let class = classify_problem(row, heartbeat_interval_seconds, lease_timeout_seconds);
             if class == ProblemClass::Healthy {
                 return None;
             }
             Some(format!(
-                "{} {} blocking={} action=retry/release/escalate",
+                "{} {} blocking={} action=automatic recovery",
                 row.worker_id,
                 class.as_str(),
                 row.tool_line
@@ -253,7 +255,13 @@ fn draw_dashboard_frame(
         chunks[2],
     );
 
-    let footer = Paragraph::new(dashboard_controls_legend())
+    let controls_legend =
+        if workers.len() == 1 && workers[0].worker_id == "boot" && workers[0].state == "init" {
+            "Controls: startup in progress; hotkeys activate in WORKING stage".to_string()
+        } else {
+            dashboard_controls_legend()
+        };
+    let footer = Paragraph::new(controls_legend)
         .block(Block::default().borders(Borders::ALL).title("Controls"));
     frame.render_widget(footer, chunks[3]);
 }
@@ -313,10 +321,21 @@ pub fn draw_dashboard_live(
     workers: &[WorkerRow],
     stats: &QueueStats,
     backlog: &BacklogView,
+    heartbeat_interval_seconds: u64,
+    lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
     with_live_terminal(|terminal| {
         terminal
-            .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog))
+            .draw(|frame| {
+                draw_dashboard_frame(
+                    frame,
+                    workers,
+                    stats,
+                    backlog,
+                    heartbeat_interval_seconds,
+                    lease_timeout_seconds,
+                )
+            })
             .map(|_| ())
             .map_err(|e| GardenerError::Io(e.to_string()))
     })
@@ -372,16 +391,6 @@ impl ProblemClass {
             Self::Stalled => "stalled",
             Self::Zombie => "zombie",
         }
-    }
-}
-
-pub fn handle_key(key: char) -> &'static str {
-    match key {
-        'q' => "quit",
-        'r' => "retry",
-        'l' => "release-lease",
-        'p' => "park-escalate",
-        _ => "noop",
     }
 }
 
@@ -539,8 +548,7 @@ fn teardown_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_problem, handle_key, render_dashboard, BacklogView, ProblemClass, QueueStats,
-        WorkerRow,
+        classify_problem, render_dashboard, BacklogView, ProblemClass, QueueStats, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -603,10 +611,6 @@ mod tests {
         assert!(frame.contains("In Progress"));
         assert!(frame.contains("Queued"));
 
-        assert_eq!(handle_key('q'), "quit");
-        assert_eq!(handle_key('r'), "retry");
-        assert_eq!(handle_key('l'), "release-lease");
-        assert_eq!(handle_key('p'), "park-escalate");
-        assert_eq!(handle_key('x'), "noop");
+        // handle_key removed — real dispatch uses hotkeys::action_for_key
     }
 }

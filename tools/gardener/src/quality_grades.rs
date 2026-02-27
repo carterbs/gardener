@@ -2,13 +2,15 @@ use crate::quality_domain_catalog::discover_domains;
 use crate::quality_evidence::collect_evidence;
 use crate::quality_scoring::score_domains;
 use crate::repo_intelligence::RepoIntelligenceProfile;
+use std::path::Path;
 
 pub fn render_quality_grade_document(
     profile_path: &str,
     profile: &RepoIntelligenceProfile,
+    repo_root: &Path,
 ) -> String {
     let domains = discover_domains();
-    let evidence = collect_evidence(&domains);
+    let evidence = collect_evidence(&domains, repo_root);
     let has_coverage_gates = profile.agent_readiness.coverage_signal_score > 0;
     let scores = score_domains(&evidence, has_coverage_gates);
 

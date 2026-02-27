@@ -3,9 +3,11 @@ use crate::tui::{
     close_live_terminal, draw_dashboard_live, draw_report_live, render_dashboard, BacklogView,
     QueueStats, WorkerRow,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +58,18 @@ pub trait Terminal: Send + Sync {
         stats: &QueueStats,
         backlog: &BacklogView,
     ) -> Result<(), GardenerError> {
+        self.draw_dashboard_with_config(workers, stats, backlog, 15, 900)
+    }
+    fn draw_dashboard_with_config(
+        &self,
+        workers: &[WorkerRow],
+        stats: &QueueStats,
+        backlog: &BacklogView,
+        heartbeat_interval_seconds: u64,
+        lease_timeout_seconds: u64,
+    ) -> Result<(), GardenerError> {
         let frame = render_dashboard(workers, stats, backlog, 120, 30);
+        let _ = (heartbeat_interval_seconds, lease_timeout_seconds);
         self.draw(&frame)
     }
     fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
@@ -69,6 +82,102 @@ pub trait Terminal: Send + Sync {
     fn poll_key(&self, _timeout_ms: u64) -> Result<Option<char>, GardenerError> {
         Ok(None)
     }
+}
+
+static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static KEY_LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static KEY_QUEUE: OnceLock<Mutex<VecDeque<char>>> = OnceLock::new();
+static KEY_LISTENER: OnceLock<Mutex<Option<KeyListenerState>>> = OnceLock::new();
+
+struct KeyListenerState {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+fn key_queue() -> &'static Mutex<VecDeque<char>> {
+    KEY_QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn key_listener_slot() -> &'static Mutex<Option<KeyListenerState>> {
+    KEY_LISTENER.get_or_init(|| Mutex::new(None))
+}
+
+fn enqueue_key(key: char) {
+    key_queue().lock().expect("key queue lock").push_back(key);
+}
+
+fn dequeue_key() -> Option<char> {
+    key_queue().lock().expect("key queue lock").pop_front()
+}
+
+fn clear_key_queue() {
+    key_queue().lock().expect("key queue lock").clear();
+}
+
+fn start_key_listener_if_needed() {
+    let mut slot = key_listener_slot().lock().expect("key listener slot lock");
+    if slot.is_some() {
+        return;
+    }
+
+    clear_key_queue();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_thread = Arc::clone(&stop);
+    KEY_LISTENER_ACTIVE.store(true, Ordering::SeqCst);
+    let handle = std::thread::spawn(move || {
+        while !stop_for_thread.load(Ordering::SeqCst) {
+            let polled = match crossterm::event::poll(std::time::Duration::from_millis(50)) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if !polled {
+                continue;
+            }
+            let Ok(event) = crossterm::event::read() else {
+                continue;
+            };
+            let crossterm::event::Event::Key(key) = event else {
+                continue;
+            };
+            match key.code {
+                crossterm::event::KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    enqueue_key('q');
+                    request_interrupt();
+                }
+                crossterm::event::KeyCode::Char(c) => {
+                    enqueue_key(c);
+                    if c == 'q' {
+                        request_interrupt();
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    *slot = Some(KeyListenerState { stop, handle });
+}
+
+fn stop_key_listener() {
+    let mut slot = key_listener_slot().lock().expect("key listener slot lock");
+    let Some(state) = slot.take() else {
+        return;
+    };
+    state.stop.store(true, Ordering::SeqCst);
+    let _ = state.handle.join();
+    clear_key_queue();
+    KEY_LISTENER_ACTIVE.store(false, Ordering::SeqCst);
+}
+
+pub fn request_interrupt() {
+    INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn clear_interrupt() {
+    INTERRUPT_REQUESTED.store(false, Ordering::SeqCst);
 }
 
 pub struct ProductionClock;
@@ -142,7 +251,8 @@ impl ProcessRunner for ProductionProcessRunner {
         if let Some(cwd) = &request.cwd {
             cmd.current_dir(cwd);
         }
-        cmd.stdout(std::process::Stdio::piped())
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
         let child = cmd
@@ -160,16 +270,37 @@ impl ProcessRunner for ProductionProcessRunner {
             let mut state = self.state.lock().expect("process lock poisoned");
             state.children.remove(&handle)
         };
-        let child =
+        let mut child =
             child.ok_or_else(|| GardenerError::Process(format!("unknown handle {handle}")))?;
-        let output = child
-            .wait_with_output()
-            .map_err(|e| GardenerError::Process(e.to_string()))?;
-        Ok(ProcessOutput {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        })
+
+        loop {
+            if INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GardenerError::Process(
+                    "user interrupt requested (q/Ctrl-C)".to_string(),
+                ));
+            }
+
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|e| GardenerError::Process(e.to_string()))?;
+                    return Ok(ProcessOutput {
+                        exit_code: output.status.code().unwrap_or(-1),
+                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    });
+                }
+                Ok(None) => {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(e) => {
+                    return Err(GardenerError::Process(e.to_string()));
+                }
+            }
+        }
     }
 
     fn kill(&self, handle: u64) -> Result<(), GardenerError> {
@@ -196,7 +327,6 @@ impl Terminal for ProductionTerminal {
             return true;
         }
         std::io::IsTerminal::is_terminal(&std::io::stdin())
-            || std::io::IsTerminal::is_terminal(&std::io::stdout())
     }
 
     fn write_line(&self, line: &str) -> Result<(), GardenerError> {
@@ -209,26 +339,52 @@ impl Terminal for ProductionTerminal {
         self.write_line(frame)
     }
 
-    fn draw_dashboard(
+    fn draw_dashboard_with_config(
         &self,
         workers: &[WorkerRow],
         stats: &QueueStats,
         backlog: &BacklogView,
+        heartbeat_interval_seconds: u64,
+        lease_timeout_seconds: u64,
     ) -> Result<(), GardenerError> {
-        draw_dashboard_live(workers, stats, backlog)
+        start_key_listener_if_needed();
+        draw_dashboard_live(
+            workers,
+            stats,
+            backlog,
+            heartbeat_interval_seconds,
+            lease_timeout_seconds,
+        )
     }
 
     fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
+        start_key_listener_if_needed();
         draw_report_live(report_path, report)
     }
 
     fn close_ui(&self) -> Result<(), GardenerError> {
+        stop_key_listener();
         close_live_terminal()
     }
 
     fn poll_key(&self, timeout_ms: u64) -> Result<Option<char>, GardenerError> {
         if !self.stdin_is_tty() {
             return Ok(None);
+        }
+        if KEY_LISTENER_ACTIVE.load(Ordering::SeqCst) {
+            if timeout_ms == 0 {
+                return Ok(dequeue_key());
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+            loop {
+                if let Some(key) = dequeue_key() {
+                    return Ok(Some(key));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
         let polled = crossterm::event::poll(std::time::Duration::from_millis(timeout_ms))
             .map_err(|e| GardenerError::Io(e.to_string()))?;

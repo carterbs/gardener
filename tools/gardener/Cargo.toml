@@ -20,6 +20,8 @@ sha2 = "0.10"
 thiserror = "1.0"
 tokio = { version = "1.44", features = ["sync"] }
 toml = "0.8"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [dev-dependencies]
 assert_cmd = "2.0"

@@ -2,6 +2,7 @@
   "name": "gardener",
   "private": true,
   "scripts": {
-    "gardener:run": "./scripts/brad-gardener"
+    "gardener:run": "./scripts/brad-gardener",
+    "gardener:sync": "./scripts/brad-gardener --sync-only --config tools/gardener/tests/fixtures/configs/phase09-cutover.toml"
   }
 }

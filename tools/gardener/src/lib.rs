@@ -7,6 +7,8 @@ pub mod fsm;
 pub mod gh;
 pub mod git;
 pub mod learning_loop;
+pub mod log_retention;
+pub mod logging;
 pub mod output_envelope;
 pub mod postmerge_analysis;
 pub mod postmortem;
@@ -32,6 +34,7 @@ pub mod triage;
 pub mod triage_agent_detection;
 pub mod triage_discovery;
 pub mod triage_interview;
+pub mod tui;
 pub mod types;
 pub mod worker;
 pub mod worker_identity;
@@ -40,12 +43,14 @@ pub mod worktree;
 pub mod worktree_audit;
 
 use backlog_store::BacklogStore;
+use backlog_snapshot::export_markdown_snapshot;
 use agent::factory::AdapterFactory;
 use agent::{probe_and_persist, validate_model};
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use runtime::ProductionRuntime;
+use logging::structured_fallback_line;
 use startup::run_startup_audits;
 use triage::ensure_profile_for_run;
 use triage_agent_detection::{is_non_interactive, EnvMap};
@@ -80,6 +85,8 @@ pub struct Cli {
     pub retriage: bool,
     #[arg(long, default_value_t = false)]
     pub triage_only: bool,
+    #[arg(long, default_value_t = false)]
+    pub sync_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -153,6 +160,7 @@ pub fn run_with_runtime(
         agent: cli.agent.map(Into::into),
         retriage: cli.retriage,
         triage_only: cli.triage_only,
+        sync_only: cli.sync_only,
     };
 
     let (cfg, scope) = load_config(
@@ -209,6 +217,30 @@ pub fn run_with_runtime(
         return Ok(0);
     }
 
+    if cli.sync_only {
+        let mut cfg_for_startup = cfg.clone();
+        if !cfg_for_startup.execution.test_mode {
+            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+        }
+        let db_path = startup
+            .scope
+            .repo_root
+            .as_ref()
+            .unwrap_or(&startup.scope.working_dir)
+            .join(".cache/gardener/backlog.sqlite");
+        let snapshot_path = startup.scope.working_dir.join(".cache/gardener/backlog-snapshot.md");
+        if let Some(parent) = snapshot_path.parent() {
+            runtime.file_system.create_dir_all(parent)?;
+        }
+        let store = BacklogStore::open(db_path)?;
+        let _ = export_markdown_snapshot(&store, &snapshot_path)?;
+        runtime.terminal.write_line(&format!(
+            "sync complete: snapshot={}",
+            snapshot_path.display()
+        ))?;
+        return Ok(0);
+    }
+
     if let Some(target) = cli.target {
         let mut cfg_for_startup = cfg.clone();
         validate_model(&cfg_for_startup.seeding.model)?;
@@ -257,10 +289,18 @@ pub fn run_with_runtime(
             return Ok(0);
         }
         let completed = run_worker_pool_fsm(&cfg_for_startup, target as usize, cli.task.as_deref())?;
-        runtime.terminal.write_line(&format!(
-            "phase5 worker-fsm complete: target={} completed={}",
-            target, completed
-        ))?;
+        if runtime.terminal.stdin_is_tty() {
+            runtime.terminal.write_line(&format!(
+                "phase5 worker-fsm complete: target={} completed={}",
+                target, completed
+            ))?;
+        } else {
+            runtime.terminal.write_line(&structured_fallback_line(
+                "pool",
+                "complete",
+                &format!("target={target} completed={completed}"),
+            ))?;
+        }
         return Ok(0);
     }
 

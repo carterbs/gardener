@@ -432,6 +432,7 @@ impl BacklogStore {
                      ORDER BY
                         CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
                         CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                        attempt_count DESC,
                         last_updated ASC,
                         created_at ASC",
                 )
@@ -622,6 +623,7 @@ fn claim_next_in_tx(
                 ORDER BY
                     CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
                     CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                    attempt_count DESC,
                     last_updated ASC,
                     created_at ASC
                 LIMIT 1

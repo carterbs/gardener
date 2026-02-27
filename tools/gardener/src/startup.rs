@@ -1,6 +1,7 @@
 use crate::backlog_store::{BacklogStore, NewTask};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::pr_audit::reconcile_open_prs;
 use crate::priority::Priority;
 use crate::protocol::{AgentEvent, AgentEventKind};
@@ -12,6 +13,7 @@ use crate::task_identity::TaskKind;
 use crate::triage::profile_path;
 use crate::types::RuntimeScope;
 use crate::worktree_audit::reconcile_worktrees;
+use serde_json::json;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -47,7 +49,27 @@ pub fn refresh_quality_report(
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
         || report_stamp_is_stale(runtime, cfg, &stamp_path, scope)?;
+
+    append_run_log(
+        "debug",
+        "startup.quality_report.check",
+        json!({
+            "quality_path": quality_path.display().to_string(),
+            "force": force,
+            "should_regen": should_regen,
+        }),
+    );
+
     if should_regen {
+        append_run_log(
+            "info",
+            "startup.quality_report.regenerating",
+            json!({
+                "quality_path": quality_path.display().to_string(),
+                "primary_gap": profile.agent_readiness.primary_gap,
+                "readiness_score": profile.agent_readiness.readiness_score,
+            }),
+        );
         let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
         let quality_doc =
             render_quality_grade_document(&profile_loc.display().to_string(), &profile, repo_root);
@@ -66,6 +88,14 @@ pub fn refresh_quality_report(
         runtime
             .file_system
             .write_string(&stamp_path, &now.to_string())?;
+        append_run_log(
+            "info",
+            "startup.quality_report.refreshed",
+            json!({
+                "quality_path": quality_path.display().to_string(),
+                "stamp_ts": now,
+            }),
+        );
     }
     Ok((quality_path, should_regen))
 }
@@ -90,13 +120,36 @@ where
     F: FnMut(&str) -> Result<(), GardenerError>,
 {
     let profile_loc = profile_path(scope, cfg);
+    append_run_log(
+        "info",
+        "startup.audits.started",
+        json!({
+            "run_seeding": run_seeding,
+            "profile_loc": profile_loc.display().to_string(),
+            "working_dir": scope.working_dir.display().to_string(),
+        }),
+    );
     if !runtime.file_system.exists(&profile_loc) {
+        append_run_log(
+            "error",
+            "startup.profile.missing",
+            json!({ "profile_loc": profile_loc.display().to_string() }),
+        );
         return Err(GardenerError::Cli(
             "No repo intelligence profile found. Run `brad-gardener --triage-only` in a terminal to complete setup."
                 .to_string(),
         ));
     }
     let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
+    append_run_log(
+        "debug",
+        "startup.profile.loaded",
+        json!({
+            "profile_loc": profile_loc.display().to_string(),
+            "primary_gap": profile.agent_readiness.primary_gap,
+            "readiness_score": profile.agent_readiness.readiness_score,
+        }),
+    );
     if (cfg.startup.validation_command.is_none()
         || cfg
             .startup
@@ -105,6 +158,11 @@ where
             .is_some_and(|v| v.trim().is_empty()))
         && !profile.user_validated.validation_command.trim().is_empty()
     {
+        append_run_log(
+            "info",
+            "startup.validation_command.inherited",
+            json!({ "command": profile.user_validated.validation_command }),
+        );
         cfg.startup.validation_command = Some(profile.user_validated.validation_command.clone());
     }
 
@@ -112,7 +170,23 @@ where
     let quality_doc = runtime.file_system.read_to_string(&quality_path)?;
 
     let wt = reconcile_worktrees();
+    append_run_log(
+        "info",
+        "startup.worktrees.reconciled",
+        json!({
+            "stale_found": wt.stale_found,
+            "stale_fixed": wt.stale_fixed,
+        }),
+    );
     let prs = reconcile_open_prs();
+    append_run_log(
+        "info",
+        "startup.prs.reconciled",
+        json!({
+            "collisions_found": prs.collisions_found,
+            "collisions_fixed": prs.collisions_fixed,
+        }),
+    );
 
     if cfg.startup.validate_on_boot {
         let command = cfg
@@ -120,12 +194,25 @@ where
             .validation_command
             .clone()
             .unwrap_or_else(|| cfg.validation.command.clone());
+        append_run_log(
+            "info",
+            "startup.validation.running",
+            json!({ "command": command }),
+        );
         let out = runtime.process_runner.run(ProcessRequest {
             program: "sh".to_string(),
-            args: vec!["-lc".to_string(), command],
+            args: vec!["-lc".to_string(), command.clone()],
             cwd: Some(scope.working_dir.clone()),
         })?;
         if out.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "startup.validation.failed",
+                json!({
+                    "command": command,
+                    "exit_code": out.exit_code,
+                }),
+            );
             runtime
                 .terminal
                 .write_line("WARN startup validation failed; enqueueing P0 recovery task")?;
@@ -145,11 +232,33 @@ where
                 related_pr: None,
                 related_branch: None,
             })?;
+        } else {
+            append_run_log(
+                "info",
+                "startup.validation.passed",
+                json!({ "command": command }),
+            );
         }
     }
 
+    let db_path = scope
+        .repo_root
+        .as_ref()
+        .unwrap_or(&scope.working_dir)
+        .join(".cache/gardener/backlog.sqlite");
     let mut seeded_tasks_upserted = 0usize;
-    if run_seeding && !cfg.execution.test_mode {
+    let existing_backlog_count = BacklogStore::open(&db_path)?.list_tasks()?.len();
+    if should_seed_backlog(run_seeding, cfg.execution.test_mode, existing_backlog_count) {
+        append_run_log(
+            "info",
+            "startup.seeding.started",
+            json!({
+                "backend": format!("{:?}", cfg.seeding.backend),
+                "model": cfg.seeding.model,
+                "primary_gap": profile.agent_readiness.primary_gap,
+                "existing_backlog_count": existing_backlog_count,
+            }),
+        );
         progress("Preparing backlog seeding context from repo profile and quality grades")?;
         if !runtime.terminal.stdin_is_tty() {
             runtime.terminal.write_line(
@@ -176,6 +285,11 @@ where
             &mut progress,
         ) {
             Ok(tasks) => {
+                append_run_log(
+                    "info",
+                    "startup.seeding.agent_returned",
+                    json!({ "task_count": tasks.len() }),
+                );
                 progress(&format!(
                     "Seeding agent returned {} candidate task(s)",
                     tasks.len()
@@ -189,6 +303,14 @@ where
                 tasks
             }
             Err(err) => {
+                append_run_log(
+                    "warn",
+                    "startup.seeding.agent_failed",
+                    json!({
+                        "error": err.to_string(),
+                        "fallback_target": fallback_target,
+                    }),
+                );
                 progress(&format!(
                     "Seeding agent failed ({err}); continuing with fallback task templates"
                 ))?;
@@ -199,16 +321,16 @@ where
             }
         };
         if !seeded.is_empty() {
+            append_run_log(
+                "info",
+                "startup.seeding.persisting",
+                json!({ "task_count": seeded.len(), "source": "seed_runner_v1" }),
+            );
             progress(&format!(
                 "Persisting {} seeded task(s) to backlog store",
                 seeded.len()
             ))?;
-            let db_path = scope
-                .repo_root
-                .as_ref()
-                .unwrap_or(&scope.working_dir)
-                .join(".cache/gardener/backlog.sqlite");
-            let store = BacklogStore::open(db_path)?;
+            let store = BacklogStore::open(&db_path)?;
             for task in seeded {
                 let row = store.upsert_task(NewTask {
                     kind: TaskKind::QualityGap,
@@ -225,16 +347,19 @@ where
                 }
             }
         } else {
+            append_run_log(
+                "info",
+                "startup.seeding.fallback",
+                json!({
+                    "fallback_target": fallback_target,
+                    "primary_gap": profile.agent_readiness.primary_gap,
+                }),
+            );
             progress(&format!(
                 "No seeded tasks produced; generating {} fallback bootstrap task(s)",
                 fallback_target
             ))?;
-            let db_path = scope
-                .repo_root
-                .as_ref()
-                .unwrap_or(&scope.working_dir)
-                .join(".cache/gardener/backlog.sqlite");
-            let store = BacklogStore::open(db_path)?;
+            let store = BacklogStore::open(&db_path)?;
             for task in fallback_seed_tasks(&profile.agent_readiness.primary_gap, fallback_target) {
                 let bootstrap = store.upsert_task(task)?;
                 if !bootstrap.task_id.is_empty() {
@@ -242,6 +367,11 @@ where
                 }
             }
         }
+        append_run_log(
+            "info",
+            "startup.seeding.completed",
+            json!({ "upserted_tasks": seeded_tasks_upserted }),
+        );
         progress(&format!(
             "Backlog seeding complete; upserted {} task(s)",
             seeded_tasks_upserted
@@ -251,7 +381,35 @@ where
                 "startup backlog seeding: complete, upserted_tasks={seeded_tasks_upserted}"
             ))?;
         }
+    } else if run_seeding && !cfg.execution.test_mode {
+        append_run_log(
+            "info",
+            "startup.seeding.skipped_existing_backlog",
+            json!({ "existing_backlog_count": existing_backlog_count }),
+        );
+        progress(&format!(
+            "Skipping backlog seeding; backlog already has {existing_backlog_count} task(s)"
+        ))?;
+        if !runtime.terminal.stdin_is_tty() {
+            runtime.terminal.write_line(&format!(
+                "startup backlog seeding: skipped, existing_backlog_count={existing_backlog_count}"
+            ))?;
+        }
     }
+
+    append_run_log(
+        "info",
+        "startup.audits.completed",
+        json!({
+            "quality_path": quality_path.display().to_string(),
+            "quality_written": quality_written,
+            "stale_worktrees_found": wt.stale_found,
+            "stale_worktrees_fixed": wt.stale_fixed,
+            "pr_collisions_found": prs.collisions_found,
+            "pr_collisions_fixed": prs.collisions_fixed,
+            "seeded_tasks_upserted": seeded_tasks_upserted,
+        }),
+    );
 
     if !runtime.terminal.stdin_is_tty() {
         runtime.terminal.write_line(&format!(
@@ -274,6 +432,10 @@ where
         pr_collisions_fixed: prs.collisions_fixed,
         seeded_tasks_upserted,
     })
+}
+
+fn should_seed_backlog(run_seeding: bool, test_mode: bool, existing_backlog_count: usize) -> bool {
+    run_seeding && !test_mode && existing_backlog_count == 0
 }
 
 fn run_seed_with_heartbeat<F>(
@@ -359,7 +521,8 @@ fn summarize_seed_agent_event(event: &AgentEvent) -> Option<String> {
         AgentEventKind::ThreadStarted => Some("Agent session started".to_string()),
         AgentEventKind::TurnStarted => Some("Agent turn started".to_string()),
         AgentEventKind::ToolCall => {
-            let label = extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
+            let label =
+                extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
             let command = extract_command_preview(&event.payload);
             Some(match command {
                 Some(cmd) => format!("Agent activity: {label} started: `{cmd}`"),
@@ -367,7 +530,8 @@ fn summarize_seed_agent_event(event: &AgentEvent) -> Option<String> {
             })
         }
         AgentEventKind::ToolResult => {
-            let label = extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
+            let label =
+                extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
             let command = extract_command_preview(&event.payload);
             Some(match command {
                 Some(cmd) => format!("Agent activity: {label} completed: `{cmd}`"),
@@ -446,8 +610,12 @@ fn extract_command_preview(payload: &serde_json::Value) -> Option<String> {
         payload
             .pointer("/item/command_line")
             .and_then(serde_json::Value::as_str),
-        payload.pointer("/item/cmd").and_then(serde_json::Value::as_str),
-        payload.pointer("/command").and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/item/cmd")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/command")
+            .and_then(serde_json::Value::as_str),
         payload
             .pointer("/command_line")
             .and_then(serde_json::Value::as_str),
@@ -554,7 +722,7 @@ fn report_stamp_is_stale(
 
 #[cfg(test)]
 mod tests {
-    use super::fallback_seed_tasks;
+    use super::{fallback_seed_tasks, should_seed_backlog};
 
     #[test]
     fn fallback_seed_tasks_generate_multiple_unique_items() {
@@ -562,5 +730,13 @@ mod tests {
         assert_eq!(tasks.len(), 3);
         assert_ne!(tasks[0].title, tasks[1].title);
         assert_ne!(tasks[1].title, tasks[2].title);
+    }
+
+    #[test]
+    fn seeding_gate_requires_empty_backlog() {
+        assert!(should_seed_backlog(true, false, 0));
+        assert!(!should_seed_backlog(true, false, 1));
+        assert!(!should_seed_backlog(false, false, 0));
+        assert!(!should_seed_backlog(true, true, 0));
     }
 }

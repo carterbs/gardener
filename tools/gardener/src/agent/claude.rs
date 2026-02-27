@@ -1,5 +1,6 @@
 use crate::agent::{validate_model, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::protocol::{map_claude_event, AgentEvent, AgentTerminal, StepResult};
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use crate::types::AgentKind;
@@ -16,6 +17,11 @@ impl AgentAdapter for ClaudeAdapter {
         &self,
         process_runner: &dyn ProcessRunner,
     ) -> Result<AdapterCapabilities, GardenerError> {
+        append_run_log(
+            "debug",
+            "adapter.claude.probe_capabilities.started",
+            json!({}),
+        );
         let help = process_runner.run(ProcessRequest {
             program: "claude".to_string(),
             args: vec!["--help".to_string()],
@@ -34,9 +40,9 @@ impl AgentAdapter for ClaudeAdapter {
 
         let text = format!("{}\n{}", help.stdout, help.stderr);
 
-        Ok(AdapterCapabilities {
+        let caps = AdapterCapabilities {
             backend: Some(AgentKind::Claude),
-            version,
+            version: version.clone(),
             supports_json: false,
             supports_stream_json: text.contains("--output-format"),
             supports_output_schema: false,
@@ -44,7 +50,17 @@ impl AgentAdapter for ClaudeAdapter {
             supports_max_turns: text.contains("--max-turns"),
             supports_listen_stdio: false,
             supports_stdin_prompt: false,
-        })
+        };
+        append_run_log(
+            "info",
+            "adapter.claude.probe_capabilities.completed",
+            json!({
+                "version": version,
+                "supports_stream_json": caps.supports_stream_json,
+                "supports_max_turns": caps.supports_max_turns
+            }),
+        );
+        Ok(caps)
     }
 
     fn execute(
@@ -55,6 +71,20 @@ impl AgentAdapter for ClaudeAdapter {
         mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
     ) -> Result<StepResult, GardenerError> {
         validate_model(&context.model)?;
+        append_run_log(
+            "info",
+            "adapter.claude.turn_start",
+            json!({
+                "worker_id": context.worker_id,
+                "session_id": context.session_id,
+                "sandbox_id": context.sandbox_id,
+                "model": context.model,
+                "cwd": context.cwd.display().to_string(),
+                "prompt_version": context.prompt_version,
+                "context_manifest_hash": context.context_manifest_hash,
+                "max_turns": context.max_turns
+            }),
+        );
 
         let mut args = vec![
             "-p".to_string(),
@@ -70,6 +100,16 @@ impl AgentAdapter for ClaudeAdapter {
             args.push(turns.to_string());
         }
 
+        append_run_log(
+            "debug",
+            "adapter.claude.process_spawn",
+            json!({
+                "worker_id": context.worker_id,
+                "session_id": context.session_id,
+                "program": "claude",
+                "cwd": context.cwd.display().to_string()
+            }),
+        );
         let handle = process_runner.spawn(ProcessRequest {
             program: "claude".to_string(),
             args,
@@ -77,8 +117,8 @@ impl AgentAdapter for ClaudeAdapter {
         })?;
 
         let mut raw_events = Vec::new();
-        let mut diagnostics = Vec::new();
-        let mut parse_error: Option<String> = None;
+        let mut stdout_diagnostics = Vec::new();
+        let mut stderr_diagnostics = Vec::new();
         let mut on_stdout_line = |line: &str| {
             if line.trim().is_empty() {
                 return;
@@ -92,9 +132,16 @@ impl AgentAdapter for ClaudeAdapter {
                     raw_events.push(raw);
                 }
                 Err(err) => {
-                    if parse_error.is_none() {
-                        parse_error = Some(format!("invalid jsonl line: {err}"));
-                    }
+                    append_run_log(
+                        "warn",
+                        "adapter.claude.stdout_non_json",
+                        json!({
+                            "error": err.to_string(),
+                            "line": line
+                        }),
+                    );
+                    stdout_diagnostics
+                        .push(format!("stdout non-json line ignored: {err}; line={line}"));
                 }
             }
         };
@@ -102,41 +149,100 @@ impl AgentAdapter for ClaudeAdapter {
             if line.trim().is_empty() {
                 return;
             }
-            diagnostics.push(line.to_string());
+            append_run_log(
+                "warn",
+                "adapter.claude.stderr_line",
+                json!({
+                    "worker_id": context.worker_id,
+                    "session_id": context.session_id,
+                    "line": line
+                }),
+            );
+            stderr_diagnostics.push(line.to_string());
         };
         let output = process_runner.wait_with_line_stream(
             handle,
             &mut on_stdout_line,
             &mut on_stderr_line,
         )?;
-        if let Some(err) = parse_error {
-            return Err(GardenerError::Process(err));
-        }
-        if output.exit_code != 0 {
-            return Err(GardenerError::Process(output.stderr));
-        }
+        let mut diagnostics = stderr_diagnostics;
+        diagnostics.extend(stdout_diagnostics);
         let events = raw_events.iter().map(map_claude_event).collect::<Vec<_>>();
 
-        let terminal_result = raw_events
+        if let Some(terminal_result) = raw_events
             .iter()
             .rev()
-            .find(|event| {
-                event.get("type") == Some(&json!("result"))
-                    && event.get("subtype") == Some(&json!("success"))
-            })
-            .ok_or_else(|| GardenerError::Process("missing success result event".to_string()))?;
+            .find(|event| event.get("type") == Some(&json!("result")))
+        {
+            let payload = terminal_result
+                .get("result")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let subtype = terminal_result
+                .get("subtype")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let terminal = if subtype == "success" {
+                AgentTerminal::Success
+            } else {
+                AgentTerminal::Failure
+            };
+            append_run_log(
+                if terminal == AgentTerminal::Success {
+                    "info"
+                } else {
+                    "error"
+                },
+                "adapter.claude.terminal_result",
+                json!({
+                    "worker_id": context.worker_id,
+                    "session_id": context.session_id,
+                    "subtype": subtype,
+                    "event_count": raw_events.len(),
+                    "stderr_line_count": diagnostics.len(),
+                    "exit_code": output.exit_code
+                }),
+            );
+            return Ok(StepResult {
+                terminal,
+                events,
+                payload,
+                diagnostics,
+            });
+        }
 
-        let payload = terminal_result
-            .get("result")
-            .cloned()
-            .unwrap_or(Value::Null);
+        if output.exit_code != 0 {
+            let mut reason = output.stderr.trim().to_string();
+            if reason.is_empty() {
+                reason = format!("claude exited with status {}", output.exit_code);
+            }
+            append_run_log(
+                "error",
+                "adapter.claude.turn_process_error",
+                json!({
+                    "worker_id": context.worker_id,
+                    "session_id": context.session_id,
+                    "exit_code": output.exit_code,
+                    "error": reason
+                }),
+            );
+            return Err(GardenerError::Process(reason));
+        }
 
-        Ok(StepResult {
-            terminal: AgentTerminal::Success,
-            events,
-            payload,
-            diagnostics,
-        })
+        append_run_log(
+            "error",
+            "adapter.claude.turn_missing_terminal_event",
+            json!({
+                "worker_id": context.worker_id,
+                "session_id": context.session_id,
+                "event_count": raw_events.len(),
+                "stderr_line_count": diagnostics.len(),
+                "exit_code": output.exit_code
+            }),
+        );
+        Err(GardenerError::Process(
+            "missing terminal result event".to_string(),
+        ))
     }
 }
 
@@ -213,6 +319,26 @@ mod tests {
         let err = adapter
             .execute(&runner, &context(), "prompt", None)
             .expect_err("must fail");
-        assert!(format!("{err}").contains("missing success result event"));
+        assert!(format!("{err}").contains("missing terminal result event"));
+    }
+
+    #[test]
+    fn ignores_non_json_stdout_lines_when_terminal_result_exists() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "NOTICE startup\n{\"type\":\"result\",\"subtype\":\"success\",\"result\":{\"ok\":true}}\n"
+                .to_string(),
+            stderr: String::new(),
+        }));
+        let adapter = ClaudeAdapter;
+        let result = adapter
+            .execute(&runner, &context(), "prompt", None)
+            .expect("success");
+        assert_eq!(result.payload["ok"], true);
+        assert!(result
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("stdout non-json line ignored")));
     }
 }

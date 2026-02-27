@@ -1,8 +1,10 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::output_envelope::parse_last_envelope;
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use crate::types::{AgentKind, RuntimeScope, WorkerState};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DimensionAssessment {
@@ -83,6 +85,17 @@ pub fn run_discovery(
     model: &str,
     max_turns: u32,
 ) -> Result<DiscoveryAssessment, GardenerError> {
+    append_run_log(
+        "info",
+        "triage.discovery.run.started",
+        json!({
+            "backend": backend.as_str(),
+            "model": model,
+            "max_turns": max_turns,
+            "working_dir": scope.working_dir.display().to_string()
+        }),
+    );
+
     let prompt = build_discovery_prompt(scope);
     let (program, args) = match backend {
         AgentKind::Codex => (
@@ -111,17 +124,45 @@ pub fn run_discovery(
     };
 
     let output = process_runner.run(ProcessRequest {
-        program,
+        program: program.clone(),
         args,
         cwd: Some(scope.working_dir.clone()),
     })?;
 
     if output.exit_code != 0 {
+        append_run_log(
+            "error",
+            "triage.discovery.run.process_failed",
+            json!({
+                "backend": backend.as_str(),
+                "program": program,
+                "exit_code": output.exit_code,
+                "stderr": output.stderr
+            }),
+        );
         return Err(GardenerError::Process(output.stderr));
     }
 
     let envelope = parse_last_envelope(&output.stdout, WorkerState::Seeding)?;
     let parsed: DiscoveryEnvelope = serde_json::from_value(envelope.payload)
         .map_err(|e| GardenerError::OutputEnvelope(e.to_string()))?;
-    Ok(parsed.gardener_output)
+    let assessment = parsed.gardener_output;
+
+    append_run_log(
+        "info",
+        "triage.discovery.run.completed",
+        json!({
+            "backend": backend.as_str(),
+            "overall_readiness_grade": assessment.overall_readiness_grade,
+            "overall_readiness_score": assessment.overall_readiness_score,
+            "primary_gap": assessment.primary_gap,
+            "agent_steering_grade": assessment.agent_steering.grade,
+            "knowledge_accessible_grade": assessment.knowledge_accessible.grade,
+            "mechanical_guardrails_grade": assessment.mechanical_guardrails.grade,
+            "local_feedback_loop_grade": assessment.local_feedback_loop.grade,
+            "coverage_signal_grade": assessment.coverage_signal.grade
+        }),
+    );
+
+    Ok(assessment)
 }

@@ -4,7 +4,7 @@ use crate::errors::GardenerError;
 use crate::hotkeys::{
     action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
 };
-use crate::logging::structured_fallback_line;
+use crate::logging::{append_run_log, structured_fallback_line};
 use crate::priority::Priority;
 use crate::runtime::Terminal;
 use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
@@ -13,6 +13,7 @@ use crate::task_identity::TaskKind;
 use crate::tui::{BacklogView, QueueStats, WorkerRow};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
+use serde_json::json;
 
 pub fn run_worker_pool_fsm(
     runtime: &ProductionRuntime,
@@ -24,6 +25,15 @@ pub fn run_worker_pool_fsm(
     task_override: Option<&str>,
 ) -> Result<usize, GardenerError> {
     clear_interrupt();
+    append_run_log(
+        "info",
+        "worker_pool.started",
+        json!({
+            "target": target,
+            "configured_parallelism": cfg.orchestrator.parallelism,
+            "task_override": task_override
+        }),
+    );
     let operator_hotkeys = operator_hotkeys_enabled();
     let mut report_visible = false;
     let hb = cfg.scheduler.heartbeat_interval_seconds;
@@ -93,6 +103,15 @@ pub fn run_worker_pool_fsm(
                 continue;
             };
             claimed_any = true;
+            append_run_log(
+                "info",
+                "worker.task.claimed",
+                json!({
+                    "worker_id": worker_id,
+                    "task_id": task.task_id,
+                    "title": task.title
+                }),
+            );
             let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
 
             workers[idx].state = "doing".to_string();
@@ -109,9 +128,7 @@ pub fn run_worker_pool_fsm(
                 let (tx, rx) = std::sync::mpsc::channel();
                 let worker_id = worker_id.clone();
                 let task_id = task.task_id.clone();
-                let task_summary = task_override
-                    .unwrap_or(task.title.as_str())
-                    .to_string();
+                let task_summary = task_override.unwrap_or(task.title.as_str()).to_string();
                 scope_guard.spawn(move || {
                     let result = execute_task(
                         cfg,
@@ -163,7 +180,21 @@ pub fn run_worker_pool_fsm(
                 {
                     return Ok(completed);
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    let msg = err.to_string();
+                    append_run_log(
+                        "error",
+                        "worker.task.process_error",
+                        json!({
+                            "worker_id": worker_id,
+                            "task_id": task.task_id,
+                            "error": msg
+                        }),
+                    );
+                    terminal.draw_shutdown_screen("Error", &msg)?;
+                    wait_for_quit(terminal)?;
+                    return Ok(completed);
+                }
             };
             if quit_requested {
                 return Ok(completed);
@@ -172,6 +203,16 @@ pub fn run_worker_pool_fsm(
                 workers[idx].state = event.state.as_str().to_string();
                 workers[idx].tool_line = format!("prompt {}", event.prompt_version);
                 workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                append_run_log(
+                    "debug",
+                    "worker.turn.state",
+                    json!({
+                        "worker_id": worker_id,
+                        "state": event.state.as_str(),
+                        "prompt_version": event.prompt_version,
+                        "context_manifest_hash": event.context_manifest_hash
+                    }),
+                );
                 render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
             }
 
@@ -181,9 +222,32 @@ pub fn run_worker_pool_fsm(
                 workers[idx].state = "complete".to_string();
                 workers[idx].tool_line = format!("completed {}", task.task_id);
                 workers[idx].lease_held = false;
+                append_run_log(
+                    "info",
+                    "worker.task.completed",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task.task_id,
+                        "completed": completed
+                    }),
+                );
             } else {
                 workers[idx].state = "failed".to_string();
                 workers[idx].tool_line = format!("failed {}", task.task_id);
+                append_run_log(
+                    "error",
+                    "worker.task.failed",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task.task_id,
+                        "final_state": summary.final_state.as_str()
+                    }),
+                );
+                if let Some(reason) = &summary.failure_reason {
+                    terminal.draw_shutdown_screen("Worker Error", reason)?;
+                    wait_for_quit(terminal)?;
+                    return Ok(completed);
+                }
             }
             render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
         }
@@ -192,7 +256,51 @@ pub fn run_worker_pool_fsm(
             break;
         }
     }
+    append_run_log(
+        "info",
+        "worker_pool.completed",
+        json!({
+            "completed": completed,
+            "target": target
+        }),
+    );
+    let shutdown_title = if completed >= target {
+        "All Tasks Complete".to_string()
+    } else {
+        "No More Work".to_string()
+    };
+    let shutdown_message = if completed >= target {
+        format!("Completed {completed} of {target} task(s).")
+    } else if completed == 0 {
+        "No tasks were available in the backlog.".to_string()
+    } else {
+        format!("Completed {completed} task(s). Backlog is empty.")
+    };
+    terminal.draw_shutdown_screen(&shutdown_title, &shutdown_message)?;
+    wait_for_quit(terminal)?;
     Ok(completed)
+}
+
+fn wait_for_quit(terminal: &dyn Terminal) -> Result<(), GardenerError> {
+    if !terminal.stdin_is_tty() {
+        return Ok(());
+    }
+    // Poll until the user presses any key. poll_key returns None on timeout,
+    // Some(key) when a key arrives. For fake terminals with an empty queue
+    // the first poll immediately returns None and we exit — this prevents
+    // test hangs while still blocking on a real TTY until input is received.
+    loop {
+        match terminal.poll_key(100)? {
+            Some(_) => return Ok(()),
+            None => {
+                // On a real terminal the key listener is running; keep waiting.
+                // In test mode (FakeTerminal) None means queue exhausted: exit.
+                if !crate::runtime::KEY_LISTENER_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 fn handle_hotkeys(
@@ -212,11 +320,19 @@ fn handle_hotkeys(
     if let Some(key) = terminal.poll_key(10)? {
         match hotkey_action(key, operator_hotkeys) {
             Some(AppHotkeyAction::Quit) => {
+                append_run_log("warn", "hotkey.quit", json!({}));
                 request_interrupt();
                 return Ok(true);
             }
             Some(AppHotkeyAction::Retry) => {
                 let released = store.recover_stale_leases(now_unix_millis())?;
+                append_run_log(
+                    "info",
+                    "hotkey.retry",
+                    json!({
+                        "released": released
+                    }),
+                );
                 terminal.write_line(&format!(
                     "retry requested: released {released} stale lease(s)"
                 ))?;
@@ -226,6 +342,13 @@ fn handle_hotkeys(
                 let release_now = now_unix_millis()
                     .saturating_add((cfg.scheduler.lease_timeout_seconds as i64 + 1) * 1000);
                 let released = store.recover_stale_leases(release_now)?;
+                append_run_log(
+                    "info",
+                    "hotkey.release_lease",
+                    json!({
+                        "released": released
+                    }),
+                );
                 terminal.write_line(&format!(
                     "release-lease requested: released {released} lease(s)"
                 ))?;
@@ -247,6 +370,14 @@ fn handle_hotkeys(
                     "park/escalate requested: created P0 escalation task {}",
                     short_task_id(&task.task_id)
                 ))?;
+                append_run_log(
+                    "warn",
+                    "hotkey.park_escalate",
+                    json!({
+                        "active_workers": active,
+                        "task_id": task.task_id
+                    }),
+                );
                 redraw_dashboard = true;
             }
             Some(AppHotkeyAction::ViewReport) => *report_visible = true,
@@ -350,6 +481,19 @@ fn render(
     heartbeat_interval_seconds: u64,
     lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
+    append_run_log(
+        "debug",
+        "dashboard.snapshot",
+        json!({
+            "workers": workers.len(),
+            "ready": snapshot.stats.ready,
+            "active": snapshot.stats.active,
+            "failed": snapshot.stats.failed,
+            "backlog_in_progress": snapshot.backlog.in_progress.len(),
+            "backlog_queued": snapshot.backlog.queued.len(),
+            "tty": terminal.stdin_is_tty()
+        }),
+    );
     if terminal.stdin_is_tty() {
         terminal.draw_dashboard_with_config(
             workers,

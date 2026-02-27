@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use gardener::config::{
-    effective_agent_for_state, load_config, resolve_scope, resolve_validation_command, AppConfig,
-    CliOverrides, StateConfig,
+    effective_agent_for_state, effective_model_for_state, load_config, resolve_scope,
+    resolve_validation_command, AppConfig, CliOverrides, StateConfig,
 };
 use gardener::errors::GardenerError;
 use gardener::output_envelope::{parse_last_envelope, END_MARKER, START_MARKER};
@@ -144,9 +144,8 @@ fn binary_help_and_prune_smoke() {
 #[test]
 fn run_with_runtime_paths_and_errors() {
     // Clean stale SQLite from prior runs to avoid claiming leftover tasks
-    let _ = std::fs::remove_file(
-        PathBuf::from(TEST_REPO_ROOT).join(".cache/gardener/backlog.sqlite"),
-    );
+    let _ =
+        std::fs::remove_file(PathBuf::from(TEST_REPO_ROOT).join(".cache/gardener/backlog.sqlite"));
     let runtime = runtime_with_config(
         "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n",
         true,
@@ -183,11 +182,7 @@ fn run_with_runtime_paths_and_errors() {
     eprintln!("quality result: {quality_result:?}");
     assert_eq!(quality_result.unwrap(), 0);
 
-    let normal = vec![
-        "gardener".into(),
-        "--config".into(),
-        "/config.toml".into(),
-    ];
+    let normal = vec!["gardener".into(), "--config".into(), "/config.toml".into()];
     let normal_result = gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime);
     eprintln!("normal result: {normal_result:?}");
     assert_eq!(normal_result.unwrap(), 0);
@@ -300,6 +295,14 @@ default = "claude"
     assert_eq!(
         effective_agent_for_state(&cfg2, WorkerState::Planning),
         Some(AgentKind::Claude)
+    );
+    assert_eq!(
+        effective_model_for_state(&cfg2, WorkerState::Doing),
+        "gpt-5-codex"
+    );
+    assert_eq!(
+        effective_model_for_state(&cfg2, WorkerState::Planning),
+        cfg2.seeding.model
     );
 
     let resolved = resolve_validation_command(&cfg2, Some("npm run custom"));
@@ -423,6 +426,24 @@ test_mode = true
         matches!(err, GardenerError::InvalidConfig(message) if message.contains("seeding.model"))
     );
 
+    let bad_state_model = FakeFileSystem::with_file(
+        "/bad4.toml",
+        "[states.doing]\nbackend = \"codex\"\nmodel = \"...\"\n",
+    );
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad4.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_state_model,
+        &FakeProcessRunner::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("states.doing.model"))
+    );
+
     let mut cfg2 = AppConfig::default();
     cfg2.agent.default = Some(AgentKind::Claude);
     cfg2.states.insert(
@@ -441,6 +462,59 @@ test_mode = true
     let _ = effective_agent_for_state(&cfg2, WorkerState::Reviewing);
     let _ = effective_agent_for_state(&cfg2, WorkerState::Merging);
     let _ = effective_agent_for_state(&cfg2, WorkerState::Seeding);
+}
+
+#[test]
+fn default_config_is_discovered_from_repo_root_or_cwd() {
+    let fs = FakeFileSystem::with_file(
+        "/repo/gardener.toml",
+        "[orchestrator]\nparallelism = 1\n[seeding]\nbackend = \"codex\"\nmodel = \"gpt-5-codex\"\nmax_turns = 1\n",
+    );
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    let (cfg, scope) = load_config(
+        &CliOverrides::default(),
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("load config from repo root");
+    assert_eq!(cfg.orchestrator.parallelism, 1);
+    assert_eq!(scope.repo_root, Some(PathBuf::from("/repo")));
+
+    let fs = FakeFileSystem::with_file(
+        "/cwd/gardener.toml",
+        "[orchestrator]\nparallelism = 2\n[seeding]\nbackend = \"codex\"\nmodel = \"gpt-5-codex\"\nmax_turns = 1\n",
+    );
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let (cfg, scope) = load_config(
+        &CliOverrides::default(),
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("load config from cwd");
+    assert_eq!(cfg.orchestrator.parallelism, 2);
+    assert_eq!(scope.repo_root, None);
 }
 
 #[test]

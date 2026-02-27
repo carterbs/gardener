@@ -1,8 +1,10 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::protocol::{AgentEvent, StepResult};
 use crate::runtime::{Clock, FileSystem, ProcessRunner};
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -66,9 +68,51 @@ pub fn probe_and_persist(
     clock: &dyn Clock,
     cache_root: &Path,
 ) -> Result<CapabilitySnapshot, GardenerError> {
+    append_run_log(
+        "info",
+        "agent.probe.started",
+        json!({
+            "adapter_count": adapters.len(),
+            "cache_root": cache_root.display().to_string()
+        }),
+    );
     let mut caps = Vec::new();
     for adapter in adapters {
-        caps.push(adapter.probe_capabilities(process_runner)?);
+        let backend = adapter.backend();
+        append_run_log(
+            "debug",
+            "agent.probe.adapter",
+            json!({
+                "backend": backend.as_str()
+            }),
+        );
+        match adapter.probe_capabilities(process_runner) {
+            Ok(cap) => {
+                append_run_log(
+                    "info",
+                    "agent.probe.adapter.ok",
+                    json!({
+                        "backend": backend.as_str(),
+                        "version": cap.version,
+                        "supports_stream_json": cap.supports_stream_json,
+                        "supports_max_turns": cap.supports_max_turns,
+                        "supports_output_schema": cap.supports_output_schema
+                    }),
+                );
+                caps.push(cap);
+            }
+            Err(err) => {
+                append_run_log(
+                    "warn",
+                    "agent.probe.adapter.failed",
+                    json!({
+                        "backend": backend.as_str(),
+                        "error": err.to_string()
+                    }),
+                );
+                return Err(err);
+            }
+        }
     }
 
     let generated_at_unix = clock
@@ -89,11 +133,28 @@ pub fn probe_and_persist(
         .map_err(|e| GardenerError::Process(format!("capability snapshot encode failed: {e}")))?;
     file_system.write_string(&path, &text)?;
 
+    append_run_log(
+        "info",
+        "agent.probe.persisted",
+        json!({
+            "path": path.display().to_string(),
+            "adapter_count": snapshot.adapters.len(),
+            "generated_at_unix": generated_at_unix
+        }),
+    );
+
     Ok(snapshot)
 }
 
 pub fn validate_model(model: &str) -> Result<(), GardenerError> {
     if model.trim().is_empty() || model.trim() == "..." || model.eq_ignore_ascii_case("todo") {
+        append_run_log(
+            "error",
+            "agent.model.invalid",
+            json!({
+                "model": model
+            }),
+        );
         return Err(GardenerError::InvalidConfig(
             "model value is invalid; configure a real model id".to_string(),
         ));

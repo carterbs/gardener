@@ -1,9 +1,13 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::runtime::{FileSystem, ProcessRequest, ProcessRunner};
 use crate::types::{AgentKind, RuntimeScope, ValidationCommandResolution, WorkerState};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+const DEFAULT_CONFIG_FILE: &str = "gardener.toml";
 
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
@@ -283,20 +287,108 @@ pub fn load_config(
     fs: &dyn FileSystem,
     process_runner: &dyn ProcessRunner,
 ) -> Result<(AppConfig, RuntimeScope), GardenerError> {
+    append_run_log(
+        "info",
+        "config.load.started",
+        json!({
+            "process_cwd": process_cwd.display().to_string(),
+            "config_path_override": overrides.config_path.as_ref().map(|p| p.display().to_string()),
+            "parallelism_override": overrides.parallelism,
+            "agent_override": overrides.agent.map(|a| format!("{:?}", a))
+        }),
+    );
+
     let mut cfg = AppConfig::default();
 
-    if let Some(path) = &overrides.config_path {
-        let file_contents = fs.read_to_string(path)?;
-        let partial: PartialAppConfig = toml::from_str(&file_contents)
-            .map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+    if let Some(path) = resolve_config_path(overrides, process_cwd, fs, process_runner) {
+        append_run_log(
+            "info",
+            "config.file.found",
+            json!({
+                "path": path.display().to_string()
+            }),
+        );
+        let file_contents = fs.read_to_string(&path)?;
+        let partial: PartialAppConfig = toml::from_str(&file_contents).map_err(|e| {
+            append_run_log(
+                "error",
+                "config.file.parse_error",
+                json!({
+                    "path": path.display().to_string(),
+                    "error": e.to_string()
+                }),
+            );
+            GardenerError::ConfigParse(e.to_string())
+        })?;
         merge_partial_config(&mut cfg, partial);
+    } else {
+        append_run_log(
+            "info",
+            "config.file.not_found",
+            json!({
+                "process_cwd": process_cwd.display().to_string(),
+                "using_defaults": true
+            }),
+        );
     }
 
     apply_cli_overrides(&mut cfg, overrides);
 
     let scope = resolve_scope(process_cwd, &cfg, overrides, process_runner);
-    validate_config(&cfg)?;
+
+    if let Err(e) = validate_config(&cfg) {
+        append_run_log(
+            "error",
+            "config.validation.failed",
+            json!({
+                "error": e.to_string()
+            }),
+        );
+        return Err(e);
+    }
+
+    append_run_log(
+        "info",
+        "config.loaded",
+        json!({
+            "parallelism": cfg.orchestrator.parallelism,
+            "agent_default": cfg.agent.default.map(|a| format!("{:?}", a)),
+            "validation_command": cfg.validation.command,
+            "working_dir": scope.working_dir.display().to_string(),
+            "repo_root": scope.repo_root.as_ref().map(|p| p.display().to_string()),
+            "test_mode": cfg.execution.test_mode,
+            "seeding_backend": format!("{:?}", cfg.seeding.backend),
+            "quality_report_path": cfg.quality_report.path
+        }),
+    );
+
     Ok((cfg, scope))
+}
+
+fn resolve_config_path<'a>(
+    overrides: &'a CliOverrides,
+    process_cwd: &'a Path,
+    fs: &dyn FileSystem,
+    process_runner: &dyn ProcessRunner,
+) -> Option<PathBuf> {
+    if let Some(path) = &overrides.config_path {
+        return Some(absolutize_path(process_cwd, path));
+    }
+
+    let repo_root = detect_repo_root(process_cwd, process_runner);
+    if let Some(root) = repo_root {
+        let candidate = root.join(DEFAULT_CONFIG_FILE);
+        if fs.exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    let cwd_candidate = process_cwd.join(DEFAULT_CONFIG_FILE);
+    if fs.exists(&cwd_candidate) {
+        return Some(cwd_candidate);
+    }
+
+    None
 }
 
 fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
@@ -454,6 +546,16 @@ pub fn resolve_scope(
         process_cwd.clone()
     };
 
+    append_run_log(
+        "info",
+        "config.scope.resolved",
+        json!({
+            "process_cwd": process_cwd.display().to_string(),
+            "repo_root": repo_root.as_ref().map(|p| p.display().to_string()),
+            "working_dir": working_dir.display().to_string()
+        }),
+    );
+
     RuntimeScope {
         process_cwd,
         repo_root,
@@ -479,15 +581,38 @@ fn detect_repo_root(process_cwd: &Path, process_runner: &dyn ProcessRunner) -> O
         .ok()?;
 
     if output.exit_code != 0 {
+        append_run_log(
+            "debug",
+            "config.repo_root.not_found",
+            json!({
+                "process_cwd": process_cwd.display().to_string(),
+                "exit_code": output.exit_code
+            }),
+        );
         return None;
     }
 
     let trimmed = output.stdout.trim();
     if trimmed.is_empty() {
+        append_run_log(
+            "debug",
+            "config.repo_root.empty_output",
+            json!({
+                "process_cwd": process_cwd.display().to_string()
+            }),
+        );
         return None;
     }
 
-    Some(PathBuf::from(trimmed))
+    let root = PathBuf::from(trimmed);
+    append_run_log(
+        "debug",
+        "config.repo_root.detected",
+        json!({
+            "repo_root": root.display().to_string()
+        }),
+    );
+    Some(root)
 }
 
 pub fn resolve_validation_command(
@@ -495,6 +620,14 @@ pub fn resolve_validation_command(
     cli_override: Option<&str>,
 ) -> ValidationCommandResolution {
     if let Some(cli) = cli_override {
+        append_run_log(
+            "info",
+            "config.validation_command.resolved",
+            json!({
+                "source": "cli_override",
+                "command": cli
+            }),
+        );
         return ValidationCommandResolution {
             command: cli.to_string(),
             startup_validate_on_boot: cfg.startup.validate_on_boot,
@@ -503,6 +636,14 @@ pub fn resolve_validation_command(
     }
 
     if !cfg.validation.command.trim().is_empty() {
+        append_run_log(
+            "info",
+            "config.validation_command.resolved",
+            json!({
+                "source": "config.validation",
+                "command": cfg.validation.command
+            }),
+        );
         return ValidationCommandResolution {
             command: cfg.validation.command.clone(),
             startup_validate_on_boot: cfg.startup.validate_on_boot,
@@ -511,6 +652,14 @@ pub fn resolve_validation_command(
     }
 
     if let Some(startup) = &cfg.startup.validation_command {
+        append_run_log(
+            "info",
+            "config.validation_command.resolved",
+            json!({
+                "source": "config.startup",
+                "command": startup
+            }),
+        );
         return ValidationCommandResolution {
             command: startup.clone(),
             startup_validate_on_boot: cfg.startup.validate_on_boot,
@@ -518,6 +667,15 @@ pub fn resolve_validation_command(
         };
     }
 
+    append_run_log(
+        "warn",
+        "config.validation_command.resolved",
+        json!({
+            "source": "fallback",
+            "command": "true",
+            "reason": "no validation command configured"
+        }),
+    );
     ValidationCommandResolution {
         command: "true".to_string(),
         startup_validate_on_boot: cfg.startup.validate_on_boot,
@@ -542,13 +700,20 @@ fn validate_config(cfg: &AppConfig) -> Result<(), GardenerError> {
         }
     }
 
-    if cfg.seeding.model.trim().is_empty()
-        || cfg.seeding.model == "..."
-        || cfg.seeding.model.eq_ignore_ascii_case("todo")
-    {
+    if model_is_invalid(&cfg.seeding.model) {
         return Err(GardenerError::InvalidConfig(
             "seeding.model must be a real model id".to_string(),
         ));
+    }
+
+    for (state_name, state_cfg) in &cfg.states {
+        if let Some(model) = &state_cfg.model {
+            if model_is_invalid(model) {
+                return Err(GardenerError::InvalidConfig(format!(
+                    "states.{state_name}.model must be a real model id"
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -564,6 +729,16 @@ pub fn effective_agent_for_state(cfg: &AppConfig, state: WorkerState) -> Option<
     cfg.agent.default
 }
 
+pub fn effective_model_for_state(cfg: &AppConfig, state: WorkerState) -> String {
+    let key = state_key(state);
+    if let Some(state_cfg) = cfg.states.get(key) {
+        if let Some(model) = &state_cfg.model {
+            return model.clone();
+        }
+    }
+    cfg.seeding.model.clone()
+}
+
 fn state_key(state: WorkerState) -> &'static str {
     match state {
         WorkerState::Understand => "understand",
@@ -577,4 +752,8 @@ fn state_key(state: WorkerState) -> &'static str {
         WorkerState::Failed => "failed",
         WorkerState::Parked => "parked",
     }
+}
+
+fn model_is_invalid(model: &str) -> bool {
+    model.trim().is_empty() || model == "..." || model.eq_ignore_ascii_case("todo")
 }

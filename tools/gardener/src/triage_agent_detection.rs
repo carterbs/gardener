@@ -1,6 +1,8 @@
+use crate::logging::append_run_log;
 use crate::runtime::FileSystem;
 use crate::runtime::Terminal;
 use crate::types::NonInteractiveReason;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -8,15 +10,35 @@ pub type EnvMap = BTreeMap<String, String>;
 
 pub fn is_non_interactive(env: &EnvMap, terminal: &dyn Terminal) -> Option<NonInteractiveReason> {
     if env.contains_key("CLAUDECODE") {
+        append_run_log(
+            "debug",
+            "triage.agent_detection.non_interactive",
+            json!({ "reason": "ClaudeCodeEnv" }),
+        );
         return Some(NonInteractiveReason::ClaudeCodeEnv);
     }
     if env.contains_key("CODEX_THREAD_ID") {
+        append_run_log(
+            "debug",
+            "triage.agent_detection.non_interactive",
+            json!({ "reason": "CodexThreadEnv" }),
+        );
         return Some(NonInteractiveReason::CodexThreadEnv);
     }
     if env.contains_key("CI") {
+        append_run_log(
+            "debug",
+            "triage.agent_detection.non_interactive",
+            json!({ "reason": "CiEnv" }),
+        );
         return Some(NonInteractiveReason::CiEnv);
     }
     if !terminal.stdin_is_tty() {
+        append_run_log(
+            "debug",
+            "triage.agent_detection.non_interactive",
+            json!({ "reason": "NonTtyStdin" }),
+        );
         return Some(NonInteractiveReason::NonTtyStdin);
     }
     None
@@ -48,6 +70,16 @@ pub fn detect_agent(fs: &dyn FileSystem, working_dir: &Path, repo_root: &Path) -
     let mut detection = AgentDetection::default();
     let roots = unique_roots(working_dir, repo_root);
 
+    append_run_log(
+        "debug",
+        "triage.agent_detection.scanning",
+        json!({
+            "working_dir": working_dir.display().to_string(),
+            "repo_root": repo_root.display().to_string(),
+            "roots_count": roots.len()
+        }),
+    );
+
     for root in roots {
         scan_agent_signals(fs, &root, &mut detection);
     }
@@ -61,6 +93,17 @@ pub fn detect_agent(fs: &dyn FileSystem, working_dir: &Path, repo_root: &Path) -
         (false, true) => DetectedAgent::Codex,
         (false, false) => DetectedAgent::Unknown,
     };
+
+    append_run_log(
+        "info",
+        "triage.agent_detection.result",
+        json!({
+            "detected": format!("{:?}", detection.detected),
+            "claude_signals": detection.claude_signals,
+            "codex_signals": detection.codex_signals,
+            "agents_md_present": detection.agents_md_present
+        }),
+    );
 
     detection
 }

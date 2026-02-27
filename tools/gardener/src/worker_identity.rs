@@ -36,7 +36,6 @@ impl WorkerIdentity {
         self.attempt = self.attempt.saturating_add(1);
         self.session = next_session(None);
     }
-
 }
 
 fn next_session(resume_from_session_id: Option<String>) -> SessionIdentity {
@@ -63,6 +62,5 @@ mod tests {
         assert_eq!(id.worker_id, worker_id);
         assert_ne!(id.session.session_id, first_session);
         assert!(id.session.resume_from_session_id.is_none());
-
     }
 }

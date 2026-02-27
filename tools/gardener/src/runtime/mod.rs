@@ -1,8 +1,10 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::tui::{
     close_live_terminal, draw_dashboard_live, draw_report_live, render_dashboard, BacklogView,
     QueueStats, WorkerRow,
 };
+use serde_json::json;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -92,6 +94,9 @@ pub trait Terminal: Send + Sync {
         let frame = crate::tui::render_report_view(report_path, report, 120, 30);
         self.draw(&frame)
     }
+    fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
+        self.write_line(&format!("{title}: {message}"))
+    }
     fn close_ui(&self) -> Result<(), GardenerError> {
         Ok(())
     }
@@ -101,7 +106,7 @@ pub trait Terminal: Send + Sync {
 }
 
 static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
-static KEY_LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static KEY_LISTENER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEY_QUEUE: OnceLock<Mutex<VecDeque<char>>> = OnceLock::new();
 static KEY_LISTENER: OnceLock<Mutex<Option<KeyListenerState>>> = OnceLock::new();
 
@@ -136,6 +141,7 @@ fn start_key_listener_if_needed() {
         return;
     }
 
+    append_run_log("debug", "runtime.key_listener.started", json!({}));
     clear_key_queue();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_thread = Arc::clone(&stop);
@@ -186,6 +192,7 @@ fn stop_key_listener() {
     let _ = state.handle.join();
     clear_key_queue();
     KEY_LISTENER_ACTIVE.store(false, Ordering::SeqCst);
+    append_run_log("debug", "runtime.key_listener.stopped", json!({}));
 }
 
 pub fn request_interrupt() {
@@ -220,7 +227,26 @@ impl FileSystem for ProductionFileSystem {
     }
 
     fn write_string(&self, path: &Path, contents: &str) -> Result<(), GardenerError> {
-        std::fs::write(path, contents).map_err(|e| GardenerError::Io(e.to_string()))
+        let result = std::fs::write(path, contents).map_err(|e| GardenerError::Io(e.to_string()));
+        match &result {
+            Ok(()) => append_run_log(
+                "debug",
+                "runtime.fs.write",
+                json!({
+                    "path": path.display().to_string(),
+                    "bytes": contents.len()
+                }),
+            ),
+            Err(e) => append_run_log(
+                "error",
+                "runtime.fs.write_error",
+                json!({
+                    "path": path.display().to_string(),
+                    "error": e.to_string()
+                }),
+            ),
+        }
+        result
     }
 
     fn create_dir_all(&self, path: &Path) -> Result<(), GardenerError> {
@@ -228,7 +254,26 @@ impl FileSystem for ProductionFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), GardenerError> {
-        std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()))
+        let result =
+            std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
+        match &result {
+            Ok(()) => append_run_log(
+                "debug",
+                "runtime.fs.remove",
+                json!({
+                    "path": path.display().to_string()
+                }),
+            ),
+            Err(e) => append_run_log(
+                "warn",
+                "runtime.fs.remove_error",
+                json!({
+                    "path": path.display().to_string(),
+                    "error": e.to_string()
+                }),
+            ),
+        }
+        result
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -278,6 +323,16 @@ impl ProcessRunner for ProductionProcessRunner {
         let handle = state.next_handle;
         state.next_handle += 1;
         state.children.insert(handle, child);
+        append_run_log(
+            "info",
+            "process.spawn",
+            json!({
+                "handle": handle,
+                "program": request.program,
+                "args": request.args,
+                "cwd": request.cwd.map(|p| p.display().to_string())
+            }),
+        );
         Ok(handle)
     }
 
@@ -367,6 +422,14 @@ impl ProcessRunner for ProductionProcessRunner {
             if INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst) {
                 let _ = child.kill();
                 let _ = child.wait();
+                append_run_log(
+                    "warn",
+                    "process.interrupt",
+                    json!({
+                        "handle": handle,
+                        "reason": "user interrupt requested (q/Ctrl-C)"
+                    }),
+                );
                 return Err(GardenerError::Process(
                     "user interrupt requested (q/Ctrl-C)".to_string(),
                 ));
@@ -380,6 +443,14 @@ impl ProcessRunner for ProductionProcessRunner {
                     // Keep draining output streams while the process is still running.
                 }
                 Err(e) => {
+                    append_run_log(
+                        "error",
+                        "process.wait.error",
+                        json!({
+                            "handle": handle,
+                            "error": e.to_string()
+                        }),
+                    );
                     return Err(GardenerError::Process(e.to_string()));
                 }
             }
@@ -400,11 +471,27 @@ impl ProcessRunner for ProductionProcessRunner {
                     stderr_closed = true;
                 }
                 Ok(StreamChunk::StdoutReadErr(err)) => {
+                    append_run_log(
+                        "error",
+                        "process.stdout.read_error",
+                        json!({
+                            "handle": handle,
+                            "error": err
+                        }),
+                    );
                     return Err(GardenerError::Process(format!(
                         "stdout stream read failed: {err}"
                     )));
                 }
                 Ok(StreamChunk::StderrReadErr(err)) => {
+                    append_run_log(
+                        "error",
+                        "process.stderr.read_error",
+                        json!({
+                            "handle": handle,
+                            "error": err
+                        }),
+                    );
                     return Err(GardenerError::Process(format!(
                         "stderr stream read failed: {err}"
                     )));
@@ -420,18 +507,33 @@ impl ProcessRunner for ProductionProcessRunner {
             }
         }
 
-        let _ = child.wait();
+        let waited_exit_code = child.wait().ok().map(|status| status.code().unwrap_or(-1));
         let _ = out_thread.join();
         let _ = err_thread.join();
 
         flush_trailing_line(&mut stdout_line_buffer, on_stdout_line);
         flush_trailing_line(&mut stderr_line_buffer, on_stderr_line);
 
-        Ok(ProcessOutput {
-            exit_code: exit_code.unwrap_or(-1),
+        let output = ProcessOutput {
+            exit_code: exit_code.or(waited_exit_code).unwrap_or(-1),
             stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
             stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
-        })
+        };
+        append_run_log(
+            if output.exit_code == 0 {
+                "info"
+            } else {
+                "error"
+            },
+            "process.exit",
+            json!({
+                "handle": handle,
+                "exit_code": output.exit_code,
+                "stdout_bytes": output.stdout.len(),
+                "stderr_bytes": output.stderr.len()
+            }),
+        );
+        Ok(output)
     }
 
     fn kill(&self, handle: u64) -> Result<(), GardenerError> {
@@ -443,7 +545,15 @@ impl ProcessRunner for ProductionProcessRunner {
 
         child
             .kill()
-            .map_err(|e| GardenerError::Process(e.to_string()))
+            .map_err(|e| GardenerError::Process(e.to_string()))?;
+        append_run_log(
+            "warn",
+            "process.kill",
+            json!({
+                "handle": handle
+            }),
+        );
+        Ok(())
     }
 }
 
@@ -485,6 +595,13 @@ impl Terminal for ProductionTerminal {
 
     fn write_line(&self, line: &str) -> Result<(), GardenerError> {
         use std::io::Write;
+        append_run_log(
+            "info",
+            "terminal.line",
+            json!({
+                "line": line
+            }),
+        );
         let mut out = std::io::stdout();
         writeln!(out, "{line}").map_err(|e| GardenerError::Io(e.to_string()))
     }
@@ -514,6 +631,11 @@ impl Terminal for ProductionTerminal {
     fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
         start_key_listener_if_needed();
         draw_report_live(report_path, report)
+    }
+
+    fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
+        start_key_listener_if_needed();
+        crate::tui::draw_shutdown_screen_live(title, message)
     }
 
     fn close_ui(&self) -> Result<(), GardenerError> {
@@ -571,6 +693,7 @@ pub struct ProductionRuntime {
 
 impl ProductionRuntime {
     pub fn new() -> Self {
+        append_run_log("info", "runtime.initialized", json!({}));
         Self {
             clock: Arc::new(ProductionClock),
             file_system: Arc::new(ProductionFileSystem),
@@ -700,6 +823,7 @@ pub struct FakeTerminal {
     draws: Arc<Mutex<Vec<String>>>,
     dashboard_draws: Arc<Mutex<usize>>,
     report_draws: Arc<Mutex<Vec<(String, String)>>>,
+    shutdown_screens: Arc<Mutex<Vec<(String, String)>>>,
     key_queue: Arc<Mutex<Vec<char>>>,
 }
 
@@ -729,6 +853,13 @@ impl FakeTerminal {
 
     pub fn enqueue_keys(&self, keys: impl IntoIterator<Item = char>) {
         self.key_queue.lock().expect("key lock").extend(keys);
+    }
+
+    pub fn shutdown_screens(&self) -> Vec<(String, String)> {
+        self.shutdown_screens
+            .lock()
+            .expect("shutdown lock")
+            .clone()
     }
 }
 
@@ -773,6 +904,14 @@ impl Terminal for FakeTerminal {
             .push((report_path.to_string(), report.to_string()));
         let frame = crate::tui::render_report_view(report_path, report, 120, 30);
         self.draw(&frame)
+    }
+
+    fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
+        self.shutdown_screens
+            .lock()
+            .expect("shutdown lock")
+            .push((title.to_string(), message.to_string()));
+        Ok(())
     }
 
     fn poll_key(&self, _timeout_ms: u64) -> Result<Option<char>, GardenerError> {

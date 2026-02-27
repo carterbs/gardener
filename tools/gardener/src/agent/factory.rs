@@ -1,7 +1,9 @@
 use crate::agent::claude::ClaudeAdapter;
 use crate::agent::codex::CodexAdapter;
 use crate::agent::AgentAdapter;
+use crate::logging::append_run_log;
 use crate::types::AgentKind;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -12,6 +14,13 @@ pub struct AdapterFactory {
 
 impl AdapterFactory {
     pub fn with_defaults() -> Self {
+        append_run_log(
+            "debug",
+            "agent.factory.init",
+            json!({
+                "adapters": ["claude", "codex"]
+            }),
+        );
         let mut this = Self::default();
         this.register(Arc::new(ClaudeAdapter));
         this.register(Arc::new(CodexAdapter));
@@ -19,11 +28,30 @@ impl AdapterFactory {
     }
 
     pub fn register(&mut self, adapter: Arc<dyn AgentAdapter>) {
-        self.adapters.insert(adapter.backend(), adapter);
+        let backend = adapter.backend();
+        append_run_log(
+            "debug",
+            "agent.factory.register",
+            json!({
+                "backend": backend.as_str()
+            }),
+        );
+        self.adapters.insert(backend, adapter);
     }
 
     pub fn get(&self, backend: AgentKind) -> Option<Arc<dyn AgentAdapter>> {
-        self.adapters.get(&backend).cloned()
+        let result = self.adapters.get(&backend).cloned();
+        if result.is_none() {
+            append_run_log(
+                "warn",
+                "agent.factory.get.miss",
+                json!({
+                    "backend": backend.as_str(),
+                    "registered": self.adapters.keys().map(|k| k.as_str()).collect::<Vec<_>>()
+                }),
+            );
+        }
+        result
     }
 }
 

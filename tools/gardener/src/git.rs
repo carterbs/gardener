@@ -1,5 +1,7 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::runtime::{ProcessRequest, ProcessRunner};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +25,17 @@ impl<'a> GitClient<'a> {
 
     pub fn detect_detached_head(&self) -> Result<bool, GardenerError> {
         let out = self.run(["git", "symbolic-ref", "--short", "HEAD"])?;
-        Ok(out.exit_code != 0)
+        let detached = out.exit_code != 0;
+        append_run_log(
+            "debug",
+            "git.head.checked",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "detached": detached,
+                "exit_code": out.exit_code
+            }),
+        );
+        Ok(detached)
     }
 
     pub fn verify_ancestor(
@@ -32,39 +44,143 @@ impl<'a> GitClient<'a> {
         branch: &str,
     ) -> Result<bool, GardenerError> {
         let out = self.run(["git", "merge-base", "--is-ancestor", maybe_ancestor, branch])?;
-        Ok(out.exit_code == 0)
+        let is_ancestor = out.exit_code == 0;
+        append_run_log(
+            "debug",
+            "git.ancestor.verified",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "maybe_ancestor": maybe_ancestor,
+                "branch": branch,
+                "is_ancestor": is_ancestor,
+                "exit_code": out.exit_code
+            }),
+        );
+        Ok(is_ancestor)
     }
 
     pub fn push_with_rebase_recovery(&self, branch: &str) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "git.push.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "branch": branch
+            }),
+        );
         let first = self.run(["git", "push", "origin", branch])?;
         if first.exit_code == 0 {
+            append_run_log(
+                "info",
+                "git.push.succeeded",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "branch": branch,
+                    "attempt": 1
+                }),
+            );
             return Ok(());
         }
 
+        append_run_log(
+            "warn",
+            "git.push.failed_first_attempt",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "branch": branch,
+                "exit_code": first.exit_code,
+                "stderr": first.stderr
+            }),
+        );
+
         let rebase = self.run(["git", "pull", "--rebase", "origin", branch])?;
         if rebase.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.push.rebase_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "branch": branch,
+                    "exit_code": rebase.exit_code,
+                    "stderr": rebase.stderr
+                }),
+            );
             return Err(GardenerError::Process(
                 "push/rebase recovery failed".to_string(),
             ));
         }
 
+        append_run_log(
+            "info",
+            "git.push.rebase_succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "branch": branch
+            }),
+        );
+
         let second = self.run(["git", "push", "origin", branch])?;
         if second.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.push.failed_after_rebase",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "branch": branch,
+                    "exit_code": second.exit_code,
+                    "stderr": second.stderr
+                }),
+            );
             return Err(GardenerError::Process(
                 "push failed after rebase recovery".to_string(),
             ));
         }
 
+        append_run_log(
+            "info",
+            "git.push.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "branch": branch,
+                "attempt": 2
+            }),
+        );
         Ok(())
     }
 
     pub fn run_validation_command(&self, command: &str) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "git.validation.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "command": command
+            }),
+        );
         let out = self.run(["sh", "-lc", command])?;
         if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.validation.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "command": command,
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
             return Err(GardenerError::Process(
                 "post-merge validation command failed".to_string(),
             ));
         }
+        append_run_log(
+            "info",
+            "git.validation.passed",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "command": command
+            }),
+        );
         Ok(())
     }
 

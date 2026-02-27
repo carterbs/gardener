@@ -1,16 +1,19 @@
 [meta]
 schema_version = 1
-created_at = "1772204869"
-head_sha = "d420f3ec7ea6f59ed40f8624410a3f8d370184ae"
-working_dir = "/Users/brad.carter/go/src/github.com/DataDog/gardener"
+created_at = "1772225075"
+head_sha = "b40b3c347899a88a13ff01d4fbe42f4f5e409c2b"
+working_dir = "/Users/brad.carter/go/src/github.com/DataDog/gardener/."
 repo_root = "/Users/brad.carter/go/src/github.com/DataDog/gardener"
 discovery_used = false
 
 [detected_agent]
 primary = "codex"
-claude_signals = ["/Users/brad.carter/go/src/github.com/DataDog/gardener:AGENTS.md"]
+claude_signals = [
+    "/Users/brad.carter/go/src/github.com/DataDog/gardener:.claude",
+    "/Users/brad.carter/go/src/github.com/DataDog/gardener:AGENTS.md",
+]
 codex_signals = ["/Users/brad.carter/go/src/github.com/DataDog/gardener:AGENTS.md"]
-agents_md_present = false
+agents_md_present = true
 user_confirmed = true
 
 [discovery]
@@ -51,16 +54,16 @@ issues = []
 strengths = []
 
 [user_validated]
-agent_steering_correction = ""
-external_docs_surface = ""
+agent_steering_correction = "unknown: discovery unavailable"
+external_docs_surface = "unknown: discovery unavailable"
 external_docs_accessible = false
-guardrails_correction = ""
-validation_command = "npm run validate"
-coverage_grade_override = ""
+guardrails_correction = "unknown: discovery unavailable"
+validation_command = "cargo test -p gardener --all-targets"
+coverage_grade_override = "unknown"
 additional_context = ""
-preferred_parallelism = 3
+preferred_parallelism = 31
 corrections_made = 0
-validated_at = "1772204869"
+validated_at = "1772225075"
 
 [agent_readiness]
 agent_steering_score = 2

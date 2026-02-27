@@ -1,5 +1,7 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::runtime::{ProcessRequest, ProcessRunner};
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +35,29 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "worktree.list.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
             return Err(GardenerError::Process(
                 "git worktree list failed".to_string(),
             ));
         }
-        parse_porcelain(&out.stdout)
+        let entries = parse_porcelain(&out.stdout)?;
+        append_run_log(
+            "debug",
+            "worktree.list.fetched",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "count": entries.len()
+            }),
+        );
+        Ok(entries)
     }
 
     pub fn create_or_resume(&self, path: &Path, branch: &str) -> Result<(), GardenerError> {
@@ -46,9 +66,27 @@ impl<'a> WorktreeClient<'a> {
             .iter()
             .any(|entry| entry.path == path && entry.branch.as_deref() == Some(branch))
         {
+            append_run_log(
+                "debug",
+                "worktree.create.resumed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "path": path.display().to_string(),
+                    "branch": branch
+                }),
+            );
             return Ok(());
         }
 
+        append_run_log(
+            "info",
+            "worktree.create.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": path.display().to_string(),
+                "branch": branch
+            }),
+        );
         let out = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec![
@@ -61,8 +99,28 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "worktree.create.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "path": path.display().to_string(),
+                    "branch": branch,
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
             return Err(GardenerError::Process("worktree create failed".to_string()));
         }
+        append_run_log(
+            "info",
+            "worktree.created",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": path.display().to_string(),
+                "branch": branch
+            }),
+        );
         Ok(())
     }
 
@@ -71,6 +129,15 @@ impl<'a> WorktreeClient<'a> {
         path: &Path,
         branch: &str,
     ) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "worktree.stale.remove_started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": path.display().to_string(),
+                "branch": branch
+            }),
+        );
         let remove = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec![
@@ -82,12 +149,40 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if remove.exit_code != 0 {
+            append_run_log(
+                "error",
+                "worktree.stale.remove_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "path": path.display().to_string(),
+                    "branch": branch,
+                    "exit_code": remove.exit_code,
+                    "stderr": remove.stderr
+                }),
+            );
             return Err(GardenerError::Process("worktree remove failed".to_string()));
         }
+        append_run_log(
+            "info",
+            "worktree.stale.removed",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": path.display().to_string(),
+                "branch": branch
+            }),
+        );
         self.create_or_resume(path, branch)
     }
 
     pub fn cleanup_on_completion(&self, path: &Path) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "worktree.cleanup.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": path.display().to_string()
+            }),
+        );
         let out = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec![
@@ -99,22 +194,63 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "worktree.cleanup.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "path": path.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
             return Err(GardenerError::Process(
                 "worktree cleanup failed".to_string(),
             ));
         }
+        append_run_log(
+            "info",
+            "worktree.cleaned_up",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": path.display().to_string()
+            }),
+        );
         Ok(())
     }
 
     pub fn prune_orphans(&self) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "worktree.prune.started",
+            json!({
+                "cwd": self.cwd.display().to_string()
+            }),
+        );
         let out = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec!["worktree".to_string(), "prune".to_string()],
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "worktree.prune.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
             return Err(GardenerError::Process("worktree prune failed".to_string()));
         }
+        append_run_log(
+            "info",
+            "worktree.pruned",
+            json!({
+                "cwd": self.cwd.display().to_string()
+            }),
+        );
         Ok(())
     }
 }

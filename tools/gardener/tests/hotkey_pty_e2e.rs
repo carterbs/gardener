@@ -239,7 +239,14 @@ max_turns = 12
         .arg("--quit-after")
         .arg("1")
         .env("GARDENER_FORCE_TTY", "1")
-        .env("PATH", format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default()));
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
     (dir, store, cmd)
 }
 
@@ -293,8 +300,7 @@ fn pty_e2e_ctrl_c_quits() {
 fn pty_e2e_q_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
-    session
-        .set_expect_timeout(Some(Duration::from_secs(8)));
+    session.set_expect_timeout(Some(Duration::from_secs(8)));
     std::thread::sleep(Duration::from_millis(350));
     session.send("q").expect("send q");
     session.expect(Eof).expect("session exited");
@@ -314,8 +320,7 @@ fn pty_e2e_q_interrupts_live_blocking_turn() {
 fn pty_e2e_ctrl_c_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
-    session
-        .set_expect_timeout(Some(Duration::from_secs(8)));
+    session.set_expect_timeout(Some(Duration::from_secs(8)));
     std::thread::sleep(Duration::from_millis(350));
     session.send("\u{3}").expect("send ctrl-c");
     session.expect(Eof).expect("session exited");

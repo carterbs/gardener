@@ -99,6 +99,7 @@ fn cli_help_contract() {
         "--agent",
         "--retriage",
         "--triage-only",
+        "--sync-only",
     ] {
         assert!(help.contains(flag));
     }

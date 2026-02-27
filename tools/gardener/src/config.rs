@@ -21,6 +21,7 @@ pub struct CliOverrides {
     pub agent: Option<AgentKind>,
     pub retriage: bool,
     pub triage_only: bool,
+    pub sync_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

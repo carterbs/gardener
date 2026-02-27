@@ -1,0 +1,124 @@
+## Testing Strategy
+- Phase-exit enforcement (non-optional):
+  - every phase must run full Gardener unit tests (`cargo test -p gardener --all-targets`)
+  - every phase must run coverage at 100.00% lines for current `tools/gardener/src/**` code (`cargo llvm-cov -p gardener --all-targets --summary-only`)
+  - every phase must run a real binary end-to-end scenario and verify exit code `0` plus expected artifacts.
+- Fixture catalog (required, phase-gate blocking if missing):
+  - `tools/gardener/tests/fixtures/configs/phase01-minimal.toml`
+  - `tools/gardener/tests/fixtures/configs/phase02-backlog.toml`
+  - `tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml`
+  - `tools/gardener/tests/fixtures/configs/phase04-scheduler-stub.toml`
+  - `tools/gardener/tests/fixtures/configs/phase05-fsm.toml`
+  - `tools/gardener/tests/fixtures/configs/phase06-codex.toml`
+  - `tools/gardener/tests/fixtures/configs/phase06-claude.toml`
+  - `tools/gardener/tests/fixtures/configs/phase07-git-gh-recovery.toml`
+  - `tools/gardener/tests/fixtures/configs/phase08-ui.toml`
+  - `tools/gardener/tests/fixtures/configs/phase09-cutover.toml`
+  - `tools/gardener/tests/fixtures/configs/phase10-full.toml`
+  - scoped subtree fixture root: `tools/gardener/tests/fixtures/repos/scoped-app/`
+  - fixture configs are TOML and must include minimally: `scope.working_dir`, `validation.command`, backend model mappings, and run mode flags for the phase.
+- Unit tests:
+  - priority classification
+  - backlog identity/dedupe
+  - quality domain discovery completeness for profile-driven and inferred repositories
+  - deterministic artifact-to-domain mapping and drift detection
+  - quality scoring rubric behavior and edge cases
+  - markdown quality-grade document rendering invariants
+  - prompt packet assembly determinism for identical snapshots
+  - prompt context ranking and budget trimming behavior
+  - prompt registry versioning and required-section guards
+  - prompt parity fixtures: Rust V1 templates preserve legacy state intent/constraints
+  - knowledge selection relevance + guardrail precedence
+  - post-merge pattern extraction and confidence updates
+  - failure postmortem classification and knowledge deactivation paths
+  - protocol serialization/deserialization + version guards
+  - projection monotonicity (`last_event_id`) and drift repair
+  - worker identity/session/sandbox lifecycle boundaries
+  - startup condition branching
+  - validation command resolution (`validation.command` vs agent discovery)
+  - startup dispatch precedence
+  - FSM transition table
+  - done-means-gone teardown path
+  - watchdog classifier (`healthy`/`stalled`/`zombie`)
+  - log retention pruning
+  - config precedence.
+- Contract tests (`tools/gardener/tests/*`):
+  - fake `gh`, `git`, `claude`, `codex` binaries
+  - adapter capability-probe matrix (`--help` fixtures with/without optional flags)
+  - worker crash/timeout/retry behavior
+  - redundant completion observer idempotency under races
+  - merge conflict recovery behavior
+  - request-order scheduling fairness
+  - adapter cancellation and malformed output handling
+  - permissive execution profile contract for both adapters
+  - prompt metadata propagation (`prompt_version`, `context_manifest_hash`, `knowledge_refs`).
+- Integration tests:
+  - mini repository fixture with synthetic PR/worktree states
+  - end-to-end single-run orchestration with dry-run and live modes
+  - concurrent claims with N workers to prove no double-assignment
+  - restart recovery after forced worker crash
+  - `--quality-grades-only` deterministic generation run
+  - startup with missing quality grades generates doc before worker scheduling
+  - startup with stale quality grades refreshes document and updates freshness signal
+  - agent-driven backlog seeding produces auditable, right-sized high-level tasks
+  - startup event-driven dispatch ordering
+  - scoped-mode run with `--working-dir <subdir>` limits quality/discovery/seeding evidence to that subtree
+  - Problems view intervention actions emit expected protocol events
+  - successful repeated tasks show measurable knowledge-application improvements in prompt selection traces.
+  - mock binary harness setup:
+    - place compiled test bins (or POSIX scripts) in `tools/gardener/tests/integration/mock_bins/`
+    - prepend that directory to `PATH` for each integration test process
+    - assert invoked argv/env from fixture logs.
+    - required fake-bin scenarios:
+      - `git`: worktree list/add/remove/prune, branch/diff ancestry checks, merge-base checks.
+      - `gh`: PR list/view with open/merged/conflict variants.
+      - `codex`/`claude`: success, malformed output, timeout, non-zero exit.
+- Coverage discipline:
+  - no untested error branches
+  - dependency injection for clock/fs/process to exercise all branches deterministically
+  - use fake runtime adapters to force fs/process/clock failure branches; do not rely on flaky OS-level fault injection
+  - coverage gate source is `cargo llvm-cov` only
+  - enforce 100% line coverage for `tools/gardener/src/**`.
+
+## Rollout and Risk Controls
+- Use dry-run mode for first production runs.
+- Keep explicit escalation output when recovery fails (auto-create `P0` remediation task with evidence bundle).
+- Add run IDs and deterministic event IDs for postmortem replay.
+- Add startup health summary (quality-grade status, stale worktrees found/fixed, PR collisions found/fixed, backlog counts by priority).
+- Add projection replay check in dry-run: rebuild projections from immutable events and assert parity before cutover.
+- Keep quality-grade coverage source explicit during rollout:
+  - verify `packages/functions/coverage/coverage-summary.json` exists or emit `P0` infra task.
+- Gate rollout in steps:
+  - shadow-run Rust gardener beside TypeScript logs
+  - compare task ordering and merge outcomes
+  - compare observer-chain reconciliation outcomes
+  - cut over only after parity and recovery tests pass.
+
+## References
+- `scripts/ralph/orchestrator-requirements.md:3`
+- `scripts/ralph/orchestrator-requirements.md:6`
+- `scripts/ralph/orchestrator-requirements.md:7`
+- `scripts/ralph/orchestrator-requirements.md:10`
+- `scripts/ralph/orchestrator-requirements.md:13`
+- `scripts/ralph/orchestrator-requirements.md:23`
+- `scripts/ralph/index.ts:1361`
+- `scripts/ralph/index.ts:1478`
+- `scripts/ralph/index.ts:1637`
+- `scripts/ralph/index.ts:1734`
+- `scripts/ralph/backlog.ts:7`
+- `scripts/ralph/backlog.ts:367`
+- `scripts/ralph/git.ts:4`
+- `scripts/ralph/agent.ts:308`
+- `scripts/ralph/config.ts:32`
+- `scripts/update-quality-grades.ts:21`
+- `tools/arch-lint/src/checks/quality_grades_freshness.rs:12`
+- `AGENTS.md:17`
+- `docs/conventions/workflow.md:5`
+- `docs/conventions/workflow.md:58`
+- `docs/references/codex-agent-team-article.md:49`
+- `docs/references/codex-agent-team-article.md:102`
+- `docs/references/codex-agent-team-article.md:124`
+- `docs/references/codex-agent-team-article.md:193`
+- `thoughts/shared/plans/active/2026-02-26-agent-orchestrator-rust.md`
+- External: https://github.com/steveyegge/gastown
+- External: https://github.com/steveyegge/beads

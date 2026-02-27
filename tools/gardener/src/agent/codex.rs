@@ -1,6 +1,6 @@
 use crate::agent::{validate_model, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
-use crate::protocol::{map_codex_event, parse_jsonl, AgentTerminal, StepResult};
+use crate::protocol::{map_codex_event, AgentEvent, AgentTerminal, StepResult};
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use crate::types::AgentKind;
 use serde_json::{json, Value};
@@ -52,6 +52,7 @@ impl AgentAdapter for CodexAdapter {
         process_runner: &dyn ProcessRunner,
         context: &AdapterContext,
         prompt: &str,
+        mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
     ) -> Result<StepResult, GardenerError> {
         validate_model(&context.model)?;
 
@@ -85,11 +86,45 @@ impl AgentAdapter for CodexAdapter {
             cwd: Some(context.cwd.clone()),
         })?;
 
-        let output = process_runner.wait(handle)?;
+        let mut raw_events = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut parse_error: Option<String> = None;
+        let mut on_stdout_line = |line: &str| {
+            if line.trim().is_empty() {
+                return;
+            }
+            match serde_json::from_str::<Value>(line) {
+                Ok(raw) => {
+                    let event = map_codex_event(&raw);
+                    if let Some(sink) = on_event.as_deref_mut() {
+                        sink(&event);
+                    }
+                    raw_events.push(raw);
+                }
+                Err(err) => {
+                    if parse_error.is_none() {
+                        parse_error = Some(format!("invalid jsonl line: {err}"));
+                    }
+                }
+            }
+        };
+        let mut on_stderr_line = |line: &str| {
+            if line.trim().is_empty() {
+                return;
+            }
+            diagnostics.push(line.to_string());
+        };
+        let output = process_runner.wait_with_line_stream(
+            handle,
+            &mut on_stdout_line,
+            &mut on_stderr_line,
+        )?;
+        if let Some(err) = parse_error {
+            return Err(GardenerError::Process(err));
+        }
         if output.exit_code != 0 {
             return Err(GardenerError::Process(output.stderr));
         }
-        let raw_events = parse_jsonl(&output.stdout)?;
         let events = raw_events.iter().map(map_codex_event).collect::<Vec<_>>();
 
         if let Some(failed) = raw_events.iter().find(|ev| {
@@ -99,11 +134,7 @@ impl AgentAdapter for CodexAdapter {
                 terminal: AgentTerminal::Failure,
                 events,
                 payload: failed.clone(),
-                diagnostics: output
-                    .stderr
-                    .lines()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>(),
+                diagnostics,
             });
         }
 
@@ -119,11 +150,7 @@ impl AgentAdapter for CodexAdapter {
             terminal: AgentTerminal::Success,
             events,
             payload,
-            diagnostics: output
-                .stderr
-                .lines()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
+            diagnostics,
         })
     }
 }
@@ -163,7 +190,7 @@ mod tests {
 
         let adapter = CodexAdapter;
         let result = adapter
-            .execute(&runner, &context(), "prompt")
+            .execute(&runner, &context(), "prompt", None)
             .expect("success");
         assert_eq!(result.terminal, AgentTerminal::Success);
         assert_eq!(result.payload["ok"], true);
@@ -184,7 +211,7 @@ mod tests {
 
         let adapter = CodexAdapter;
         let result = adapter
-            .execute(&runner, &context(), "prompt")
+            .execute(&runner, &context(), "prompt", None)
             .expect("parsed");
         assert_eq!(result.terminal, AgentTerminal::Failure);
     }
@@ -220,7 +247,7 @@ mod tests {
         }));
         let adapter = CodexAdapter;
         let err = adapter
-            .execute(&runner, &context(), "prompt")
+            .execute(&runner, &context(), "prompt", None)
             .expect_err("must fail");
         assert!(format!("{err}").contains("missing turn.completed"));
     }

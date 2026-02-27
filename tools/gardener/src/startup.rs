@@ -3,15 +3,18 @@ use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::pr_audit::reconcile_open_prs;
 use crate::priority::Priority;
+use crate::protocol::{AgentEvent, AgentEventKind};
 use crate::quality_grades::render_quality_grade_document;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{ProcessRequest, ProductionRuntime};
-use crate::seeding::seed_backlog_if_needed;
+use crate::seeding::seed_backlog_if_needed_with_events;
 use crate::task_identity::TaskKind;
 use crate::triage::profile_path;
 use crate::types::RuntimeScope;
 use crate::worktree_audit::reconcile_worktrees;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 const REPORT_TTL_SECONDS: u64 = 3600;
@@ -73,6 +76,19 @@ pub fn run_startup_audits(
     scope: &RuntimeScope,
     run_seeding: bool,
 ) -> Result<StartupSummary, GardenerError> {
+    run_startup_audits_with_progress(runtime, cfg, scope, run_seeding, |_detail| Ok(()))
+}
+
+pub fn run_startup_audits_with_progress<F>(
+    runtime: &ProductionRuntime,
+    cfg: &mut AppConfig,
+    scope: &RuntimeScope,
+    run_seeding: bool,
+    mut progress: F,
+) -> Result<StartupSummary, GardenerError>
+where
+    F: FnMut(&str) -> Result<(), GardenerError>,
+{
     let profile_loc = profile_path(scope, cfg);
     if !runtime.file_system.exists(&profile_loc) {
         return Err(GardenerError::Cli(
@@ -134,16 +150,48 @@ pub fn run_startup_audits(
 
     let mut seeded_tasks_upserted = 0usize;
     if run_seeding && !cfg.execution.test_mode {
+        progress("Preparing backlog seeding context from repo profile and quality grades")?;
+        if !runtime.terminal.stdin_is_tty() {
+            runtime.terminal.write_line(
+                "startup backlog seeding: preparing context from repo profile + quality report",
+            )?;
+        }
         let fallback_target = cfg.orchestrator.parallelism.max(3) as usize;
-        let seeded = match seed_backlog_if_needed(
-            runtime.process_runner.as_ref(),
+        progress(&format!(
+            "Launching {:?} seeding agent ({})",
+            cfg.seeding.backend, cfg.seeding.model
+        ))?;
+        if !runtime.terminal.stdin_is_tty() {
+            runtime.terminal.write_line(&format!(
+                "startup backlog seeding: launching backend={:?} model={}",
+                cfg.seeding.backend, cfg.seeding.model
+            ))?;
+        }
+        let seeded = match run_seed_with_heartbeat(
+            runtime,
             scope,
             cfg,
             &profile,
             &quality_doc,
+            &mut progress,
         ) {
-            Ok(tasks) => tasks,
+            Ok(tasks) => {
+                progress(&format!(
+                    "Seeding agent returned {} candidate task(s)",
+                    tasks.len()
+                ))?;
+                if !runtime.terminal.stdin_is_tty() {
+                    runtime.terminal.write_line(&format!(
+                        "startup backlog seeding: agent returned {} candidate tasks",
+                        tasks.len()
+                    ))?;
+                }
+                tasks
+            }
             Err(err) => {
+                progress(&format!(
+                    "Seeding agent failed ({err}); continuing with fallback task templates"
+                ))?;
                 runtime
                     .terminal
                     .write_line(&format!("WARN backlog seeding failed: {err}"))?;
@@ -151,6 +199,10 @@ pub fn run_startup_audits(
             }
         };
         if !seeded.is_empty() {
+            progress(&format!(
+                "Persisting {} seeded task(s) to backlog store",
+                seeded.len()
+            ))?;
             let db_path = scope
                 .repo_root
                 .as_ref()
@@ -173,6 +225,10 @@ pub fn run_startup_audits(
                 }
             }
         } else {
+            progress(&format!(
+                "No seeded tasks produced; generating {} fallback bootstrap task(s)",
+                fallback_target
+            ))?;
             let db_path = scope
                 .repo_root
                 .as_ref()
@@ -185,6 +241,15 @@ pub fn run_startup_audits(
                     seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
                 }
             }
+        }
+        progress(&format!(
+            "Backlog seeding complete; upserted {} task(s)",
+            seeded_tasks_upserted
+        ))?;
+        if !runtime.terminal.stdin_is_tty() {
+            runtime.terminal.write_line(&format!(
+                "startup backlog seeding: complete, upserted_tasks={seeded_tasks_upserted}"
+            ))?;
         }
     }
 
@@ -209,6 +274,204 @@ pub fn run_startup_audits(
         pr_collisions_fixed: prs.collisions_fixed,
         seeded_tasks_upserted,
     })
+}
+
+fn run_seed_with_heartbeat<F>(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    profile: &crate::repo_intelligence::RepoIntelligenceProfile,
+    quality_doc: &str,
+    progress: &mut F,
+) -> Result<Vec<crate::seed_runner::SeedTask>, GardenerError>
+where
+    F: FnMut(&str) -> Result<(), GardenerError>,
+{
+    enum SeedProgressMessage {
+        AgentUpdate(String),
+        Done(Result<Vec<crate::seed_runner::SeedTask>, GardenerError>),
+    }
+    let (tx, rx) = mpsc::channel::<SeedProgressMessage>();
+
+    std::thread::scope(|thread_scope| {
+        thread_scope.spawn(|| {
+            let mut on_event = |event: &AgentEvent| {
+                if let Some(summary) = summarize_seed_agent_event(event) {
+                    let _ = tx.send(SeedProgressMessage::AgentUpdate(summary));
+                }
+            };
+            let result = seed_backlog_if_needed_with_events(
+                runtime.process_runner.as_ref(),
+                scope,
+                cfg,
+                profile,
+                quality_doc,
+                Some(&mut on_event),
+            );
+            let _ = tx.send(SeedProgressMessage::Done(result));
+        });
+
+        let mut waited_seconds = 0u64;
+        let mut last_event: Option<String> = None;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(SeedProgressMessage::AgentUpdate(update)) => {
+                    if last_event.as_deref() != Some(update.as_str()) {
+                        progress(&update)?;
+                        if !runtime.terminal.stdin_is_tty() {
+                            runtime
+                                .terminal
+                                .write_line(&format!("startup backlog seeding: {update}"))?;
+                        }
+                        last_event = Some(update);
+                    }
+                }
+                Ok(SeedProgressMessage::Done(result)) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    waited_seconds = waited_seconds.saturating_add(10);
+                    progress(&format!(
+                        "Backlog seeding agent still running ({waited_seconds}s elapsed); waiting for model output"
+                    ))?;
+                    if !runtime.terminal.stdin_is_tty() {
+                        runtime.terminal.write_line(&format!(
+                            "startup backlog seeding: still running, elapsed={}s",
+                            waited_seconds
+                        ))?;
+                    }
+                    if waited_seconds == 60 {
+                        progress(
+                            "Backlog seeding is taking longer than expected; this can happen during first-run auth or slow model/network response",
+                        )?;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(GardenerError::Process(
+                        "backlog seeding worker channel disconnected".to_string(),
+                    ));
+                }
+            }
+        }
+    })
+}
+
+fn summarize_seed_agent_event(event: &AgentEvent) -> Option<String> {
+    match event.kind {
+        AgentEventKind::ThreadStarted => Some("Agent session started".to_string()),
+        AgentEventKind::TurnStarted => Some("Agent turn started".to_string()),
+        AgentEventKind::ToolCall => {
+            let label = extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
+            let command = extract_command_preview(&event.payload);
+            Some(match command {
+                Some(cmd) => format!("Agent activity: {label} started: `{cmd}`"),
+                None => format!("Agent activity: {label} started"),
+            })
+        }
+        AgentEventKind::ToolResult => {
+            let label = extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
+            let command = extract_command_preview(&event.payload);
+            Some(match command {
+                Some(cmd) => format!("Agent activity: {label} completed: `{cmd}`"),
+                None => format!("Agent activity: {label} completed"),
+            })
+        }
+        AgentEventKind::Message => {
+            extract_message_preview(&event.payload).map(|msg| format!("Agent thought: {msg}"))
+        }
+        AgentEventKind::TurnCompleted => Some("Agent turn completed".to_string()),
+        AgentEventKind::TurnFailed => Some(format!(
+            "Agent turn failed: {}",
+            extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone())
+        )),
+        AgentEventKind::Unknown => None,
+    }
+}
+
+fn extract_event_label(payload: &serde_json::Value) -> Option<String> {
+    let candidates = [
+        payload
+            .pointer("/item/type")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/item/name")
+            .and_then(serde_json::Value::as_str),
+        payload.pointer("/name").and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/tool_name")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/reason")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn extract_message_preview(payload: &serde_json::Value) -> Option<String> {
+    let candidates = [
+        payload
+            .pointer("/delta/text")
+            .and_then(serde_json::Value::as_str),
+        payload.pointer("/text").and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/message")
+            .and_then(serde_json::Value::as_str),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| {
+            let mut clipped = s.to_string();
+            if clipped.len() > 120 {
+                clipped.truncate(120);
+                clipped.push_str("...");
+            }
+            clipped
+        })
+}
+
+fn extract_command_preview(payload: &serde_json::Value) -> Option<String> {
+    let candidates = [
+        payload
+            .pointer("/item/command")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/item/command_line")
+            .and_then(serde_json::Value::as_str),
+        payload.pointer("/item/cmd").and_then(serde_json::Value::as_str),
+        payload.pointer("/command").and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/command_line")
+            .and_then(serde_json::Value::as_str),
+        payload.pointer("/cmd").and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/item/input/command")
+            .and_then(serde_json::Value::as_str),
+        payload
+            .pointer("/item/input/cmd")
+            .and_then(serde_json::Value::as_str),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| {
+            let mut clipped = s.to_string();
+            if clipped.len() > 120 {
+                clipped.truncate(120);
+                clipped.push_str("...");
+            }
+            clipped
+        })
 }
 
 fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
@@ -276,12 +539,10 @@ fn report_stamp_is_stale(
     if cfg.quality_report.stale_if_head_commit_differs {
         let profile_loc = crate::triage::profile_path(scope, cfg);
         if let Ok(profile) = read_profile(runtime.file_system.as_ref(), &profile_loc) {
-            if let Ok(current_head) =
-                crate::repo_intelligence::current_head_sha(
-                    runtime.process_runner.as_ref(),
-                    &scope.working_dir,
-                )
-            {
+            if let Ok(current_head) = crate::repo_intelligence::current_head_sha(
+                runtime.process_runner.as_ref(),
+                &scope.working_dir,
+            ) {
                 if current_head != profile.meta.head_sha {
                     return Ok(true);
                 }

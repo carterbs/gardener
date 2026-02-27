@@ -51,7 +51,7 @@ use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use logging::structured_fallback_line;
 use runtime::ProductionRuntime;
-use startup::run_startup_audits;
+use startup::{run_startup_audits, run_startup_audits_with_progress};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
@@ -326,7 +326,13 @@ pub fn run_with_runtime(
             "Seeding and reconciling backlog before worker assignment",
         )?;
         if !cfg_for_startup.execution.test_mode {
-            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
+            let _ = run_startup_audits_with_progress(
+                runtime,
+                &mut cfg_for_startup,
+                &startup.scope,
+                true,
+                |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
+            )?;
         }
         let db_path = startup
             .scope

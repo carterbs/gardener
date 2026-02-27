@@ -428,6 +428,7 @@ fn run_agent_turn(
             max_turns: Some(cfg.seeding.max_turns),
         },
         &prepared.rendered,
+        None,
     )?;
     Ok(TurnResult {
         terminal: step.terminal,

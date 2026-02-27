@@ -1,6 +1,7 @@
 use crate::agent::factory::AdapterFactory;
 use crate::agent::AdapterContext;
 use crate::errors::GardenerError;
+use crate::protocol::AgentEvent;
 use crate::runtime::ProcessRunner;
 use crate::types::{AgentKind, RuntimeScope};
 use serde::{Deserialize, Serialize};
@@ -24,32 +25,44 @@ pub fn run_legacy_seed_runner_v1(
     model: &str,
     prompt: &str,
 ) -> Result<Vec<SeedTask>, GardenerError> {
+    run_legacy_seed_runner_v1_with_events(process_runner, scope, backend, model, prompt, None)
+}
+
+pub fn run_legacy_seed_runner_v1_with_events(
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    backend: AgentKind,
+    model: &str,
+    prompt: &str,
+    mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+) -> Result<Vec<SeedTask>, GardenerError> {
     let factory = AdapterFactory::with_defaults();
     let adapter = factory.get(backend).ok_or_else(|| {
         GardenerError::InvalidConfig(format!("adapter not registered for {:?}", backend))
     })?;
 
-    let result = adapter.execute(
-        process_runner,
-        &AdapterContext {
-            worker_id: "seed-worker".to_string(),
-            session_id: "seed-session".to_string(),
-            sandbox_id: "seed-sandbox".to_string(),
-            model: model.to_string(),
-            cwd: scope.working_dir.clone(),
-            prompt_version: "seeding-v1".to_string(),
-            context_manifest_hash: "seeding-context".to_string(),
-            output_schema: None,
-            output_file: Some(
-                scope
-                    .working_dir
-                    .join(".cache/gardener/seed-last-message.json"),
-            ),
-            permissive_mode: true,
-            max_turns: Some(12),
-        },
-        prompt,
-    )?;
+    let context = AdapterContext {
+        worker_id: "seed-worker".to_string(),
+        session_id: "seed-session".to_string(),
+        sandbox_id: "seed-sandbox".to_string(),
+        model: model.to_string(),
+        cwd: scope.working_dir.clone(),
+        prompt_version: "seeding-v1".to_string(),
+        context_manifest_hash: "seeding-context".to_string(),
+        output_schema: None,
+        output_file: Some(
+            scope
+                .working_dir
+                .join(".cache/gardener/seed-last-message.json"),
+        ),
+        permissive_mode: true,
+        max_turns: Some(12),
+    };
+    let result = if let Some(sink) = on_event.as_mut() {
+        adapter.execute(process_runner, &context, prompt, Some(*sink))?
+    } else {
+        adapter.execute(process_runner, &context, prompt, None)?
+    };
     let payload: SeedPayload = serde_json::from_value(result.payload)
         .map_err(|e| GardenerError::OutputEnvelope(e.to_string()))?;
     Ok(payload.tasks)

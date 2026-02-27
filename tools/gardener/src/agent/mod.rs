@@ -1,5 +1,5 @@
 use crate::errors::GardenerError;
-use crate::protocol::StepResult;
+use crate::protocol::{AgentEvent, StepResult};
 use crate::runtime::{Clock, FileSystem, ProcessRunner};
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,7 @@ pub trait AgentAdapter: Send + Sync {
         process_runner: &dyn ProcessRunner,
         context: &AdapterContext,
         prompt: &str,
+        on_event: Option<&mut dyn FnMut(&AgentEvent)>,
     ) -> Result<StepResult, GardenerError>;
 }
 
@@ -134,6 +135,7 @@ mod tests {
             _process_runner: &dyn crate::runtime::ProcessRunner,
             _context: &AdapterContext,
             _prompt: &str,
+            _on_event: Option<&mut dyn FnMut(&crate::protocol::AgentEvent)>,
         ) -> Result<StepResult, crate::errors::GardenerError> {
             Ok(StepResult {
                 terminal: AgentTerminal::Success,
@@ -150,9 +152,8 @@ mod tests {
         let runner = FakeProcessRunner::default();
         let clock = FakeClock::default();
         let adapter = TestAdapter;
-        let snapshot =
-            probe_and_persist(&[&adapter], &runner, &fs, &clock, Path::new("/repo"))
-                .expect("snapshot");
+        let snapshot = probe_and_persist(&[&adapter], &runner, &fs, &clock, Path::new("/repo"))
+            .expect("snapshot");
         assert_eq!(snapshot.adapters.len(), 1);
         assert!(fs.exists(Path::new("/repo/.cache/gardener/adapter-capabilities.json")));
     }

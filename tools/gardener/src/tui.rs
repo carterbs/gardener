@@ -315,6 +315,7 @@ fn draw_report_frame(frame: &mut ratatui::Frame<'_>, path: &str, report_lines: &
 
 thread_local! {
     static LIVE_TUI: RefCell<Option<Terminal<CrosstermBackend<Stdout>>>> = const { RefCell::new(None) };
+    static LIVE_TUI_SIZE: RefCell<Option<(u16, u16)>> = const { RefCell::new(None) };
 }
 
 pub fn draw_dashboard_live(
@@ -363,7 +364,11 @@ pub fn close_live_terminal() -> Result<(), GardenerError> {
                 .map_err(|e| GardenerError::Io(e.to_string()))?;
         }
         Ok(())
-    })
+    })?;
+    LIVE_TUI_SIZE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    Ok(())
 }
 
 fn with_live_terminal<F>(f: F) -> Result<(), GardenerError>
@@ -379,8 +384,26 @@ where
             let backend = CrosstermBackend::new(stdout);
             let terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
             *slot = Some(terminal);
+            let size = crossterm::terminal::size().map_err(|e| GardenerError::Io(e.to_string()))?;
+            LIVE_TUI_SIZE.with(|size_cell| {
+                *size_cell.borrow_mut() = Some(size);
+            });
         }
-        f(slot.as_mut().expect("live terminal initialized"))
+        let size = crossterm::terminal::size().map_err(|e| GardenerError::Io(e.to_string()))?;
+        let resized = LIVE_TUI_SIZE.with(|size_cell| {
+            let mut current = size_cell.borrow_mut();
+            let changed = current.map(|existing| existing != size).unwrap_or(true);
+            *current = Some(size);
+            changed
+        });
+        let terminal = slot.as_mut().expect("live terminal initialized");
+        if resized {
+            terminal
+                .autoresize()
+                .map_err(|e| GardenerError::Io(e.to_string()))?;
+            terminal.clear().map_err(|e| GardenerError::Io(e.to_string()))?;
+        }
+        f(terminal)
     })
 }
 

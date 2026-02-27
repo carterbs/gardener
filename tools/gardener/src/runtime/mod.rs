@@ -4,6 +4,7 @@ use crate::tui::{
     QueueStats, WorkerRow,
 };
 use std::collections::{HashMap, VecDeque};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -33,6 +34,21 @@ pub trait ProcessRunner: Send + Sync {
     fn spawn(&self, request: ProcessRequest) -> Result<u64, GardenerError>;
     fn wait(&self, handle: u64) -> Result<ProcessOutput, GardenerError>;
     fn kill(&self, handle: u64) -> Result<(), GardenerError>;
+    fn wait_with_line_stream(
+        &self,
+        handle: u64,
+        on_stdout_line: &mut dyn FnMut(&str),
+        on_stderr_line: &mut dyn FnMut(&str),
+    ) -> Result<ProcessOutput, GardenerError> {
+        let output = self.wait(handle)?;
+        for line in output.stdout.lines() {
+            on_stdout_line(line);
+        }
+        for line in output.stderr.lines() {
+            on_stderr_line(line);
+        }
+        Ok(output)
+    }
 
     fn run(&self, request: ProcessRequest) -> Result<ProcessOutput, GardenerError> {
         let handle = self.spawn(request)?;
@@ -266,12 +282,86 @@ impl ProcessRunner for ProductionProcessRunner {
     }
 
     fn wait(&self, handle: u64) -> Result<ProcessOutput, GardenerError> {
+        self.wait_with_line_stream(handle, &mut |_line| {}, &mut |_line| {})
+    }
+
+    fn wait_with_line_stream(
+        &self,
+        handle: u64,
+        on_stdout_line: &mut dyn FnMut(&str),
+        on_stderr_line: &mut dyn FnMut(&str),
+    ) -> Result<ProcessOutput, GardenerError> {
         let child = {
             let mut state = self.state.lock().expect("process lock poisoned");
             state.children.remove(&handle)
         };
         let mut child =
             child.ok_or_else(|| GardenerError::Process(format!("unknown handle {handle}")))?;
+
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| GardenerError::Process("child stdout unavailable".to_string()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| GardenerError::Process("child stderr unavailable".to_string()))?;
+
+        enum StreamChunk {
+            Stdout(Vec<u8>),
+            Stderr(Vec<u8>),
+            StdoutDone,
+            StderrDone,
+            StdoutReadErr(String),
+            StderrReadErr(String),
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel::<StreamChunk>();
+        let tx_out = tx.clone();
+        let out_thread = std::thread::spawn(move || {
+            let mut buf = [0_u8; 4096];
+            loop {
+                match stdout.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx_out.send(StreamChunk::StdoutDone);
+                        break;
+                    }
+                    Ok(n) => {
+                        let _ = tx_out.send(StreamChunk::Stdout(buf[..n].to_vec()));
+                    }
+                    Err(e) => {
+                        let _ = tx_out.send(StreamChunk::StdoutReadErr(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        let err_thread = std::thread::spawn(move || {
+            let mut buf = [0_u8; 4096];
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = tx.send(StreamChunk::StderrDone);
+                        break;
+                    }
+                    Ok(n) => {
+                        let _ = tx.send(StreamChunk::Stderr(buf[..n].to_vec()));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamChunk::StderrReadErr(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        let mut stdout_line_buffer = Vec::new();
+        let mut stderr_line_buffer = Vec::new();
+        let mut stdout_closed = false;
+        let mut stderr_closed = false;
+        let mut exit_code: Option<i32> = None;
 
         loop {
             if INTERRUPT_REQUESTED.swap(false, Ordering::SeqCst) {
@@ -283,24 +373,65 @@ impl ProcessRunner for ProductionProcessRunner {
             }
 
             match child.try_wait() {
-                Ok(Some(_status)) => {
-                    let output = child
-                        .wait_with_output()
-                        .map_err(|e| GardenerError::Process(e.to_string()))?;
-                    return Ok(ProcessOutput {
-                        exit_code: output.status.code().unwrap_or(-1),
-                        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                    });
+                Ok(Some(status)) => {
+                    exit_code = Some(status.code().unwrap_or(-1));
                 }
                 Ok(None) => {
-                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    // Keep draining output streams while the process is still running.
                 }
                 Err(e) => {
                     return Err(GardenerError::Process(e.to_string()));
                 }
             }
+
+            match rx.recv_timeout(std::time::Duration::from_millis(25)) {
+                Ok(StreamChunk::Stdout(chunk)) => {
+                    stdout_bytes.extend_from_slice(&chunk);
+                    append_and_flush_lines(&mut stdout_line_buffer, &chunk, on_stdout_line);
+                }
+                Ok(StreamChunk::Stderr(chunk)) => {
+                    stderr_bytes.extend_from_slice(&chunk);
+                    append_and_flush_lines(&mut stderr_line_buffer, &chunk, on_stderr_line);
+                }
+                Ok(StreamChunk::StdoutDone) => {
+                    stdout_closed = true;
+                }
+                Ok(StreamChunk::StderrDone) => {
+                    stderr_closed = true;
+                }
+                Ok(StreamChunk::StdoutReadErr(err)) => {
+                    return Err(GardenerError::Process(format!(
+                        "stdout stream read failed: {err}"
+                    )));
+                }
+                Ok(StreamChunk::StderrReadErr(err)) => {
+                    return Err(GardenerError::Process(format!(
+                        "stderr stream read failed: {err}"
+                    )));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+
+            if exit_code.is_some() && stdout_closed && stderr_closed {
+                break;
+            }
         }
+
+        let _ = child.wait();
+        let _ = out_thread.join();
+        let _ = err_thread.join();
+
+        flush_trailing_line(&mut stdout_line_buffer, on_stdout_line);
+        flush_trailing_line(&mut stderr_line_buffer, on_stderr_line);
+
+        Ok(ProcessOutput {
+            exit_code: exit_code.unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
+        })
     }
 
     fn kill(&self, handle: u64) -> Result<(), GardenerError> {
@@ -314,6 +445,29 @@ impl ProcessRunner for ProductionProcessRunner {
             .kill()
             .map_err(|e| GardenerError::Process(e.to_string()))
     }
+}
+
+fn append_and_flush_lines(line_buffer: &mut Vec<u8>, chunk: &[u8], on_line: &mut dyn FnMut(&str)) {
+    line_buffer.extend_from_slice(chunk);
+    let mut cursor = 0usize;
+    while let Some(pos) = line_buffer[cursor..].iter().position(|b| *b == b'\n') {
+        let end = cursor + pos;
+        let line = String::from_utf8_lossy(&line_buffer[..end]);
+        on_line(line.trim_end_matches('\r'));
+        cursor = end + 1;
+    }
+    if cursor > 0 {
+        line_buffer.drain(..cursor);
+    }
+}
+
+fn flush_trailing_line(line_buffer: &mut Vec<u8>, on_line: &mut dyn FnMut(&str)) {
+    if line_buffer.is_empty() {
+        return;
+    }
+    let line = String::from_utf8_lossy(line_buffer);
+    on_line(line.trim_end_matches('\r'));
+    line_buffer.clear();
 }
 
 pub struct ProductionTerminal;

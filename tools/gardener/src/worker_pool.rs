@@ -54,6 +54,8 @@ pub fn run_worker_pool_fsm(
             session_age_secs: 0,
             lease_held: false,
             session_missing: false,
+            command_details: Vec::new(),
+            commands_expanded: false,
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;

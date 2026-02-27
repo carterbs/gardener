@@ -20,7 +20,6 @@ use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,7 +28,6 @@ pub struct WorkerLogEvent {
     pub state: WorkerState,
     pub prompt_version: String,
     pub context_manifest_hash: String,
-    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +116,9 @@ fn execute_task_live(
             "task_summary": task_summary
         }),
     );
-    let registry = PromptRegistry::v1().with_gitting_mode(&cfg.execution.git_output_mode);
+    let registry = PromptRegistry::v1()
+        .with_gitting_mode(&cfg.execution.git_output_mode)
+        .with_merging_mode(&cfg.execution.git_output_mode);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
     let learning_loop = LearningLoop::default();
@@ -175,7 +175,7 @@ fn execute_task_live(
         WorkerState::Understand,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &understand_result);
+    logs.push(understand_result.log_event);
     if understand_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&understand_result.payload);
         append_run_log(
@@ -223,7 +223,7 @@ fn execute_task_live(
             WorkerState::Planning,
             task_summary,
         )?;
-        append_turn_log_events(&mut logs, &planning_result);
+        logs.push(planning_result.log_event);
         if planning_result.terminal == AgentTerminal::Failure {
             let failure_reason = extract_failure_reason(&planning_result.payload);
             append_run_log(
@@ -258,7 +258,7 @@ fn execute_task_live(
         WorkerState::Doing,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &doing_result);
+    logs.push(doing_result.log_event);
     if doing_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&doing_result.payload);
         append_run_log(
@@ -311,7 +311,7 @@ fn execute_task_live(
         WorkerState::Gitting,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &gitting_result);
+    logs.push(gitting_result.log_event);
     if gitting_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&gitting_result.payload);
         append_run_log(
@@ -367,7 +367,7 @@ fn execute_task_live(
         WorkerState::Reviewing,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &reviewing_result);
+    logs.push(reviewing_result.log_event);
     if reviewing_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&reviewing_result.payload);
         append_run_log(
@@ -472,7 +472,7 @@ fn execute_task_live(
         WorkerState::Merging,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &merging_result);
+    logs.push(merging_result.log_event);
     if merging_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&merging_result.payload);
         append_run_log(
@@ -675,7 +675,6 @@ impl PreparedPrompt {
             state,
             prompt_version: self.prompt_version.clone(),
             context_manifest_hash: self.context_manifest_hash.clone(),
-            command: None,
         }
     }
 }
@@ -683,29 +682,7 @@ impl PreparedPrompt {
 struct TurnResult {
     terminal: AgentTerminal,
     payload: serde_json::Value,
-    commands: Vec<String>,
     log_event: WorkerLogEvent,
-}
-
-fn append_turn_log_events(logs: &mut Vec<WorkerLogEvent>, turn: &TurnResult) {
-    let base_event = turn.log_event.clone();
-    logs.push(base_event.clone());
-    for command in &turn.commands {
-        logs.push(WorkerLogEvent {
-            command: Some(command.clone()),
-            ..base_event.clone()
-        });
-    }
-}
-
-fn extract_action_command(payload: &Value) -> Option<String> {
-    payload
-        .pointer("/item/input/command")
-        .or_else(|| payload.pointer("/item/command"))
-        .or_else(|| payload.pointer("/command"))
-        .or_else(|| payload.pointer("/input/command"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
 }
 
 fn run_agent_turn(
@@ -792,11 +769,6 @@ fn run_agent_turn(
     Ok(TurnResult {
         terminal: step.terminal,
         payload: step.payload,
-        commands: step
-            .events
-            .iter()
-            .filter_map(|event| extract_action_command(&event.payload))
-            .collect(),
         log_event: prepared.log_event(state),
     })
 }

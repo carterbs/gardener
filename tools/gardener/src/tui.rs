@@ -63,6 +63,12 @@ const STARTUP_VERBS: [&str; 6] = [
 const STARTUP_SPINNER_TICK_MS: u128 = 150;
 const STARTUP_ELLIPSIS_TICK_MS: u128 = 400;
 const STARTUP_SPINNER_TICKS: u32 = 30;
+const TRIAGE_STAGE_LABELS: [&str; 4] = [
+    "Scan repository shape",
+    "Detect tools and docs",
+    "Build project profile",
+    "Seed prioritized backlog",
+];
 const WORKER_EQUIPMENT_NAMES: [&str; 9] = [
     "Lawn Mower",
     "Leaf Blower",
@@ -225,25 +231,7 @@ impl AppState {
         backlog: &BacklogView,
         startup_headline: StartupHeadline,
     ) -> Self {
-        let triage_stages = [
-            TriageStage {
-                label: "Scan repository shape".to_string(),
-                state: StageState::Future,
-            },
-            TriageStage {
-                label: "Detect tools and docs".to_string(),
-                state: StageState::Future,
-            },
-            TriageStage {
-                label: "Build project profile".to_string(),
-                state: StageState::Future,
-            },
-            TriageStage {
-                label: "Seed prioritized backlog".to_string(),
-                state: StageState::Future,
-            },
-        ]
-        .to_vec();
+        let triage_stages = triage_stages_with_state(0);
 
         let mapped_workers = workers
             .iter()
@@ -309,9 +297,11 @@ impl AppState {
         artifacts: &[String],
         startup_headline: StartupHeadline,
     ) -> Self {
+        let current_triage_stage = triage_stage_progress(activity);
+        let triage_stages = triage_stages_with_state(current_triage_stage);
         Self {
             ui_mode: UiMode::Triage,
-            triage_stages: Vec::new(),
+            triage_stages,
             triage_activity: activity
                 .iter()
                 .map(|line| TriageActivity {
@@ -328,6 +318,48 @@ impl AppState {
             terminal_height: 0,
         }
     }
+}
+
+fn triage_stage_progress(activity: &[String]) -> usize {
+    let mut current_stage = 0usize;
+    for entry in activity {
+        let lower = entry.to_ascii_lowercase();
+        if lower.contains("persisted triage profile") {
+            current_stage = 3;
+        } else if lower.contains("interview complete") {
+            current_stage = 3;
+        } else if lower.contains("discovery assessment complete")
+            || lower.contains("running repository discovery assessment")
+        {
+            current_stage = 2;
+        } else if lower.contains("collecting human-validated repository context") {
+            current_stage = current_stage.max(2);
+        } else if lower.contains("agent detection complete")
+            || lower.contains("detecting coding agent signals")
+        {
+            current_stage = current_stage.max(1);
+        } else if lower.contains("starting triage session") {
+            current_stage = current_stage.max(0);
+        }
+    }
+    current_stage
+}
+
+fn triage_stages_with_state(current_stage: usize) -> Vec<TriageStage> {
+    TRIAGE_STAGE_LABELS
+        .iter()
+        .enumerate()
+        .map(|(index, label)| TriageStage {
+            label: (*label).to_string(),
+            state: if index < current_stage {
+                StageState::Done
+            } else if index == current_stage {
+                StageState::Current
+            } else {
+                StageState::Future
+            },
+        })
+        .collect()
 }
 fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
     let mut command = command.to_string();
@@ -545,90 +577,6 @@ fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
         acc = acc.wrapping_mul(31).wrapping_add(ch as u64);
     }
     WORKER_EQUIPMENT_NAMES[(acc as usize) % WORKER_EQUIPMENT_NAMES.len()].to_string()
-}
-
-impl ParsedBacklogPriority {
-    fn span_style(self) -> Style {
-        match self {
-            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
-            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
-            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
-        }
-    }
-}
-
-fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
-    match token {
-        "P0" | "p0" => Some(ParsedBacklogPriority::P0),
-        "P1" | "p1" => Some(ParsedBacklogPriority::P1),
-        "P2" | "p2" => Some(ParsedBacklogPriority::P2),
-        _ => None,
-    }
-}
-
-fn is_backlog_status_token(token: &str) -> bool {
-    matches!(token, "INP" | "inp" | "Q" | "q")
-}
-
-fn is_short_task_id(token: &str) -> bool {
-    token.len() >= 6
-        && token.len() <= 12
-        && token
-            .chars()
-            .all(|ch| ch.is_ascii_hexdigit() || ch.is_ascii_alphanumeric())
-}
-
-fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
-    let tokens = raw.split_whitespace().collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return None;
-    }
-    let mut idx = 0;
-    if is_backlog_status_token(tokens[idx]) {
-        idx += 1;
-    }
-    if idx >= tokens.len() {
-        return None;
-    }
-    let priority = parse_backlog_priority(tokens[idx])?;
-    idx += 1;
-    if idx >= tokens.len() {
-        return None;
-    }
-    if tokens.len() >= idx + 2 && is_short_task_id(tokens[idx]) {
-        idx += 1;
-    }
-    let title = tokens[idx..].join(" ");
-    if title.is_empty() {
-        None
-    } else {
-        Some(ParsedBacklogItem {
-            priority,
-            title,
-        })
-    }
-}
-
-fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<ParsedBacklogItem> {
-    let mut p0 = Vec::new();
-    let mut p1 = Vec::new();
-    let mut p2 = Vec::new();
-
-    for raw in in_progress.iter().chain(queued.iter()) {
-        if let Some(item) = parse_backlog_item(raw) {
-            match item.priority {
-                ParsedBacklogPriority::P0 => p0.push(item),
-                ParsedBacklogPriority::P1 => p1.push(item),
-                ParsedBacklogPriority::P2 => p2.push(item),
-            }
-        }
-    }
-
-    let mut ordered = Vec::new();
-    ordered.extend(p0);
-    ordered.extend(p1);
-    ordered.extend(p2);
-    ordered
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1829,7 +1777,8 @@ mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
         render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
-        scroll_workers_up, toggle_selected_worker_command_detail, BacklogView, ProblemClass,
+        scroll_workers_up, toggle_selected_worker_command_detail, AppState, ProblemClass, StageState,
+        BacklogView,
         QueueStats, StartupHeadlineView, WorkerMetrics, WorkerRow,
     };
 
@@ -2025,6 +1974,28 @@ mod tests {
         assert!(frame.contains("Live Activity"));
         assert!(frame.contains("Triage Artifacts"));
         assert!(frame.contains("Detecting coding agent signals"));
+    }
+
+    #[test]
+    fn triage_stage_progress_comes_from_activity_stream() {
+        let state = AppState::from_triage_feed(
+            &[
+                "Starting triage session".to_string(),
+                "Detecting coding agent signals".to_string(),
+                "Interview complete".to_string(),
+            ],
+            &[],
+            StartupHeadline {
+                spinner_frame: 0,
+                verb: "Triage".to_string(),
+                startup_active: false,
+                ellipsis_phase: 0,
+            },
+        );
+        assert_eq!(state.triage_stages[0].state, StageState::Done);
+        assert_eq!(state.triage_stages[1].state, StageState::Done);
+        assert_eq!(state.triage_stages[2].state, StageState::Done);
+        assert_eq!(state.triage_stages[3].state, StageState::Current);
     }
 
     #[test]

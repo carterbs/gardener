@@ -1,6 +1,6 @@
 use ratatui::backend::TestBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
@@ -67,28 +67,63 @@ pub fn render_dashboard(workers: &[WorkerRow], stats: &QueueStats, width: u16, h
         .draw(|frame| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(5)])
+                .constraints([
+                    Constraint::Length(4),
+                    Constraint::Min(7),
+                    Constraint::Length(7),
+                    Constraint::Length(3),
+                ])
                 .split(frame.size());
 
-            let summary = Paragraph::new(format!(
-                "ready={} active={} failed={} | P0={} P1={} P2={}",
-                stats.ready, stats.active, stats.failed, stats.p0, stats.p1, stats.p2
-            ))
-            .block(Block::default().borders(Borders::ALL).title("Queue"));
+            let summary = Paragraph::new(Line::from(vec![
+                Span::styled("Ready ", Style::default().fg(Color::Cyan)),
+                Span::raw(format!("{}   ", stats.ready)),
+                Span::styled("Active ", Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{}   ", stats.active)),
+                Span::styled("Failed ", Style::default().fg(Color::Red)),
+                Span::raw(format!("{}    ", stats.failed)),
+                Span::styled("P0", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("={}  ", stats.p0)),
+                Span::styled(
+                    "P1",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!("={}  ", stats.p1)),
+                Span::styled("P2", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::raw(format!("={}", stats.p2)),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Gardener Live Queue"),
+            );
             frame.render_widget(summary, chunks[0]);
 
             let worker_items = workers
                 .iter()
                 .map(|row| {
+                    let state_style = match row.state.as_str() {
+                        "complete" => Style::default().fg(Color::Green),
+                        "failed" => Style::default().fg(Color::Red),
+                        "doing" | "gitting" | "reviewing" | "merging" => {
+                            Style::default().fg(Color::Yellow)
+                        }
+                        _ => Style::default().fg(Color::Gray),
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(
-                            format!("{}", row.worker_id),
+                            format!("{:<8}", row.worker_id),
                             Style::default().fg(Color::Cyan),
                         ),
-                        Span::raw(format!(
-                            " {} tool={} path={} ",
-                            row.state, row.tool_line, row.breadcrumb
-                        )),
+                        Span::styled(format!("{:<10}", row.state), state_style),
+                        Span::raw("  "),
+                        Span::styled("tool=", Style::default().fg(Color::Blue)),
+                        Span::raw(format!("{:<28}", row.tool_line)),
+                        Span::raw("  "),
+                        Span::styled("path=", Style::default().fg(Color::Blue)),
+                        Span::raw(row.breadcrumb.clone()),
                     ]))
                 })
                 .collect::<Vec<_>>();
@@ -98,26 +133,32 @@ pub fn render_dashboard(workers: &[WorkerRow], stats: &QueueStats, width: u16, h
                 chunks[1],
             );
 
-            let problems = workers
+            let mut problems = workers
                 .iter()
-                .map(|row| {
+                .filter_map(|row| {
                     let class = classify_problem(row, 15, 900);
-                    format!(
-                        "{} => {:?} owner={} blocking={} interventions=[retry|release lease|park/escalate]",
-                        row.worker_id,
-                        class,
-                        row.session_age_secs,
-                        row.tool_line
-                    )
+                    if class == ProblemClass::Healthy {
+                        return None;
+                    }
+                    Some(format!(
+                        "{} {} blocking={} action=retry/release/escalate",
+                        row.worker_id, class.as_str(), row.tool_line
+                    ))
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect::<Vec<_>>();
+            if problems.is_empty() {
+                problems.push("No blockers detected. Workers are healthy.".to_string());
+            }
 
             frame.render_widget(
-                Paragraph::new(problems)
+                Paragraph::new(problems.join("\n"))
                     .block(Block::default().borders(Borders::ALL).title("Problems")),
                 chunks[2],
             );
+
+            let footer = Paragraph::new("Keys: q quit  r retry  l release-lease  p park/escalate")
+                .block(Block::default().borders(Borders::ALL).title("Controls"));
+            frame.render_widget(footer, chunks[3]);
         })
         .expect("draw");
 
@@ -130,6 +171,16 @@ pub fn render_dashboard(workers: &[WorkerRow], stats: &QueueStats, width: u16, h
         out.push('\n');
     }
     out
+}
+
+impl ProblemClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Stalled => "stalled",
+            Self::Zombie => "zombie",
+        }
+    }
 }
 
 pub fn handle_key(key: char) -> &'static str {

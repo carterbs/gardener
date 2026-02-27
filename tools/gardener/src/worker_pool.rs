@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::structured_fallback_line;
 use crate::scheduler::{SchedulerEngine, SchedulerRunSummary};
-use crate::tui::{render_dashboard, QueueStats, WorkerRow};
+use crate::tui::{render_dashboard, BacklogView, QueueStats, WorkerRow};
 use crate::runtime::Terminal;
 use crate::worker::execute_task;
 
@@ -37,7 +37,7 @@ pub fn run_worker_pool_fsm(
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;
-    render(terminal, &workers, &queue_stats(store)?)?;
+    render(terminal, &workers, &dashboard_snapshot(store)?)?;
 
     while completed < target {
         let mut claimed_any = false;
@@ -64,7 +64,7 @@ pub fn run_worker_pool_fsm(
             workers[idx].tool_line = task.title.clone();
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
-            render(terminal, &workers, &queue_stats(store)?)?;
+            render(terminal, &workers, &dashboard_snapshot(store)?)?;
 
             let summary = execute_task(
                 cfg,
@@ -75,7 +75,7 @@ pub fn run_worker_pool_fsm(
                 workers[idx].state = event.state.as_str().to_string();
                 workers[idx].tool_line = format!("prompt={}", event.prompt_version);
                 workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
-                render(terminal, &workers, &queue_stats(store)?)?;
+                render(terminal, &workers, &dashboard_snapshot(store)?)?;
             }
 
             if summary.final_state == crate::types::WorkerState::Complete {
@@ -88,7 +88,7 @@ pub fn run_worker_pool_fsm(
                 workers[idx].state = "failed".to_string();
                 workers[idx].tool_line = format!("failed {}", task.task_id);
             }
-            render(terminal, &workers, &queue_stats(store)?)?;
+            render(terminal, &workers, &dashboard_snapshot(store)?)?;
         }
 
         if !claimed_any {
@@ -98,7 +98,13 @@ pub fn run_worker_pool_fsm(
     Ok(completed)
 }
 
-fn queue_stats(store: &BacklogStore) -> Result<QueueStats, GardenerError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DashboardSnapshot {
+    stats: QueueStats,
+    backlog: BacklogView,
+}
+
+fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, GardenerError> {
     let tasks = store.list_tasks()?;
     let mut stats = QueueStats {
         ready: 0,
@@ -108,14 +114,29 @@ fn queue_stats(store: &BacklogStore) -> Result<QueueStats, GardenerError> {
         p1: 0,
         p2: 0,
     };
+    let mut backlog = BacklogView::default();
     for task in tasks {
         match task.status {
             crate::backlog_store::TaskStatus::Ready => stats.ready += 1,
             crate::backlog_store::TaskStatus::Leased | crate::backlog_store::TaskStatus::InProgress => {
-                stats.active += 1
+                stats.active += 1;
+                backlog.in_progress.push(format!(
+                    "{} {} {}",
+                    task.priority.as_str(),
+                    short_task_id(&task.task_id),
+                    task.title
+                ));
             }
             crate::backlog_store::TaskStatus::Failed => stats.failed += 1,
             crate::backlog_store::TaskStatus::Complete => {}
+        }
+        if matches!(task.status, crate::backlog_store::TaskStatus::Ready) {
+            backlog.queued.push(format!(
+                "{} {} {}",
+                task.priority.as_str(),
+                short_task_id(&task.task_id),
+                task.title
+            ));
         }
         match task.priority {
             crate::priority::Priority::P0 => stats.p0 += 1,
@@ -123,16 +144,16 @@ fn queue_stats(store: &BacklogStore) -> Result<QueueStats, GardenerError> {
             crate::priority::Priority::P2 => stats.p2 += 1,
         }
     }
-    Ok(stats)
+    Ok(DashboardSnapshot { stats, backlog })
 }
 
 fn render(
     terminal: &dyn Terminal,
     workers: &[WorkerRow],
-    stats: &QueueStats,
+    snapshot: &DashboardSnapshot,
 ) -> Result<(), GardenerError> {
     if terminal.stdin_is_tty() {
-        let frame = render_dashboard(workers, stats, 120, 30);
+        let frame = render_dashboard(workers, &snapshot.stats, &snapshot.backlog, 120, 30);
         terminal.draw(&frame)?;
     } else {
         for row in workers {
@@ -144,4 +165,8 @@ fn render(
         }
     }
     Ok(())
+}
+
+fn short_task_id(task_id: &str) -> &str {
+    task_id.get(0..6).unwrap_or(task_id)
 }

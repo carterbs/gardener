@@ -1,6 +1,6 @@
 use gardener::logging::structured_fallback_line;
 use gardener::runtime::{FakeTerminal, Terminal};
-use gardener::tui::{handle_key, render_dashboard, QueueStats, WorkerRow};
+use gardener::tui::{handle_key, render_dashboard, BacklogView, QueueStats, WorkerRow};
 
 #[test]
 fn fake_terminal_captures_tui_frames_and_interactions() {
@@ -24,6 +24,13 @@ fn fake_terminal_captures_tui_frames_and_interactions() {
             p0: 1,
             p1: 1,
             p2: 0,
+        },
+        &BacklogView {
+            in_progress: vec!["P1 abc123 implement worker loop".to_string()],
+            queued: vec![
+                "P0 deadbe unblock ci".to_string(),
+                "P2 cafe00 cleanup docs".to_string(),
+            ],
         },
         80,
         18,

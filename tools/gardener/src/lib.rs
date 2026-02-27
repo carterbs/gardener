@@ -69,7 +69,7 @@ pub struct Cli {
     pub parallelism: Option<u32>,
     #[arg(long)]
     pub task: Option<String>,
-    #[arg(long)]
+    #[arg(long = "quit-after")]
     pub target: Option<u32>,
     #[arg(long, default_value_t = false)]
     pub prune_only: bool,
@@ -241,8 +241,31 @@ pub fn run_with_runtime(
         return Ok(0);
     }
 
-    if let Some(target) = cli.target {
+    let default_quit_after = if cli.target.is_none()
+        && !cli.prune_only
+        && !cli.backlog_only
+        && !cli.quality_grades_only
+        && !cli.sync_only
+        && !cli.triage_only
+        && !cli.retriage
+    {
+        Some(1)
+    } else {
+        None
+    };
+
+    if let Some(target) = cli.target.or(default_quit_after) {
         let mut cfg_for_startup = cfg.clone();
+        if !cfg_for_startup.execution.test_mode {
+            let _profile = ensure_profile_for_run(
+                runtime,
+                &startup.scope,
+                &cfg_for_startup,
+                &env_map,
+                false,
+                cli.agent.map(Into::into),
+            )?;
+        }
         validate_model(&cfg_for_startup.seeding.model)?;
         if !cfg_for_startup.execution.test_mode {
             let factory = AdapterFactory::with_defaults();

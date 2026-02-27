@@ -4,6 +4,12 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use std::io::{self, Stdout};
+use crate::errors::GardenerError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
@@ -134,6 +140,126 @@ pub fn handle_key(key: char) -> &'static str {
         'p' => "park-escalate",
         _ => "noop",
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoHealthWizardAnswers {
+    pub validation_command: String,
+    pub external_docs_accessible: bool,
+    pub additional_context: String,
+}
+
+pub fn run_repo_health_wizard(
+    default_validation_command: &str,
+) -> Result<RepoHealthWizardAnswers, GardenerError> {
+    let mut stdout = io::stdout();
+    enable_raw_mode().map_err(|e| GardenerError::Io(e.to_string()))?;
+    execute!(stdout, EnterAlternateScreen).map_err(|e| GardenerError::Io(e.to_string()))?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
+
+    let mut step = 0usize;
+    let mut validation = default_validation_command.to_string();
+    let mut docs_accessible = true;
+    let mut notes = String::new();
+
+    loop {
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3), Constraint::Min(4), Constraint::Length(3)])
+                    .split(area);
+
+                let title = Paragraph::new("Gardener Setup Wizard (Esc = keep defaults, Enter = next)")
+                    .block(Block::default().borders(Borders::ALL).title("Repo Health"));
+                frame.render_widget(title, chunks[0]);
+
+                let body_text = match step {
+                    0 => format!(
+                        "Validation command:\n{}\n\nType to edit, Backspace to delete, Enter to continue.",
+                        validation
+                    ),
+                    1 => format!(
+                        "Are architecture/quality docs available in repo?\nCurrent: {}\n\nPress 'y' or 'n', Enter to continue.",
+                        if docs_accessible { "yes" } else { "no" }
+                    ),
+                    _ => format!(
+                        "Additional constraints (optional):\n{}\n\nType notes, Enter to finish.",
+                        notes
+                    ),
+                };
+                let body = Paragraph::new(body_text)
+                    .block(Block::default().borders(Borders::ALL).title("Input"));
+                frame.render_widget(body, chunks[1]);
+
+                let footer = Paragraph::new(match step {
+                    0 => "Step 1/3",
+                    1 => "Step 2/3",
+                    _ => "Step 3/3",
+                })
+                .block(Block::default().borders(Borders::ALL));
+                frame.render_widget(footer, chunks[2]);
+            })
+            .map_err(|e| GardenerError::Io(e.to_string()))?;
+
+        if let Event::Key(key) = event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
+            if key.code == KeyCode::Esc {
+                break;
+            }
+            match step {
+                0 => match key.code {
+                    KeyCode::Enter => step = 1,
+                    KeyCode::Backspace => {
+                        validation.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        validation.push(c)
+                    }
+                    _ => {}
+                },
+                1 => match key.code {
+                    KeyCode::Enter => step = 2,
+                    KeyCode::Char('y') | KeyCode::Char('Y') => docs_accessible = true,
+                    KeyCode::Char('n') | KeyCode::Char('N') => docs_accessible = false,
+                    _ => {}
+                },
+                _ => match key.code {
+                    KeyCode::Enter => break,
+                    KeyCode::Backspace => {
+                        notes.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        notes.push(c)
+                    }
+                    _ => {}
+                },
+            }
+        }
+    }
+
+    teardown_terminal(terminal)?;
+
+    Ok(RepoHealthWizardAnswers {
+        validation_command: if validation.trim().is_empty() {
+            default_validation_command.to_string()
+        } else {
+            validation
+        },
+        external_docs_accessible: docs_accessible,
+        additional_context: notes,
+    })
+}
+
+fn teardown_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result<(), GardenerError> {
+    disable_raw_mode().map_err(|e| GardenerError::Io(e.to_string()))?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)
+        .map_err(|e| GardenerError::Io(e.to_string()))?;
+    terminal
+        .show_cursor()
+        .map_err(|e| GardenerError::Io(e.to_string()))
 }
 
 #[cfg(test)]

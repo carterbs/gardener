@@ -9,7 +9,7 @@ fn scheduler_stub_mode_completes_target_without_fsm() {
     let mut cmd = Command::cargo_bin("gardener").expect("bin");
     cmd.arg("--parallelism")
         .arg("3")
-        .arg("--target")
+        .arg("--quit-after")
         .arg("3")
         .arg("--config")
         .arg(fixture("configs/phase04-scheduler-stub.toml"));

@@ -59,7 +59,7 @@ pub fn run_triage(
 ) -> Result<RepoIntelligenceProfile, GardenerError> {
     if let Some(reason) = is_non_interactive(env, runtime.terminal.as_ref()) {
         return Err(GardenerError::Cli(format!(
-            "Triage requires a human and cannot run non-interactively ({reason:?}).\nNo repo intelligence profile was found at {}.\nTo complete setup, run in a terminal:\n  brad-gardener --triage-only",
+            "Triage requires a human and cannot run non-interactively ({reason:?}).\nNo repo intelligence profile was found at {}.\nTo complete setup, run in a terminal:\n  gardener --triage-only",
             cfg.triage.output_path
         )));
     }
@@ -129,7 +129,7 @@ pub fn ensure_profile_for_run(
         TriageDecision::Needed => {
             if is_non_interactive(env, runtime.terminal.as_ref()).is_some() {
                 return Err(GardenerError::Cli(format!(
-                    "Triage requires a human and cannot run non-interactively.\n\nNo repo intelligence profile was found at {}.\nTriage gathers context that Gardener cannot determine automatically.\n\nTo complete setup, run in a terminal:\n  brad-gardener --triage-only\n\nThen re-run your agent or pipeline.",
+                    "Triage requires a human and cannot run non-interactively.\n\nNo repo intelligence profile was found at {}.\nTriage gathers context that Gardener cannot determine automatically.\n\nTo complete setup, run in a terminal:\n  gardener --triage-only\n\nThen re-run your agent or pipeline.",
                     cfg.triage.output_path
                 )));
             }

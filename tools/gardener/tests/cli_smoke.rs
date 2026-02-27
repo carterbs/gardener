@@ -12,6 +12,7 @@ fn help_lists_phase1_flags() {
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
 
     assert!(stdout.contains("--agent"));
+    assert!(stdout.contains("--quit-after"));
     assert!(!stdout.contains("--headless"));
 }
 

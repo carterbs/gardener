@@ -1,5 +1,6 @@
 use crate::errors::GardenerError;
 use crate::runtime::Terminal;
+use crate::tui::run_repo_health_wizard;
 use crate::triage_discovery::DiscoveryAssessment;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +41,43 @@ pub fn run_interview(
     ))?;
     terminal.write_line("━━━ Anything Else? ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
 
+    let mut validation_command = default_validation_command.to_string();
+    let mut additional_context = String::new();
+    let mut external_docs_accessible = true;
+    if needs_repo_health_wizard(discovery) {
+        terminal.write_line("━━━ Repo Health Setup Wizard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+        terminal.write_line(
+            "Discovery could not confirm repo-health docs and guardrails automatically.",
+        )?;
+        terminal.write_line("Let's capture a few basics so Gardener can bootstrap safely.")?;
+        match run_repo_health_wizard(default_validation_command) {
+            Ok(answers) => {
+                validation_command = answers.validation_command;
+                external_docs_accessible = answers.external_docs_accessible;
+                additional_context = answers.additional_context;
+            }
+            Err(_) => {
+                terminal.write_line(
+                    "TUI setup unavailable; using defaults for repo-health bootstrap.",
+                )?;
+            }
+        }
+    }
+
     Ok(InterviewResult {
-        validation_command: default_validation_command.to_string(),
-        additional_context: String::new(),
-        external_docs_accessible: true,
+        validation_command,
+        additional_context,
+        external_docs_accessible,
     })
+}
+
+fn needs_repo_health_wizard(discovery: &DiscoveryAssessment) -> bool {
+    [
+        &discovery.agent_steering.grade,
+        &discovery.knowledge_accessible.grade,
+        &discovery.mechanical_guardrails.grade,
+        &discovery.coverage_signal.grade,
+    ]
+    .iter()
+    .any(|grade| grade.as_str() == "unknown")
 }

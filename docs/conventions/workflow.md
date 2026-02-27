@@ -4,7 +4,7 @@
 
 - `--prune-only`: prune/reconcile only, then exit.
 - `--backlog-only`: startup audits and backlog maintenance without worker pool launch.
-- `--target <N>`: run worker pool until target completions reached.
+- `--quit-after <N>`: run worker pool until `N` task completions are reached, then exit.
 - `--sync-only`: reconciliation-only flow with startup audits (when not in test mode), PR/worktree sync, backlog snapshot export, then deterministic exit.
 
 ## Quality Grades

@@ -1,0 +1,7 @@
+{
+  "name": "gardener",
+  "private": true,
+  "scripts": {
+    "gardener:run": "./scripts/brad-gardener"
+  }
+}

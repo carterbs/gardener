@@ -1,0 +1,26 @@
+[scope]
+working_dir = "."
+
+[validation]
+command = "npm run validate"
+allow_agent_discovery = true
+
+[agent]
+default = "codex"
+
+[states.understand]
+backend = "codex"
+model = "gpt-5-codex"
+
+[states.doing]
+backend = "codex"
+model = "gpt-5-codex"
+
+[startup]
+validate_on_boot = false
+validation_command = "npm run validate"
+
+[execution]
+permissions_mode = "permissive_v1"
+worker_mode = "normal"
+test_mode = true

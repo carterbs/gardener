@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod backlog_snapshot;
 pub mod backlog_store;
 pub mod config;
@@ -9,6 +10,7 @@ pub mod postmerge_analysis;
 pub mod postmortem;
 pub mod pr_audit;
 pub mod priority;
+pub mod protocol;
 pub mod prompt_context;
 pub mod prompt_knowledge;
 pub mod prompt_registry;
@@ -35,6 +37,8 @@ pub mod worker_pool;
 pub mod worktree_audit;
 
 use backlog_store::BacklogStore;
+use agent::factory::AdapterFactory;
+use agent::{probe_and_persist, validate_model};
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
@@ -204,6 +208,29 @@ pub fn run_with_runtime(
 
     if let Some(target) = cli.target {
         let mut cfg_for_startup = cfg.clone();
+        validate_model(&cfg_for_startup.seeding.model)?;
+        if !cfg_for_startup.execution.test_mode {
+            let factory = AdapterFactory::with_defaults();
+            let mut active = Vec::new();
+            if let Some(adapter) = factory.get(cfg_for_startup.seeding.backend) {
+                active.push(adapter);
+            } else {
+                return Err(GardenerError::InvalidConfig(format!(
+                    "no adapter registered for backend {:?}",
+                    cfg_for_startup.seeding.backend
+                )));
+            }
+            let refs = active
+                .iter()
+                .map(|adapter| adapter.as_ref() as &dyn agent::AgentAdapter)
+                .collect::<Vec<_>>();
+            let _caps = probe_and_persist(
+                &refs,
+                runtime.process_runner.as_ref(),
+                runtime.file_system.as_ref(),
+                &startup.scope.working_dir,
+            )?;
+        }
         if !cfg_for_startup.execution.test_mode {
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
         }

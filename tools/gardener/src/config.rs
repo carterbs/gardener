@@ -36,6 +36,7 @@ pub struct AppConfig {
     pub learning: LearningConfig,
     pub seeding: SeedingConfig,
     pub execution: ExecutionConfig,
+    pub triage: TriageConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -114,6 +115,13 @@ pub struct ExecutionConfig {
     pub test_mode: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TriageConfig {
+    pub output_path: String,
+    pub stale_after_commits: u64,
+    pub discovery_max_turns: u32,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -161,6 +169,11 @@ impl Default for AppConfig {
                 worker_mode: "normal".to_string(),
                 test_mode: false,
             },
+            triage: TriageConfig {
+                output_path: ".gardener/repo-intelligence.toml".to_string(),
+                stale_after_commits: 50,
+                discovery_max_turns: 12,
+            },
         }
     }
 }
@@ -178,6 +191,7 @@ struct PartialAppConfig {
     learning: Option<PartialLearningConfig>,
     seeding: Option<PartialSeedingConfig>,
     execution: Option<PartialExecutionConfig>,
+    triage: Option<PartialTriageConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -245,6 +259,13 @@ struct PartialExecutionConfig {
     test_mode: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PartialTriageConfig {
+    output_path: Option<String>,
+    stale_after_commits: Option<u64>,
+    discovery_max_turns: Option<u32>,
+}
+
 pub fn load_config(
     overrides: &CliOverrides,
     process_cwd: &Path,
@@ -255,8 +276,8 @@ pub fn load_config(
 
     if let Some(path) = &overrides.config_path {
         let file_contents = fs.read_to_string(path)?;
-        let partial: PartialAppConfig =
-            toml::from_str(&file_contents).map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+        let partial: PartialAppConfig = toml::from_str(&file_contents)
+            .map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
         merge_partial_config(&mut cfg, partial);
     }
 
@@ -372,6 +393,18 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = execution.test_mode {
             cfg.execution.test_mode = value;
+        }
+    }
+
+    if let Some(triage) = partial.triage {
+        if let Some(value) = triage.output_path {
+            cfg.triage.output_path = value;
+        }
+        if let Some(value) = triage.stale_after_commits {
+            cfg.triage.stale_after_commits = value;
+        }
+        if let Some(value) = triage.discovery_max_turns {
+            cfg.triage.discovery_max_turns = value;
         }
     }
 }
@@ -532,4 +565,3 @@ fn state_key(state: WorkerState) -> &'static str {
         WorkerState::Seeding => "seeding",
     }
 }
-

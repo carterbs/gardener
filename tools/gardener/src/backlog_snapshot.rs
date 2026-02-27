@@ -3,7 +3,10 @@ use std::path::Path;
 use crate::backlog_store::{BacklogStore, BacklogTask};
 use crate::errors::GardenerError;
 
-pub fn export_markdown_snapshot(store: &BacklogStore, output: impl AsRef<Path>) -> Result<String, GardenerError> {
+pub fn export_markdown_snapshot(
+    store: &BacklogStore,
+    output: impl AsRef<Path>,
+) -> Result<String, GardenerError> {
     let tasks = store.list_tasks()?;
     let rendered = render_markdown(&tasks);
     std::fs::write(output, rendered.as_bytes()).map_err(|e| GardenerError::Io(e.to_string()))?;

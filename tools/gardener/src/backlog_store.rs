@@ -132,9 +132,10 @@ impl BacklogStore {
             while let Some(cmd) = write_rx.blocking_recv() {
                 match cmd {
                     WriteCmd::Upsert { task, now, reply } => {
-                        let result = upsert_task(&write_conn, &task, now)
-                            .and_then(|_| fetch_task(&write_conn, &compute_task_id_from_new_task(&task))
-                                .map(|maybe| maybe.expect("row exists after upsert")));
+                        let result = upsert_task(&write_conn, &task, now).and_then(|_| {
+                            fetch_task(&write_conn, &compute_task_id_from_new_task(&task))
+                                .map(|maybe| maybe.expect("row exists after upsert"))
+                        });
                         let _ = reply.send(result);
                     }
                     WriteCmd::ClaimNext {
@@ -143,7 +144,8 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                        let result = claim_next(&mut write_conn, &lease_owner, lease_expires_at, now);
+                        let result =
+                            claim_next(&mut write_conn, &lease_owner, lease_expires_at, now);
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkInProgress {
@@ -204,7 +206,11 @@ impl BacklogStore {
             .map_err(|e| GardenerError::Database(e.to_string()))?
     }
 
-    pub fn claim_next(&self, lease_owner: &str, lease_duration_secs: i64) -> StoreResult<Option<BacklogTask>> {
+    pub fn claim_next(
+        &self,
+        lease_owner: &str,
+        lease_duration_secs: i64,
+    ) -> StoreResult<Option<BacklogTask>> {
         let now = system_time_unix();
         let lease_expires_at = now.saturating_add(lease_duration_secs.saturating_mul(1000));
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -298,7 +304,8 @@ impl ReadPool {
     fn open(path: &Path, size: usize) -> StoreResult<Self> {
         let mut conns = Vec::with_capacity(size);
         for _ in 0..size {
-            let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(db_err)?;
+            let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(db_err)?;
             conn.busy_timeout(std::time::Duration::from_secs(3))
                 .map_err(db_err)?;
             conns.push(Mutex::new(conn));
@@ -462,13 +469,17 @@ fn claim_next_in_tx(
         )
         .map_err(db_err)?;
 
-    stmt
-        .query_row(params![lease_owner, lease_expires_at, now], row_to_task)
+    stmt.query_row(params![lease_owner, lease_expires_at, now], row_to_task)
         .optional()
         .map_err(db_err)
 }
 
-fn mark_in_progress(conn: &Connection, task_id: &str, lease_owner: &str, now: i64) -> StoreResult<bool> {
+fn mark_in_progress(
+    conn: &Connection,
+    task_id: &str,
+    lease_owner: &str,
+    now: i64,
+) -> StoreResult<bool> {
     let changed = conn
         .execute(
             "UPDATE backlog_tasks
@@ -480,7 +491,12 @@ fn mark_in_progress(conn: &Connection, task_id: &str, lease_owner: &str, now: i6
     Ok(changed > 0)
 }
 
-fn mark_complete(conn: &Connection, task_id: &str, lease_owner: &str, now: i64) -> StoreResult<bool> {
+fn mark_complete(
+    conn: &Connection,
+    task_id: &str,
+    lease_owner: &str,
+    now: i64,
+) -> StoreResult<bool> {
     let changed = conn
         .execute(
             "UPDATE backlog_tasks
@@ -533,7 +549,10 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<BacklogTask> {
             rusqlite::Error::FromSqlConversionFailure(
                 1,
                 rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid kind")),
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid kind",
+                )),
             )
         })?,
         title: row.get(2)?,
@@ -543,14 +562,20 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<BacklogTask> {
             rusqlite::Error::FromSqlConversionFailure(
                 5,
                 rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid priority")),
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid priority",
+                )),
             )
         })?,
         status: TaskStatus::from_db(&status).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 6,
                 rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid status")),
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid status",
+                )),
             )
         })?,
         last_updated: row.get(7)?,
@@ -681,9 +706,18 @@ mod tests {
             .upsert_task(task("task-3", Priority::P0))
             .expect("insert 3");
 
-        let first = store.claim_next("worker-a", 60).expect("claim").expect("task");
-        let second = store.claim_next("worker-b", 60).expect("claim").expect("task");
-        let third = store.claim_next("worker-c", 60).expect("claim").expect("task");
+        let first = store
+            .claim_next("worker-a", 60)
+            .expect("claim")
+            .expect("task");
+        let second = store
+            .claim_next("worker-b", 60)
+            .expect("claim")
+            .expect("task");
+        let third = store
+            .claim_next("worker-c", 60)
+            .expect("claim")
+            .expect("task");
 
         assert_eq!(first.title, "task-2");
         assert_eq!(second.title, "task-3");
@@ -742,10 +776,7 @@ mod tests {
         let recovered = store.recover_stale_leases(i64::MAX).expect("recover");
         assert_eq!(recovered, 1);
 
-        let round_trip = store
-            .get_task(&row.task_id)
-            .expect("fetch")
-            .expect("task");
+        let round_trip = store.get_task(&row.task_id).expect("fetch").expect("task");
         assert_eq!(round_trip.status, TaskStatus::Ready);
         assert_eq!(round_trip.lease_owner, None);
         assert_eq!(round_trip.lease_expires_at, None);
@@ -802,7 +833,10 @@ mod tests {
         let store = temp_store();
         assert!(store.db_path().ends_with("backlog.sqlite"));
         assert_eq!(task_kind_from_db("bugfix"), Some(TaskKind::Bugfix));
-        assert_eq!(task_kind_from_db("maintenance"), Some(TaskKind::Maintenance));
+        assert_eq!(
+            task_kind_from_db("maintenance"),
+            Some(TaskKind::Maintenance)
+        );
         assert_eq!(task_kind_from_db("infra"), Some(TaskKind::Infra));
         assert_eq!(task_kind_from_db("nope"), None);
 
@@ -885,6 +919,9 @@ mod tests {
         assert!(bad_status.is_err());
 
         let converted = db_err(rusqlite::Error::InvalidQuery);
-        assert!(matches!(converted, crate::errors::GardenerError::Database(_)));
+        assert!(matches!(
+            converted,
+            crate::errors::GardenerError::Database(_)
+        ));
     }
 }

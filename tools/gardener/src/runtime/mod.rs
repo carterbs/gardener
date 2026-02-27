@@ -137,7 +137,8 @@ impl ProcessRunner for ProductionProcessRunner {
             let mut state = self.state.lock().expect("process lock poisoned");
             state.children.remove(&handle)
         };
-        let child = child.ok_or_else(|| GardenerError::Process(format!("unknown handle {handle}")))?;
+        let child =
+            child.ok_or_else(|| GardenerError::Process(format!("unknown handle {handle}")))?;
         let output = child
             .wait_with_output()
             .map_err(|e| GardenerError::Process(e.to_string()))?;
@@ -292,7 +293,10 @@ impl FileSystem for FakeFileSystem {
 
     fn create_dir_all(&self, path: &Path) -> Result<(), GardenerError> {
         self.maybe_fail()?;
-        self.dirs.lock().expect("dirs lock").push(path.to_path_buf());
+        self.dirs
+            .lock()
+            .expect("dirs lock")
+            .push(path.to_path_buf());
         Ok(())
     }
 
@@ -337,12 +341,18 @@ impl Terminal for FakeTerminal {
     }
 
     fn write_line(&self, line: &str) -> Result<(), GardenerError> {
-        self.writes.lock().expect("writes lock").push(line.to_string());
+        self.writes
+            .lock()
+            .expect("writes lock")
+            .push(line.to_string());
         Ok(())
     }
 
     fn draw(&self, frame: &str) -> Result<(), GardenerError> {
-        self.draws.lock().expect("draw lock").push(frame.to_string());
+        self.draws
+            .lock()
+            .expect("draw lock")
+            .push(frame.to_string());
         Ok(())
     }
 }
@@ -387,7 +397,9 @@ impl ProcessRunner for FakeProcessRunner {
         self.waits.lock().expect("waits lock").push(handle);
         let mut responses = self.responses.lock().expect("responses lock");
         if responses.is_empty() {
-            return Err(GardenerError::Process("no fake response queued".to_string()));
+            return Err(GardenerError::Process(
+                "no fake response queued".to_string(),
+            ));
         }
         responses.remove(0)
     }

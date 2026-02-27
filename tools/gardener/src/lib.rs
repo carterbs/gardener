@@ -4,15 +4,20 @@ pub mod config;
 pub mod errors;
 pub mod output_envelope;
 pub mod priority;
+pub mod repo_intelligence;
 pub mod runtime;
 pub mod task_identity;
+pub mod triage;
 pub mod triage_agent_detection;
+pub mod triage_discovery;
+pub mod triage_interview;
 pub mod types;
 
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use runtime::ProductionRuntime;
+use triage::ensure_profile_for_run;
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
 
@@ -93,11 +98,14 @@ pub fn run_with_runtime(
 
     let env_map = env_to_map(env);
 
-    if (cli.triage_only || cli.retriage)
-        && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some()
-    {
+    if cli.retriage && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some() {
         return Err(GardenerError::Cli(
-            "triage requires an interactive terminal".to_string(),
+            "--retriage requires an interactive terminal.".to_string(),
+        ));
+    }
+    if cli.triage_only && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some() {
+        return Err(GardenerError::Cli(
+            "Triage requires a human and cannot run non-interactively.".to_string(),
         ));
     }
 
@@ -123,8 +131,29 @@ pub fn run_with_runtime(
         runtime.process_runner.as_ref(),
     )?;
 
+    if let (Some(agent), Some(config_path)) = (cli.agent, cli.config.as_ref()) {
+        persist_agent_default(
+            runtime.file_system.as_ref(),
+            config_path.as_path(),
+            AgentKind::from(agent),
+        )?;
+    }
+
     let validation = resolve_validation_command(&cfg, cli.validation_command.as_deref());
     let startup = StartupSnapshot { scope, validation };
+
+    if cli.triage_only || cli.retriage {
+        let _profile = ensure_profile_for_run(
+            runtime,
+            &startup.scope,
+            &cfg,
+            &env_map,
+            cli.retriage,
+            cli.agent.map(Into::into),
+        )?;
+        runtime.terminal.write_line("triage complete")?;
+        return Ok(0);
+    }
 
     if cli.prune_only {
         runtime.terminal.write_line(&format!(
@@ -145,6 +174,15 @@ pub fn run_with_runtime(
         return Ok(0);
     }
 
+    let _profile = ensure_profile_for_run(
+        runtime,
+        &startup.scope,
+        &cfg,
+        &env_map,
+        false,
+        cli.agent.map(Into::into),
+    )?;
+
     runtime
         .terminal
         .write_line("phase1 runtime skeleton initialized")?;
@@ -155,8 +193,7 @@ pub fn run_with_runtime(
 pub fn render_help() -> String {
     let mut cmd = Cli::command();
     let mut buffer = Vec::new();
-    cmd.write_long_help(&mut buffer)
-        .expect("write help to vec");
+    cmd.write_long_help(&mut buffer).expect("write help to vec");
     String::from_utf8(buffer).expect("utf8")
 }
 
@@ -168,4 +205,37 @@ fn env_to_map(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> EnvMap {
         }
     }
     map
+}
+
+fn persist_agent_default(
+    fs: &dyn runtime::FileSystem,
+    path: &std::path::Path,
+    agent: AgentKind,
+) -> Result<(), GardenerError> {
+    let existing = fs.read_to_string(path)?;
+    let mut value: toml::Value =
+        toml::from_str(&existing).map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+    if !value.is_table() {
+        return Err(GardenerError::ConfigParse(
+            "config root must be table".to_string(),
+        ));
+    }
+
+    let table = value
+        .as_table_mut()
+        .ok_or_else(|| GardenerError::ConfigParse("config root must be table".to_string()))?;
+    let agent_table = table
+        .entry("agent")
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let agent_table = agent_table
+        .as_table_mut()
+        .ok_or_else(|| GardenerError::ConfigParse("agent table invalid".to_string()))?;
+    agent_table.insert(
+        "default".to_string(),
+        toml::Value::String(agent.as_str().to_string()),
+    );
+
+    let output =
+        toml::to_string_pretty(&value).map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+    fs.write_string(path, &output)
 }

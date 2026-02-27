@@ -67,4 +67,3 @@ pub struct RuntimeScope {
     pub repo_root: Option<PathBuf>,
     pub working_dir: PathBuf,
 }
-

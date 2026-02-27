@@ -1,3 +1,4 @@
+use assert_cmd::Command;
 use gardener::config::{
     effective_agent_for_state, load_config, resolve_scope, resolve_validation_command, AppConfig,
     CliOverrides, StateConfig,
@@ -11,7 +12,6 @@ use gardener::runtime::{
 };
 use gardener::triage_agent_detection::{is_non_interactive, EnvMap};
 use gardener::types::{AgentKind, NonInteractiveReason, ValidationCommandSource, WorkerState};
-use assert_cmd::Command;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -130,31 +130,53 @@ fn run_with_runtime_paths_and_errors() {
         "--config".into(),
         "/config.toml".into(),
     ];
-    assert_eq!(gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime).unwrap(), 0);
+    assert_eq!(
+        gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime).unwrap(),
+        0
+    );
 
     let backlog = vec!["gardener".into(), "--backlog-only".into()];
-    assert_eq!(gardener::run_with_runtime(&backlog, &[], Path::new("/cwd"), &runtime).unwrap(), 0);
+    assert_eq!(
+        gardener::run_with_runtime(&backlog, &[], Path::new("/cwd"), &runtime).unwrap(),
+        0
+    );
 
     let quality = vec!["gardener".into(), "--quality-grades-only".into()];
-    assert_eq!(gardener::run_with_runtime(&quality, &[], Path::new("/cwd"), &runtime).unwrap(), 0);
+    assert_eq!(
+        gardener::run_with_runtime(&quality, &[], Path::new("/cwd"), &runtime).unwrap(),
+        0
+    );
 
     let normal = vec!["gardener".into()];
-    assert_eq!(gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime).unwrap(), 0);
+    assert_eq!(
+        gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime).unwrap(),
+        0
+    );
 
     let help = vec!["gardener".into(), "--help".into()];
-    assert_eq!(gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime).unwrap(), 0);
+    assert_eq!(
+        gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime).unwrap(),
+        0
+    );
 
     let invalid = vec!["gardener".into(), "--agent".into(), "invalid".into()];
     let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime).unwrap_err();
     assert!(matches!(err, GardenerError::Cli(_)));
 
     let retriage = vec!["gardener".into(), "--retriage".into()];
-    let err = gardener::run_with_runtime(&retriage, &[("CI".into(), "1".into())], Path::new("/cwd"), &runtime).unwrap_err();
+    let err = gardener::run_with_runtime(
+        &retriage,
+        &[("CI".into(), "1".into())],
+        Path::new("/cwd"),
+        &runtime,
+    )
+    .unwrap_err();
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 
     let triage = vec!["gardener".into(), "--triage-only".into()];
     let non_tty_runtime = runtime_with_config("", false, Some("/repo"));
-    let err = gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).unwrap_err();
+    let err =
+        gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).unwrap_err();
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 }
 
@@ -173,7 +195,9 @@ fn run_with_runtime_propagates_write_and_config_errors() {
 
     for args in [prune, backlog, quality, normal] {
         let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime).unwrap_err();
-        assert!(matches!(err, GardenerError::Io(message) if message.contains("terminal write failed")));
+        assert!(
+            matches!(err, GardenerError::Io(message) if message.contains("terminal write failed"))
+        );
     }
 
     let ok_runtime = runtime_with_config("", true, Some("/repo"));
@@ -183,7 +207,8 @@ fn run_with_runtime_propagates_write_and_config_errors() {
         "--config".into(),
         "/missing.toml".into(),
     ];
-    let err = gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime).unwrap_err();
+    let err =
+        gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime).unwrap_err();
     assert!(matches!(err, GardenerError::Io(message) if message.contains("missing file")));
 }
 
@@ -229,8 +254,14 @@ default = "claude"
             model: Some("gpt-5-codex".to_string()),
         },
     );
-    assert_eq!(effective_agent_for_state(&cfg2, WorkerState::Doing), Some(AgentKind::Codex));
-    assert_eq!(effective_agent_for_state(&cfg2, WorkerState::Planning), Some(AgentKind::Claude));
+    assert_eq!(
+        effective_agent_for_state(&cfg2, WorkerState::Doing),
+        Some(AgentKind::Codex)
+    );
+    assert_eq!(
+        effective_agent_for_state(&cfg2, WorkerState::Planning),
+        Some(AgentKind::Claude)
+    );
 
     let resolved = resolve_validation_command(&cfg2, Some("npm run custom"));
     assert_eq!(resolved.source, ValidationCommandSource::CliOverride);
@@ -308,10 +339,7 @@ test_mode = true
     assert!(cfg.execution.test_mode);
     assert_eq!(scope.repo_root, None);
 
-    let bad_parallel = FakeFileSystem::with_file(
-        "/bad1.toml",
-        "[orchestrator]\nparallelism = 0\n",
-    );
+    let bad_parallel = FakeFileSystem::with_file("/bad1.toml", "[orchestrator]\nparallelism = 0\n");
     let err = load_config(
         &CliOverrides {
             config_path: Some(PathBuf::from("/bad1.toml")),
@@ -322,12 +350,12 @@ test_mode = true
         &FakeProcessRunner::default(),
     )
     .unwrap_err();
-    assert!(matches!(err, GardenerError::InvalidConfig(message) if message.contains("parallelism")));
-
-    let bad_agent = FakeFileSystem::with_file(
-        "/bad2.toml",
-        "[agent]\n[states.doing]\nmodel = \"x\"\n",
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("parallelism"))
     );
+
+    let bad_agent =
+        FakeFileSystem::with_file("/bad2.toml", "[agent]\n[states.doing]\nmodel = \"x\"\n");
     let err = load_config(
         &CliOverrides {
             config_path: Some(PathBuf::from("/bad2.toml")),
@@ -338,7 +366,9 @@ test_mode = true
         &FakeProcessRunner::default(),
     )
     .unwrap_err();
-    assert!(matches!(err, GardenerError::InvalidConfig(message) if message.contains("agent.default")));
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("agent.default"))
+    );
 
     let bad_model = FakeFileSystem::with_file(
         "/bad3.toml",
@@ -354,7 +384,9 @@ test_mode = true
         &FakeProcessRunner::default(),
     )
     .unwrap_err();
-    assert!(matches!(err, GardenerError::InvalidConfig(message) if message.contains("seeding.model")));
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("seeding.model"))
+    );
 
     let mut cfg2 = AppConfig::default();
     cfg2.agent.default = Some(AgentKind::Claude);
@@ -365,7 +397,10 @@ test_mode = true
             model: Some("x".to_string()),
         },
     );
-    assert_eq!(effective_agent_for_state(&cfg2, WorkerState::Doing), Some(AgentKind::Claude));
+    assert_eq!(
+        effective_agent_for_state(&cfg2, WorkerState::Doing),
+        Some(AgentKind::Claude)
+    );
     let _ = effective_agent_for_state(&cfg2, WorkerState::Understand);
     let _ = effective_agent_for_state(&cfg2, WorkerState::Gitting);
     let _ = effective_agent_for_state(&cfg2, WorkerState::Reviewing);
@@ -442,7 +477,12 @@ fn working_dir_resolution_contract() {
         stdout: "/repo\n".to_string(),
         stderr: String::new(),
     }));
-    let scope = resolve_scope(Path::new("/cwd"), &AppConfig::default(), &CliOverrides::default(), &process_runner);
+    let scope = resolve_scope(
+        Path::new("/cwd"),
+        &AppConfig::default(),
+        &CliOverrides::default(),
+        &process_runner,
+    );
     assert_eq!(scope.working_dir, PathBuf::from("/repo"));
 
     let process_runner = FakeProcessRunner::default();
@@ -451,7 +491,12 @@ fn working_dir_resolution_contract() {
         stdout: String::new(),
         stderr: String::new(),
     }));
-    let scope = resolve_scope(Path::new("/cwd"), &AppConfig::default(), &CliOverrides::default(), &process_runner);
+    let scope = resolve_scope(
+        Path::new("/cwd"),
+        &AppConfig::default(),
+        &CliOverrides::default(),
+        &process_runner,
+    );
     assert_eq!(scope.working_dir, PathBuf::from("/cwd"));
 }
 
@@ -462,17 +507,29 @@ fn non_interactive_detection_contract() {
 
     let mut env = EnvMap::new();
     env.insert("CLAUDECODE".to_string(), "1".to_string());
-    assert_eq!(is_non_interactive(&env, &tty), Some(NonInteractiveReason::ClaudeCodeEnv));
+    assert_eq!(
+        is_non_interactive(&env, &tty),
+        Some(NonInteractiveReason::ClaudeCodeEnv)
+    );
 
     let mut env = EnvMap::new();
     env.insert("CODEX_THREAD_ID".to_string(), "abc".to_string());
-    assert_eq!(is_non_interactive(&env, &tty), Some(NonInteractiveReason::CodexThreadEnv));
+    assert_eq!(
+        is_non_interactive(&env, &tty),
+        Some(NonInteractiveReason::CodexThreadEnv)
+    );
 
     let mut env = EnvMap::new();
     env.insert("CI".to_string(), "1".to_string());
-    assert_eq!(is_non_interactive(&env, &tty), Some(NonInteractiveReason::CiEnv));
+    assert_eq!(
+        is_non_interactive(&env, &tty),
+        Some(NonInteractiveReason::CiEnv)
+    );
 
-    assert_eq!(is_non_interactive(&EnvMap::new(), &non_tty), Some(NonInteractiveReason::NonTtyStdin));
+    assert_eq!(
+        is_non_interactive(&EnvMap::new(), &non_tty),
+        Some(NonInteractiveReason::NonTtyStdin)
+    );
     assert_eq!(is_non_interactive(&EnvMap::new(), &tty), None);
 }
 
@@ -535,7 +592,10 @@ fn runtime_fake_contracts() {
     assert_eq!(fs.read_to_string(path).unwrap(), "hello");
     fs.remove_file(path).unwrap();
     assert!(!fs.exists(path));
-    assert!(matches!(fs.read_to_string(path).unwrap_err(), GardenerError::Io(_)));
+    assert!(matches!(
+        fs.read_to_string(path).unwrap_err(),
+        GardenerError::Io(_)
+    ));
 
     let runner = FakeProcessRunner::default();
     runner.push_response(Ok(ProcessOutput {
@@ -565,7 +625,10 @@ fn runtime_extra_branch_coverage() {
 
     let fs = FakeFileSystem::default();
     fs.set_fail_next(GardenerError::Io("x".to_string()));
-    assert!(matches!(fs.create_dir_all(Path::new("d")).unwrap_err(), GardenerError::Io(_)));
+    assert!(matches!(
+        fs.create_dir_all(Path::new("d")).unwrap_err(),
+        GardenerError::Io(_)
+    ));
     fs.create_dir_all(Path::new("d")).unwrap();
 
     let term = FakeTerminal::new(true);
@@ -599,7 +662,9 @@ fn runtime_extra_branch_coverage() {
 fn runtime_production_contracts() {
     let clock = ProductionClock;
     clock.sleep_until(clock.now()).unwrap();
-    clock.sleep_until(clock.now() + Duration::from_millis(1)).unwrap();
+    clock
+        .sleep_until(clock.now() + Duration::from_millis(1))
+        .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("x.txt");
@@ -630,8 +695,14 @@ fn runtime_production_contracts() {
         })
         .unwrap();
     runner.kill(handle).unwrap();
-    assert!(matches!(runner.wait(999).unwrap_err(), GardenerError::Process(_)));
-    assert!(matches!(runner.kill(999).unwrap_err(), GardenerError::Process(_)));
+    assert!(matches!(
+        runner.wait(999).unwrap_err(),
+        GardenerError::Process(_)
+    ));
+    assert!(matches!(
+        runner.kill(999).unwrap_err(),
+        GardenerError::Process(_)
+    ));
 
     let rt = ProductionRuntime::new();
     let _rt_default = ProductionRuntime::default();

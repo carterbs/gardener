@@ -50,4 +50,3 @@ pub fn parse_last_envelope(
 
     Ok(envelope)
 }
-

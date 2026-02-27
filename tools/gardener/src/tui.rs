@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
 use std::cell::RefCell;
 use std::io::{self, Stdout};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
@@ -42,6 +43,100 @@ pub struct QueueStats {
 pub struct BacklogView {
     pub in_progress: Vec<String>,
     pub queued: Vec<String>,
+}
+
+const STARTUP_SPINNER_FRAMES: [&str; 6] = ["⠋", "⠙", "⠸", "⠴", "⠦", "⠇"];
+const STARTUP_VERBS: [&str; 6] = [
+    "Scanning",
+    "Seeding",
+    "Pruning",
+    "Cultivating",
+    "Grafting",
+    "Harvesting",
+];
+const STARTUP_SPINNER_TICK_MS: u128 = 150;
+const STARTUP_ELLIPSIS_TICK_MS: u128 = 400;
+const STARTUP_SPINNER_TICKS: u32 = 30;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkerMetrics {
+    total: usize,
+    doing: usize,
+    reviewing: usize,
+    idle: usize,
+}
+
+impl WorkerMetrics {
+    fn from_workers(workers: &[WorkerRow]) -> Self {
+        let mut metrics = Self {
+            total: workers.len(),
+            doing: 0,
+            reviewing: 0,
+            idle: 0,
+        };
+        for worker in workers {
+            if worker.state.eq_ignore_ascii_case("reviewing") {
+                metrics.reviewing += 1;
+            } else if matches!(worker.state.as_str(), "idle" | "complete" | "failed") {
+                metrics.idle += 1;
+            } else {
+                metrics.doing += 1;
+            }
+        }
+        metrics
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StartupHeadlineView {
+    spinner_frame: usize,
+    startup_active: bool,
+    ellipsis_phase: u8,
+    verb_idx: usize,
+}
+
+impl StartupHeadlineView {
+    fn from_tick(tick: u32, verb_idx: usize) -> Self {
+        let max_tick = STARTUP_SPINNER_TICKS.saturating_sub(1);
+        let startup_active = tick < STARTUP_SPINNER_TICKS;
+        let spinner_tick = if startup_active { tick } else { max_tick };
+        Self {
+            spinner_frame: (spinner_tick as usize) % STARTUP_SPINNER_FRAMES.len(),
+            startup_active,
+            ellipsis_phase: ((tick / 3) % 3) as u8,
+            verb_idx: verb_idx % STARTUP_VERBS.len(),
+        }
+    }
+
+    fn from_elapsed_ms(elapsed_ms: u128, verb_idx: usize) -> Self {
+        let spinner_tick = (elapsed_ms / STARTUP_SPINNER_TICK_MS) as u32;
+        Self {
+            ellipsis_phase: ((elapsed_ms / STARTUP_ELLIPSIS_TICK_MS) % 3) as u8,
+            ..Self::from_tick(spinner_tick, verb_idx)
+        }
+    }
+
+    fn spinner(self) -> &'static str {
+        STARTUP_SPINNER_FRAMES[self.spinner_frame]
+    }
+
+    fn verb(self) -> &'static str {
+        STARTUP_VERBS[self.verb_idx]
+    }
+
+    fn ellipsis(self) -> &'static str {
+        match self.ellipsis_phase {
+            0 => ".",
+            1 => "..",
+            _ => "...",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LiveStartupHeadlineState {
+    started_at_ms: u128,
+    verb_idx: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,10 +173,30 @@ pub fn render_dashboard(
     width: u16,
     height: u16,
 ) -> String {
+    render_dashboard_with_headline(
+        workers,
+        stats,
+        backlog,
+        width,
+        height,
+        StartupHeadlineView::from_tick(0, 0),
+    )
+}
+
+fn render_dashboard_with_headline(
+    workers: &[WorkerRow],
+    stats: &QueueStats,
+    backlog: &BacklogView,
+    width: u16,
+    height: u16,
+    startup_headline: StartupHeadlineView,
+) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
-        .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog, 15, 900))
+        .draw(|frame| {
+            draw_dashboard_frame(frame, workers, stats, backlog, 15, 900, startup_headline)
+        })
         .expect("draw");
 
     let mut out = String::new();
@@ -95,6 +210,44 @@ pub fn render_dashboard(
     out
 }
 
+pub fn render_triage(activity: &[String], artifacts: &[String], width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("terminal");
+    terminal
+        .draw(|frame| draw_triage_frame(frame, activity, artifacts))
+        .expect("draw");
+
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+fn render_dashboard_at_tick(
+    workers: &[WorkerRow],
+    stats: &QueueStats,
+    backlog: &BacklogView,
+    width: u16,
+    height: u16,
+    tick: u32,
+    verb_idx: usize,
+) -> String {
+    render_dashboard_with_headline(
+        workers,
+        stats,
+        backlog,
+        width,
+        height,
+        StartupHeadlineView::from_tick(tick, verb_idx),
+    )
+}
+
 fn draw_dashboard_frame(
     frame: &mut ratatui::Frame<'_>,
     workers: &[WorkerRow],
@@ -102,6 +255,7 @@ fn draw_dashboard_frame(
     backlog: &BacklogView,
     heartbeat_interval_seconds: u64,
     lease_timeout_seconds: u64,
+    startup_headline: StartupHeadlineView,
 ) {
     let human_problems = workers
         .iter()
@@ -134,9 +288,13 @@ fn draw_dashboard_frame(
         .constraints(layout_constraints)
         .split(frame.area());
     let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(1)])
+        .split(chunks[1]);
+    let body_columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(chunks[1]);
+        .split(body[1]);
 
     let summary = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -182,6 +340,68 @@ fn draw_dashboard_frame(
     );
     frame.render_widget(summary, chunks[0]);
 
+    let metrics = WorkerMetrics::from_workers(workers);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled(
+                "Now",
+                Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD),
+            )]),
+            Line::from(vec![
+                Span::styled(
+                    startup_headline.spinner(),
+                    Style::default()
+                        .fg(Color::Rgb(85, 198, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    startup_headline.verb(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(startup_headline.ellipsis(), Style::default().fg(Color::White)),
+            ]),
+            Line::from(Span::styled(
+                "Working the queue in priority order and showing exactly what each worker is doing.",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(vec![
+                Span::styled(
+                    format!("{} ", metrics.total),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("parallel workers  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{} ", metrics.doing),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("doing  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{} ", metrics.reviewing),
+                    Style::default()
+                        .fg(Color::Rgb(85, 198, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("reviewing  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{} ", metrics.idle),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("idle", Style::default().fg(Color::Gray)),
+            ]),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(if startup_headline.startup_active {
+                    Color::Rgb(85, 198, 255)
+                } else {
+                    Color::Rgb(82, 88, 126)
+                })),
+        ),
+        body[0],
+    );
+
     let worker_items = workers
         .iter()
         .map(|row| {
@@ -225,7 +445,7 @@ fn draw_dashboard_frame(
     let workers_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body[0]);
+        .split(body_columns[0]);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             "Workers",
@@ -281,7 +501,7 @@ fn draw_dashboard_frame(
     let backlog_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body[1]);
+        .split(body_columns[1]);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             "Backlog",
@@ -322,6 +542,79 @@ fn draw_dashboard_frame(
             .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
     );
     frame.render_widget(footer, chunks[chunks.len() - 1]);
+}
+
+fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifacts: &[String]) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(chunks[1]);
+
+    let summary = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "triage mode",
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(summary, chunks[0]);
+
+    let activity_items = if activity.is_empty() {
+        vec![ListItem::new("- waiting for triage updates")]
+    } else {
+        activity
+            .iter()
+            .map(|line| ListItem::new(format!("- {line}")))
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(activity_items).block(
+            Block::default()
+                .title("Live Activity")
+                .borders(Borders::RIGHT),
+        ),
+        body[0],
+    );
+
+    let artifact_items = if artifacts.is_empty() {
+        vec![ListItem::new("- no triage artifacts yet")]
+    } else {
+        artifacts
+            .iter()
+            .map(|line| ListItem::new(format!("- {line}")))
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(artifact_items).block(Block::default().title("Triage Artifacts")),
+        body[1],
+    );
+
+    let footer = Paragraph::new("Controls: triage in progress; follow prompts in terminal").block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(footer, chunks[2]);
 }
 
 pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> String {
@@ -374,6 +667,31 @@ fn draw_report_frame(frame: &mut ratatui::Frame<'_>, path: &str, report_lines: &
 thread_local! {
     static LIVE_TUI: RefCell<Option<Terminal<CrosstermBackend<Stdout>>>> = const { RefCell::new(None) };
     static LIVE_TUI_SIZE: RefCell<Option<(u16, u16)>> = const { RefCell::new(None) };
+    static LIVE_STARTUP_HEADLINE: RefCell<Option<LiveStartupHeadlineState>> = const { RefCell::new(None) };
+}
+
+fn now_unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn live_startup_headline() -> StartupHeadlineView {
+    LIVE_STARTUP_HEADLINE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            let now = now_unix_millis();
+            *slot = Some(LiveStartupHeadlineState {
+                started_at_ms: now,
+                verb_idx: (now as usize) % STARTUP_VERBS.len(),
+            });
+        }
+        let state = slot.expect("live startup headline initialized");
+        let now = now_unix_millis();
+        let elapsed = now.saturating_sub(state.started_at_ms);
+        StartupHeadlineView::from_elapsed_ms(elapsed, state.verb_idx)
+    })
 }
 
 pub fn draw_dashboard_live(
@@ -383,6 +701,7 @@ pub fn draw_dashboard_live(
     heartbeat_interval_seconds: u64,
     lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
+    let startup_headline = live_startup_headline();
     with_live_terminal(|terminal| {
         terminal
             .draw(|frame| {
@@ -393,6 +712,7 @@ pub fn draw_dashboard_live(
                     backlog,
                     heartbeat_interval_seconds,
                     lease_timeout_seconds,
+                    startup_headline,
                 )
             })
             .map(|_| ())
@@ -410,6 +730,15 @@ pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
     })
 }
 
+pub fn draw_triage_live(activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(|frame| draw_triage_frame(frame, activity, artifacts))
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
 pub fn draw_shutdown_screen_live(title: &str, message: &str) -> Result<(), GardenerError> {
     with_live_terminal(|terminal| {
         terminal
@@ -420,8 +749,8 @@ pub fn draw_shutdown_screen_live(title: &str, message: &str) -> Result<(), Garde
 }
 
 fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {
-    let is_error = title.to_ascii_lowercase().contains("error")
-        || title.to_ascii_lowercase().contains("fail");
+    let is_error =
+        title.to_ascii_lowercase().contains("error") || title.to_ascii_lowercase().contains("fail");
     let accent = if is_error {
         Color::Red
     } else {
@@ -490,6 +819,9 @@ pub fn close_live_terminal() -> Result<(), GardenerError> {
         Ok(())
     })?;
     LIVE_TUI_SIZE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    LIVE_STARTUP_HEADLINE.with(|cell| {
         *cell.borrow_mut() = None;
     });
     Ok(())
@@ -766,7 +1098,8 @@ fn teardown_terminal(
 mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
-        BacklogView, ProblemClass, QueueStats, WorkerRow,
+        render_dashboard_at_tick, render_triage, BacklogView, ProblemClass, QueueStats,
+        StartupHeadlineView, WorkerMetrics, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -823,6 +1156,9 @@ mod tests {
             20,
         );
         assert!(frame.contains("Queue"));
+        assert!(frame.contains("Now"));
+        assert!(frame.contains("Scanning"));
+        assert!(frame.contains("parallel workers"));
         assert!(frame.contains("Workers"));
         assert!(!frame.contains("Problems"));
         assert!(frame.contains("Backlog"));
@@ -834,6 +1170,47 @@ mod tests {
         assert!(!frame.contains("action="));
 
         // handle_key removed — real dispatch uses hotkeys::action_for_key
+    }
+
+    #[test]
+    fn work_now_card_freezes_spinner_after_startup() {
+        let active_frame = render_dashboard_at_tick(
+            &[worker(10, false)],
+            &QueueStats {
+                ready: 1,
+                active: 1,
+                failed: 0,
+                p0: 0,
+                p1: 1,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            90,
+            22,
+            5,
+            2,
+        );
+        let frozen_frame = render_dashboard_at_tick(
+            &[worker(10, false)],
+            &QueueStats {
+                ready: 1,
+                active: 1,
+                failed: 0,
+                p0: 0,
+                p1: 1,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            90,
+            22,
+            35,
+            2,
+        );
+        assert!(active_frame.contains("Pruning"));
+        assert!(frozen_frame.contains("Pruning"));
+        assert!(frozen_frame.contains("..."));
+        assert!(active_frame.contains("⠇"));
+        assert!(frozen_frame.contains("⠇"));
     }
 
     #[test]
@@ -864,5 +1241,72 @@ mod tests {
             humanize_breadcrumb("boot>backlog_sync"),
             "Boot > Backlog Sync"
         );
+    }
+
+    #[test]
+    fn triage_mode_renders_activity_and_artifact_cards() {
+        let frame = render_triage(
+            &["Detecting coding agent signals".to_string()],
+            &["repo-intelligence.toml (pending)".to_string()],
+            80,
+            20,
+        );
+        assert!(frame.contains("triage mode"));
+        assert!(frame.contains("Live Activity"));
+        assert!(frame.contains("Triage Artifacts"));
+        assert!(frame.contains("Detecting coding agent signals"));
+    }
+
+    #[test]
+    fn worker_metrics_are_derived_from_states() {
+        let workers = vec![
+            WorkerRow {
+                worker_id: "w1".to_string(),
+                state: "doing".to_string(),
+                task_title: String::new(),
+                tool_line: String::new(),
+                breadcrumb: String::new(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: false,
+                session_missing: false,
+            },
+            WorkerRow {
+                worker_id: "w2".to_string(),
+                state: "reviewing".to_string(),
+                task_title: String::new(),
+                tool_line: String::new(),
+                breadcrumb: String::new(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: false,
+                session_missing: false,
+            },
+            WorkerRow {
+                worker_id: "w3".to_string(),
+                state: "idle".to_string(),
+                task_title: String::new(),
+                tool_line: String::new(),
+                breadcrumb: String::new(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: false,
+                session_missing: false,
+            },
+        ];
+        let metrics = WorkerMetrics::from_workers(&workers);
+        assert_eq!(metrics.total, 3);
+        assert_eq!(metrics.doing, 1);
+        assert_eq!(metrics.reviewing, 1);
+        assert_eq!(metrics.idle, 1);
+    }
+
+    #[test]
+    fn startup_headline_stops_after_30_ticks() {
+        let running = StartupHeadlineView::from_tick(29, 0);
+        let frozen = StartupHeadlineView::from_tick(35, 0);
+        assert!(running.startup_active);
+        assert!(!frozen.startup_active);
+        assert_eq!(running.spinner(), frozen.spinner());
     }
 }

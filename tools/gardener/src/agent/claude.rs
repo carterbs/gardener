@@ -96,6 +96,9 @@ impl AgentAdapter for ClaudeAdapter {
             "--model".to_string(),
             context.model.clone(),
         ];
+        if context.permissive_mode {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
         if let Some(turns) = context.max_turns {
             args.push("--max-turns".to_string());
             args.push(turns.to_string());
@@ -351,6 +354,23 @@ mod tests {
         assert!(caps.supports_stream_json);
         assert!(caps.supports_max_turns);
         assert_eq!(caps.version.as_deref(), Some("claude 1.2.3"));
+    }
+
+    #[test]
+    fn permissive_mode_adds_bypass_flag() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"result\",\"subtype\":\"success\",\"result\":{}}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let adapter = ClaudeAdapter;
+        adapter
+            .execute(&runner, &context(), "prompt", None)
+            .expect("success");
+        assert!(runner.spawned()[0]
+            .args
+            .contains(&"--dangerously-skip-permissions".to_string()));
     }
 
     #[test]

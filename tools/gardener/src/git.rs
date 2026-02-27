@@ -210,6 +210,60 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn rebase_onto_main(&self, base_branch: &str) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "git.rebase.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base_branch": base_branch
+            }),
+        );
+        let fetch = self.run(["git", "fetch", "origin", base_branch])?;
+        if fetch.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "git.rebase.fetch_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "base_branch": base_branch,
+                    "stderr": fetch.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git fetch origin {base_branch} failed: {}",
+                fetch.stderr
+            )));
+        }
+        let rebase_ref = format!("origin/{base_branch}");
+        let rebase = self.run(["git", "rebase", &rebase_ref])?;
+        if rebase.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "git.rebase.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "base_branch": base_branch,
+                    "stderr": rebase.stderr
+                }),
+            );
+            let _ = self.run(["git", "rebase", "--abort"]);
+            return Err(GardenerError::Process(format!(
+                "rebase onto origin/{base_branch} failed: {}",
+                rebase.stderr
+            )));
+        }
+        append_run_log(
+            "info",
+            "git.rebase.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base_branch": base_branch
+            }),
+        );
+        Ok(())
+    }
+
     pub fn run_validation_command(&self, command: &str) -> Result<(), GardenerError> {
         append_run_log(
             "info",
@@ -295,6 +349,58 @@ mod tests {
     }
 
     #[test]
+    fn rebase_onto_main_succeeds() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // rebase
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        GitClient::new(&runner, "/repo")
+            .rebase_onto_main("main")
+            .expect("rebased");
+        let spawned = runner.spawned();
+        assert!(spawned[0].args.contains(&"fetch".to_string()));
+        assert!(spawned[1].args.contains(&"rebase".to_string()));
+    }
+
+    #[test]
+    fn rebase_onto_main_aborts_on_conflict() {
+        let runner = FakeProcessRunner::default();
+        // fetch succeeds
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // rebase fails
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "conflict".to_string(),
+        }));
+        // rebase --abort
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .rebase_onto_main("main")
+            .unwrap_err();
+        assert!(err.to_string().contains("rebase onto origin/main failed"));
+        let spawned = runner.spawned();
+        assert!(spawned[2].args.contains(&"--abort".to_string()));
+    }
+
+    #[test]
     fn worktree_clean_when_status_empty() {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
@@ -302,7 +408,9 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
-        assert!(GitClient::new(&runner, "/repo").worktree_is_clean().unwrap());
+        assert!(GitClient::new(&runner, "/repo")
+            .worktree_is_clean()
+            .unwrap());
     }
 
     #[test]
@@ -313,7 +421,9 @@ mod tests {
             stdout: " M tools/gardener/src/tui.rs\n".to_string(),
             stderr: String::new(),
         }));
-        assert!(!GitClient::new(&runner, "/repo").worktree_is_clean().unwrap());
+        assert!(!GitClient::new(&runner, "/repo")
+            .worktree_is_clean()
+            .unwrap());
     }
 
     #[test]

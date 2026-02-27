@@ -912,9 +912,7 @@ mod tests {
             .mark_in_progress(&first.task_id, "worker-a")
             .expect("mark in progress");
         assert!(transitioned);
-        let recovered = store
-            .recover_stale_leases(i64::MAX)
-            .expect("recover stale");
+        let recovered = store.recover_stale_leases(i64::MAX).expect("recover stale");
         assert_eq!(recovered, 1);
         std::thread::sleep(std::time::Duration::from_millis(5));
         let _second = store

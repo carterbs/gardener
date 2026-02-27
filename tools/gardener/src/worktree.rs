@@ -1,0 +1,182 @@
+use crate::errors::GardenerError;
+use crate::runtime::{ProcessRequest, ProcessRunner};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeEntry {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub detached: bool,
+}
+
+pub struct WorktreeClient<'a> {
+    runner: &'a dyn ProcessRunner,
+    cwd: PathBuf,
+}
+
+impl<'a> WorktreeClient<'a> {
+    pub fn new(runner: &'a dyn ProcessRunner, cwd: impl AsRef<Path>) -> Self {
+        Self {
+            runner,
+            cwd: cwd.as_ref().to_path_buf(),
+        }
+    }
+
+    pub fn list(&self) -> Result<Vec<WorktreeEntry>, GardenerError> {
+        let out = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec!["worktree".to_string(), "list".to_string(), "--porcelain".to_string()],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            return Err(GardenerError::Process("git worktree list failed".to_string()));
+        }
+        parse_porcelain(&out.stdout)
+    }
+
+    pub fn create_or_resume(&self, path: &Path, branch: &str) -> Result<(), GardenerError> {
+        let existing = self.list()?;
+        if existing
+            .iter()
+            .any(|entry| entry.path == path && entry.branch.as_deref() == Some(branch))
+        {
+            return Ok(());
+        }
+
+        let out = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec![
+                "worktree".to_string(),
+                "add".to_string(),
+                path.display().to_string(),
+                "-b".to_string(),
+                branch.to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            return Err(GardenerError::Process("worktree create failed".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn remove_recreate_if_stale_empty(&self, path: &Path, branch: &str) -> Result<(), GardenerError> {
+        let remove = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec!["worktree".to_string(), "remove".to_string(), "--force".to_string(), path.display().to_string()],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if remove.exit_code != 0 {
+            return Err(GardenerError::Process("worktree remove failed".to_string()));
+        }
+        self.create_or_resume(path, branch)
+    }
+
+    pub fn cleanup_on_completion(&self, path: &Path) -> Result<(), GardenerError> {
+        let out = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec!["worktree".to_string(), "remove".to_string(), "--force".to_string(), path.display().to_string()],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            return Err(GardenerError::Process("worktree cleanup failed".to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn prune_orphans(&self) -> Result<(), GardenerError> {
+        let out = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec!["worktree".to_string(), "prune".to_string()],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            return Err(GardenerError::Process("worktree prune failed".to_string()));
+        }
+        Ok(())
+    }
+}
+
+fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
+    let mut entries = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_branch: Option<String> = None;
+    let mut current_detached = false;
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            if let Some(path) = current_path.take() {
+                entries.push(WorktreeEntry {
+                    path,
+                    branch: current_branch.take(),
+                    detached: current_detached,
+                });
+                current_detached = false;
+            }
+            current_path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = line.strip_prefix("branch refs/heads/") {
+            current_branch = Some(rest.to_string());
+        } else if line == "detached" {
+            current_detached = true;
+        }
+    }
+
+    if let Some(path) = current_path {
+        entries.push(WorktreeEntry {
+            path,
+            branch: current_branch,
+            detached: current_detached,
+        });
+    }
+
+    if entries.is_empty() {
+        return Err(GardenerError::Process(
+            "no worktree entries found in porcelain output".to_string(),
+        ));
+    }
+
+    Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorktreeClient;
+    use crate::runtime::{FakeProcessRunner, ProcessOutput};
+    use std::path::Path;
+
+    #[test]
+    fn create_or_resume_is_idempotent() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.worktrees/task-1\nbranch refs/heads/task-1\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, "/repo")
+            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
+            .expect("idempotent resume");
+        assert_eq!(runner.spawned().len(), 1);
+    }
+
+    #[test]
+    fn prune_and_cleanup_paths_run() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let client = WorktreeClient::new(&runner, "/repo");
+        client.prune_orphans().expect("pruned");
+        client
+            .cleanup_on_completion(Path::new("/repo/.worktrees/task-1"))
+            .expect("cleanup");
+    }
+}

@@ -1,3 +1,4 @@
+use crate::config::GitOutputMode;
 use crate::errors::GardenerError;
 use crate::types::WorkerState;
 use std::collections::BTreeMap;
@@ -20,11 +21,21 @@ impl PromptRegistry {
         templates.insert(WorkerState::Understand, understand_template());
         templates.insert(WorkerState::Planning, planning_template());
         templates.insert(WorkerState::Doing, doing_template());
-        templates.insert(WorkerState::Gitting, gitting_template());
+        templates.insert(WorkerState::Gitting, gitting_template_pr());
         templates.insert(WorkerState::Reviewing, reviewing_template());
         templates.insert(WorkerState::Merging, merging_template());
 
         Self { templates }
+    }
+
+    pub fn with_gitting_mode(mut self, mode: &GitOutputMode) -> Self {
+        let template = match mode {
+            GitOutputMode::CommitOnly => gitting_template_commit_only(),
+            GitOutputMode::Push => gitting_template_push(),
+            GitOutputMode::PullRequest => gitting_template_pr(),
+        };
+        self.templates.insert(WorkerState::Gitting, template);
+        self
     }
 
     pub fn template_for(&self, state: WorkerState) -> Result<&PromptTemplate, GardenerError> {
@@ -59,16 +70,43 @@ fn doing_template() -> PromptTemplate {
         version: "v1-doing",
         body: r#"Intent: implement changes and verify behavior within current task scope.
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
-Output schema must be JSON envelope with payload fields: summary, files_changed.
+Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
+commit_message must be a concise conventional-commit style message describing what was implemented.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
 
-fn gitting_template() -> PromptTemplate {
+fn gitting_template_commit_only() -> PromptTemplate {
     PromptTemplate {
-        version: "v1-gitting",
-        body: r#"Intent: produce git artifacts (branch/pr metadata) only.
-Guardrails: no orchestration logic in runtime; runtime only verifies invariants.
+        version: "v1-gitting-commit-only",
+        body: r#"Intent: stage and commit all changes on the current branch.
+Run: git add -A followed by git commit with a clear, conventional-commit style message describing what was implemented.
+Guardrails: do not push to remote; do not modify source files.
+Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
+pr_number must be 0 and pr_url must be an empty string.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+fn gitting_template_push() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-gitting-push",
+        body: r#"Intent: stage and commit all changes, then push the branch to origin.
+Run: git add -A, then git commit with a clear conventional-commit style message, then git push origin <branch>.
+Guardrails: do not open a pull request; do not modify source files.
+Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
+pr_number must be 0 and pr_url must be an empty string.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+fn gitting_template_pr() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-gitting-pr",
+        body: r#"Intent: stage and commit all changes, push the branch, then open a GitHub pull request.
+Run: git add -A, then git commit with a clear conventional-commit style message, then git push origin <branch>, then gh pr create.
+The PR title and body must be written thoughtfully: summarize what was built and why, call out any non-obvious decisions, and make it easy for a reviewer to understand the scope of the change. Do not use the task ID as the title. Write like a human engineer who cares about the reviewer's time.
+Guardrails: do not modify source files; only git and gh operations are permitted.
 Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }

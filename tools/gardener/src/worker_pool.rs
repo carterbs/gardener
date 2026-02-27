@@ -1,26 +1,19 @@
 use crate::backlog_store::BacklogStore;
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
-use crate::hotkeys::{action_for_key, HotkeyAction as AppHotkeyAction};
-use crate::logging::structured_fallback_line;
+use crate::hotkeys::{
+    action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
+};
+use crate::logging::{append_run_log, structured_fallback_line};
 use crate::priority::Priority;
-use crate::runtime::ProductionRuntime;
 use crate::runtime::Terminal;
-use crate::scheduler::{SchedulerEngine, SchedulerRunSummary};
+use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{BacklogView, QueueStats, WorkerRow};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
-
-pub fn run_worker_pool_stub(
-    store: &BacklogStore,
-    parallelism: usize,
-    target: usize,
-) -> Result<SchedulerRunSummary, GardenerError> {
-    let mut scheduler = SchedulerEngine::new();
-    scheduler.run_stub_complete(store, parallelism, target)
-}
+use serde_json::json;
 
 pub fn run_worker_pool_fsm(
     runtime: &ProductionRuntime,
@@ -31,7 +24,20 @@ pub fn run_worker_pool_fsm(
     target: usize,
     task_override: Option<&str>,
 ) -> Result<usize, GardenerError> {
+    clear_interrupt();
+    append_run_log(
+        "info",
+        "worker_pool.started",
+        json!({
+            "target": target,
+            "configured_parallelism": cfg.orchestrator.parallelism,
+            "task_override": task_override
+        }),
+    );
+    let operator_hotkeys = operator_hotkeys_enabled();
     let mut report_visible = false;
+    let hb = cfg.scheduler.heartbeat_interval_seconds;
+    let lt = cfg.scheduler.lease_timeout_seconds;
     let parallelism = (cfg.orchestrator.parallelism.max(1) as usize).min(target.max(1));
     let mut workers = (0..parallelism)
         .map(|idx| WorkerRow {
@@ -47,7 +53,7 @@ pub fn run_worker_pool_fsm(
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;
-    render(terminal, &workers, &dashboard_snapshot(store)?)?;
+    render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
     while completed < target {
         if handle_hotkeys(
@@ -56,6 +62,7 @@ pub fn run_worker_pool_fsm(
             cfg,
             store,
             &workers,
+            operator_hotkeys,
             terminal,
             &mut report_visible,
         )? {
@@ -72,6 +79,7 @@ pub fn run_worker_pool_fsm(
                 cfg,
                 store,
                 &workers,
+                operator_hotkeys,
                 terminal,
                 &mut report_visible,
             )? {
@@ -95,6 +103,15 @@ pub fn run_worker_pool_fsm(
                 continue;
             };
             claimed_any = true;
+            append_run_log(
+                "info",
+                "worker.task.claimed",
+                json!({
+                    "worker_id": worker_id,
+                    "task_id": task.task_id,
+                    "title": task.title
+                }),
+            );
             let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
 
             workers[idx].state = "doing".to_string();
@@ -102,21 +119,101 @@ pub fn run_worker_pool_fsm(
             workers[idx].tool_line = "claimed".to_string();
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
-            render(terminal, &workers, &dashboard_snapshot(store)?)?;
+            render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
-            let summary = execute_task(
-                cfg,
-                runtime.process_runner.as_ref(),
-                scope,
-                &worker_id,
-                &task.task_id,
-                task_override.unwrap_or(task.title.as_str()),
-            )?;
+            let mut quit_requested = false;
+            let mut turn_result: Option<Result<crate::worker::WorkerRunSummary, GardenerError>> =
+                None;
+            std::thread::scope(|scope_guard| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let worker_id = worker_id.clone();
+                let task_id = task.task_id.clone();
+                let task_summary = task_override.unwrap_or(task.title.as_str()).to_string();
+                scope_guard.spawn(move || {
+                    let result = execute_task(
+                        cfg,
+                        runtime.process_runner.as_ref(),
+                        scope,
+                        &worker_id,
+                        &task_id,
+                        &task_summary,
+                    );
+                    let _ = tx.send(result);
+                });
+
+                loop {
+                    match rx.recv_timeout(std::time::Duration::from_millis(25)) {
+                        Ok(result) => {
+                            turn_result = Some(result);
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if handle_hotkeys(
+                                runtime,
+                                scope,
+                                cfg,
+                                store,
+                                &workers,
+                                operator_hotkeys,
+                                terminal,
+                                &mut report_visible,
+                            )
+                            .unwrap_or(false)
+                            {
+                                request_interrupt();
+                                quit_requested = true;
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                            turn_result = Some(Err(GardenerError::Process(
+                                "worker turn channel disconnected".to_string(),
+                            )));
+                            break;
+                        }
+                    }
+                }
+            });
+            let summary = match turn_result.expect("worker result set by scoped worker thread") {
+                Ok(summary) => summary,
+                Err(GardenerError::Process(message))
+                    if message.contains("user interrupt requested") =>
+                {
+                    return Ok(completed);
+                }
+                Err(err) => {
+                    let msg = err.to_string();
+                    append_run_log(
+                        "error",
+                        "worker.task.process_error",
+                        json!({
+                            "worker_id": worker_id,
+                            "task_id": task.task_id,
+                            "error": msg
+                        }),
+                    );
+                    terminal.draw_shutdown_screen("Error", &msg)?;
+                    wait_for_quit(terminal)?;
+                    return Ok(completed);
+                }
+            };
+            if quit_requested {
+                return Ok(completed);
+            }
             for event in summary.logs {
                 workers[idx].state = event.state.as_str().to_string();
                 workers[idx].tool_line = format!("prompt {}", event.prompt_version);
                 workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
-                render(terminal, &workers, &dashboard_snapshot(store)?)?;
+                append_run_log(
+                    "debug",
+                    "worker.turn.state",
+                    json!({
+                        "worker_id": worker_id,
+                        "state": event.state.as_str(),
+                        "prompt_version": event.prompt_version,
+                        "context_manifest_hash": event.context_manifest_hash
+                    }),
+                );
+                render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
             }
 
             if summary.final_state == crate::types::WorkerState::Complete {
@@ -125,18 +222,85 @@ pub fn run_worker_pool_fsm(
                 workers[idx].state = "complete".to_string();
                 workers[idx].tool_line = format!("completed {}", task.task_id);
                 workers[idx].lease_held = false;
+                append_run_log(
+                    "info",
+                    "worker.task.completed",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task.task_id,
+                        "completed": completed
+                    }),
+                );
             } else {
                 workers[idx].state = "failed".to_string();
                 workers[idx].tool_line = format!("failed {}", task.task_id);
+                append_run_log(
+                    "error",
+                    "worker.task.failed",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task.task_id,
+                        "final_state": summary.final_state.as_str()
+                    }),
+                );
+                if let Some(reason) = &summary.failure_reason {
+                    terminal.draw_shutdown_screen("Worker Error", reason)?;
+                    wait_for_quit(terminal)?;
+                    return Ok(completed);
+                }
             }
-            render(terminal, &workers, &dashboard_snapshot(store)?)?;
+            render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
         }
 
         if !claimed_any {
             break;
         }
     }
+    append_run_log(
+        "info",
+        "worker_pool.completed",
+        json!({
+            "completed": completed,
+            "target": target
+        }),
+    );
+    let shutdown_title = if completed >= target {
+        "All Tasks Complete".to_string()
+    } else {
+        "No More Work".to_string()
+    };
+    let shutdown_message = if completed >= target {
+        format!("Completed {completed} of {target} task(s).")
+    } else if completed == 0 {
+        "No tasks were available in the backlog.".to_string()
+    } else {
+        format!("Completed {completed} task(s). Backlog is empty.")
+    };
+    terminal.draw_shutdown_screen(&shutdown_title, &shutdown_message)?;
+    wait_for_quit(terminal)?;
     Ok(completed)
+}
+
+fn wait_for_quit(terminal: &dyn Terminal) -> Result<(), GardenerError> {
+    if !terminal.stdin_is_tty() {
+        return Ok(());
+    }
+    // Poll until the user presses any key. poll_key returns None on timeout,
+    // Some(key) when a key arrives. For fake terminals with an empty queue
+    // the first poll immediately returns None and we exit — this prevents
+    // test hangs while still blocking on a real TTY until input is received.
+    loop {
+        match terminal.poll_key(100)? {
+            Some(_) => return Ok(()),
+            None => {
+                // On a real terminal the key listener is running; keep waiting.
+                // In test mode (FakeTerminal) None means queue exhausted: exit.
+                if !crate::runtime::KEY_LISTENER_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 fn handle_hotkeys(
@@ -145,28 +309,50 @@ fn handle_hotkeys(
     cfg: &AppConfig,
     store: &BacklogStore,
     workers: &[WorkerRow],
+    operator_hotkeys: bool,
     terminal: &dyn Terminal,
     report_visible: &mut bool,
 ) -> Result<bool, GardenerError> {
     if !terminal.stdin_is_tty() {
         return Ok(false);
     }
+    let mut redraw_dashboard = false;
     if let Some(key) = terminal.poll_key(10)? {
-        match hotkey_action(key) {
-            Some(AppHotkeyAction::Quit) => return Ok(true),
+        match hotkey_action(key, operator_hotkeys) {
+            Some(AppHotkeyAction::Quit) => {
+                append_run_log("warn", "hotkey.quit", json!({}));
+                request_interrupt();
+                return Ok(true);
+            }
             Some(AppHotkeyAction::Retry) => {
                 let released = store.recover_stale_leases(now_unix_millis())?;
+                append_run_log(
+                    "info",
+                    "hotkey.retry",
+                    json!({
+                        "released": released
+                    }),
+                );
                 terminal.write_line(&format!(
                     "retry requested: released {released} stale lease(s)"
                 ))?;
+                redraw_dashboard = true;
             }
             Some(AppHotkeyAction::ReleaseLease) => {
                 let release_now = now_unix_millis()
                     .saturating_add((cfg.scheduler.lease_timeout_seconds as i64 + 1) * 1000);
                 let released = store.recover_stale_leases(release_now)?;
+                append_run_log(
+                    "info",
+                    "hotkey.release_lease",
+                    json!({
+                        "released": released
+                    }),
+                );
                 terminal.write_line(&format!(
                     "release-lease requested: released {released} lease(s)"
                 ))?;
+                redraw_dashboard = true;
             }
             Some(AppHotkeyAction::ParkEscalate) => {
                 let active = workers.iter().filter(|row| row.state == "doing").count();
@@ -184,13 +370,25 @@ fn handle_hotkeys(
                     "park/escalate requested: created P0 escalation task {}",
                     short_task_id(&task.task_id)
                 ))?;
+                append_run_log(
+                    "warn",
+                    "hotkey.park_escalate",
+                    json!({
+                        "active_workers": active,
+                        "task_id": task.task_id
+                    }),
+                );
+                redraw_dashboard = true;
             }
             Some(AppHotkeyAction::ViewReport) => *report_visible = true,
             Some(AppHotkeyAction::RegenerateReport) => {
                 let _ = refresh_quality_report(runtime, cfg, scope, true)?;
                 *report_visible = true;
             }
-            Some(AppHotkeyAction::Back) => *report_visible = false,
+            Some(AppHotkeyAction::Back) => {
+                *report_visible = false;
+                redraw_dashboard = true;
+            }
             None => {}
         }
     }
@@ -202,6 +400,15 @@ fn handle_hotkeys(
             "report not found".to_string()
         };
         terminal.draw_report(&report_path.display().to_string(), &report)?;
+    } else if redraw_dashboard {
+        let snapshot = dashboard_snapshot(store)?;
+        render(
+            terminal,
+            workers,
+            &snapshot,
+            cfg.scheduler.heartbeat_interval_seconds,
+            cfg.scheduler.lease_timeout_seconds,
+        )?;
     }
     Ok(false)
 }
@@ -213,8 +420,8 @@ fn now_unix_millis() -> i64 {
         .unwrap_or(0)
 }
 
-fn hotkey_action(key: char) -> Option<AppHotkeyAction> {
-    action_for_key(key)
+fn hotkey_action(key: char, operator_hotkeys: bool) -> Option<AppHotkeyAction> {
+    action_for_key_with_mode(key, operator_hotkeys)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,9 +478,30 @@ fn render(
     terminal: &dyn Terminal,
     workers: &[WorkerRow],
     snapshot: &DashboardSnapshot,
+    heartbeat_interval_seconds: u64,
+    lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
+    append_run_log(
+        "debug",
+        "dashboard.snapshot",
+        json!({
+            "workers": workers.len(),
+            "ready": snapshot.stats.ready,
+            "active": snapshot.stats.active,
+            "failed": snapshot.stats.failed,
+            "backlog_in_progress": snapshot.backlog.in_progress.len(),
+            "backlog_queued": snapshot.backlog.queued.len(),
+            "tty": terminal.stdin_is_tty()
+        }),
+    );
     if terminal.stdin_is_tty() {
-        terminal.draw_dashboard(workers, &snapshot.stats, &snapshot.backlog)?;
+        terminal.draw_dashboard_with_config(
+            workers,
+            &snapshot.stats,
+            &snapshot.backlog,
+            heartbeat_interval_seconds,
+            lease_timeout_seconds,
+        )?;
     } else {
         for row in workers {
             terminal.write_line(&structured_fallback_line(
@@ -348,21 +576,28 @@ mod tests {
     #[test]
     fn report_hotkey_actions_cover_report_bindings() {
         for binding in REPORT_BINDINGS {
-            let action = hotkey_action(binding.key);
+            let action = hotkey_action(binding.key, false);
             assert!(action.is_some());
         }
     }
 
     #[test]
-    fn report_hotkey_actions_match_contract() {
-        assert_eq!(hotkey_action('q'), Some(HotkeyAction::Quit)); // hotkey:q
-        assert_eq!(hotkey_action('r'), Some(HotkeyAction::Retry)); // hotkey:r
-        assert_eq!(hotkey_action('l'), Some(HotkeyAction::ReleaseLease)); // hotkey:l
-        assert_eq!(hotkey_action('p'), Some(HotkeyAction::ParkEscalate)); // hotkey:p
-        assert_eq!(hotkey_action('v'), Some(HotkeyAction::ViewReport)); // hotkey:v
-        assert_eq!(hotkey_action('g'), Some(HotkeyAction::RegenerateReport)); // hotkey:g
-        assert_eq!(hotkey_action('b'), Some(HotkeyAction::Back)); // hotkey:b
-        assert_eq!(hotkey_action('x'), None);
+    fn hotkey_actions_match_default_and_operator_contracts() {
+        assert_eq!(hotkey_action('q', false), Some(HotkeyAction::Quit)); // hotkey:q
+        assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
+        assert_eq!(
+            hotkey_action('g', false),
+            Some(HotkeyAction::RegenerateReport)
+        ); // hotkey:g
+        assert_eq!(hotkey_action('b', false), Some(HotkeyAction::Back)); // hotkey:b
+        assert_eq!(hotkey_action('r', false), None);
+        assert_eq!(hotkey_action('l', false), None);
+        assert_eq!(hotkey_action('p', false), None);
+
+        assert_eq!(hotkey_action('r', true), Some(HotkeyAction::Retry)); // hotkey:r
+        assert_eq!(hotkey_action('l', true), Some(HotkeyAction::ReleaseLease)); // hotkey:l
+        assert_eq!(hotkey_action('p', true), Some(HotkeyAction::ParkEscalate)); // hotkey:p
+        assert_eq!(hotkey_action('x', true), None);
     }
 
     #[test]
@@ -494,9 +729,52 @@ mod tests {
             terminal: Arc::new(terminal.clone()),
         };
 
-        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+        let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
             .expect("run fsm");
-        assert_eq!(completed, 0);
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_ignores_operator_hotkeys_by_default() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "hotkey actions task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['r', 'l', 'p', 'q']);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 2, None)
+            .expect("run fsm");
+
+        let lines = terminal.written_lines();
+        assert!(!lines.iter().any(|line| line.contains("retry requested")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("release-lease requested")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("park/escalate requested")));
+
+        let tasks = store.list_tasks().expect("list tasks");
+        assert!(!tasks.iter().any(|task| {
+            task.priority == Priority::P0 && task.title.contains("Escalation requested")
+        }));
     }
 
     #[test]

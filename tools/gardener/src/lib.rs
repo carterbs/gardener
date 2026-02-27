@@ -26,7 +26,6 @@ pub mod quality_grades;
 pub mod quality_scoring;
 pub mod repo_intelligence;
 pub mod runtime;
-pub mod scheduler;
 pub mod seed_runner;
 pub mod seeding;
 pub mod startup;
@@ -50,14 +49,18 @@ use backlog_store::BacklogStore;
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
-use logging::structured_fallback_line;
-use runtime::ProductionRuntime;
-use startup::run_startup_audits;
+use logging::{
+    append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
+    structured_fallback_line,
+};
+use runtime::{clear_interrupt, ProductionRuntime};
+use serde_json::json;
+use startup::{run_startup_audits, run_startup_audits_with_progress};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
-use worker_pool::{run_worker_pool_fsm, run_worker_pool_stub};
+use worker_pool::run_worker_pool_fsm;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gardener")]
@@ -125,210 +128,252 @@ pub fn run_with_runtime(
     cwd: &std::path::Path,
     runtime: &ProductionRuntime,
 ) -> Result<i32, GardenerError> {
-    let _ui_guard = UiGuard::new(runtime.terminal.as_ref());
-    let cli = match Cli::try_parse_from(args) {
-        Ok(cli) => cli,
-        Err(error) => match error.kind() {
-            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
-                print!("{error}");
-                return Ok(0);
-            }
-            _ => return Err(GardenerError::Cli(error.to_string())),
-        },
-    };
+    clear_interrupt();
+    let run_log_path = default_run_log_path(cwd);
+    let run_id = init_run_logger(&run_log_path, cwd);
+    let _run_log_guard = RunLogGuard;
+    append_run_log(
+        "info",
+        "run.started",
+        json!({
+            "run_id": run_id,
+            "log_path": run_log_path.display().to_string(),
+            "cwd": cwd.display().to_string(),
+            "arg_count": args.len()
+        }),
+    );
+    let result = (|| -> Result<i32, GardenerError> {
+        let _ui_guard = UiGuard::new(runtime.terminal.as_ref());
+        let cli = match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(error) => match error.kind() {
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                    print!("{error}");
+                    return Ok(0);
+                }
+                _ => return Err(GardenerError::Cli(error.to_string())),
+            },
+        };
+        append_run_log(
+            "info",
+            "cli.parsed",
+            json!({
+                "config_override": cli.config.as_ref().map(|p| p.display().to_string()),
+                "task_override": cli.task,
+                "target": cli.target,
+                "triage_only": cli.triage_only,
+                "sync_only": cli.sync_only
+            }),
+        );
 
-    let env_map = env_to_map(env);
+        let env_map = env_to_map(env);
 
-    if cli.retriage && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some() {
-        return Err(GardenerError::Cli(
-            "--retriage requires an interactive terminal.".to_string(),
-        ));
-    }
-    if cli.triage_only && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some() {
-        return Err(GardenerError::Cli(
-            "Triage requires a human and cannot run non-interactively.".to_string(),
-        ));
-    }
+        if cli.retriage && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some() {
+            return Err(GardenerError::Cli(
+                "--retriage requires an interactive terminal.".to_string(),
+            ));
+        }
+        if cli.triage_only && is_non_interactive(&env_map, runtime.terminal.as_ref()).is_some() {
+            return Err(GardenerError::Cli(
+                "Triage requires a human and cannot run non-interactively.".to_string(),
+            ));
+        }
 
-    let overrides = CliOverrides {
-        config_path: cli.config.clone(),
-        working_dir: cli.working_dir.clone(),
-        parallelism: cli.parallelism,
-        task: cli.task.clone(),
-        target: cli.target,
-        prune_only: cli.prune_only,
-        backlog_only: cli.backlog_only,
-        quality_grades_only: cli.quality_grades_only,
-        validation_command: cli.validation_command.clone(),
-        agent: cli.agent.map(Into::into),
-        retriage: cli.retriage,
-        triage_only: cli.triage_only,
-        sync_only: cli.sync_only,
-    };
+        let overrides = CliOverrides {
+            config_path: cli.config.clone(),
+            working_dir: cli.working_dir.clone(),
+            parallelism: cli.parallelism,
+            task: cli.task.clone(),
+            target: cli.target,
+            prune_only: cli.prune_only,
+            backlog_only: cli.backlog_only,
+            quality_grades_only: cli.quality_grades_only,
+            validation_command: cli.validation_command.clone(),
+            agent: cli.agent.map(Into::into),
+            retriage: cli.retriage,
+            triage_only: cli.triage_only,
+            sync_only: cli.sync_only,
+        };
 
-    let (cfg, scope) = load_config(
-        &overrides,
-        cwd,
-        runtime.file_system.as_ref(),
-        runtime.process_runner.as_ref(),
-    )?;
-
-    if let (Some(agent), Some(config_path)) = (cli.agent, cli.config.as_ref()) {
-        persist_agent_default(
+        let (cfg, scope) = load_config(
+            &overrides,
+            cwd,
             runtime.file_system.as_ref(),
-            config_path.as_path(),
-            AgentKind::from(agent),
+            runtime.process_runner.as_ref(),
         )?;
-    }
+        set_run_working_dir(&scope.working_dir);
+        append_run_log(
+            "info",
+            "config.loaded",
+            json!({
+                "working_dir": scope.working_dir.display().to_string(),
+                "repo_root": scope.repo_root.as_ref().map(|p| p.display().to_string()),
+                "parallelism": cfg.orchestrator.parallelism
+            }),
+        );
 
-    let validation = resolve_validation_command(&cfg, cli.validation_command.as_deref());
-    let startup = StartupSnapshot { scope, validation };
-
-    if cli.triage_only || cli.retriage {
-        let _profile = ensure_profile_for_run(
-            runtime,
-            &startup.scope,
-            &cfg,
-            &env_map,
-            cli.retriage,
-            cli.agent.map(Into::into),
-        )?;
-        runtime.terminal.write_line("triage complete")?;
-        return Ok(0);
-    }
-
-    if cli.prune_only {
-        runtime.terminal.write_line(&format!(
-            "phase1 prune-only: scope={} validation={}",
-            startup.scope.working_dir.display(),
-            startup.validation.command
-        ))?;
-        return Ok(0);
-    }
-
-    if cli.backlog_only {
-        let mut cfg_for_startup = cfg.clone();
-        let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
-        runtime.terminal.write_line("phase3 backlog-only")?;
-        return Ok(0);
-    }
-
-    if cli.quality_grades_only {
-        let mut cfg_for_startup = cfg.clone();
-        let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
-        runtime.terminal.write_line("phase3 quality-grades-only")?;
-        return Ok(0);
-    }
-
-    if cli.sync_only {
-        let mut cfg_for_startup = cfg.clone();
-        if !cfg_for_startup.execution.test_mode {
-            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+        if let (Some(agent), Some(config_path)) = (cli.agent, cli.config.as_ref()) {
+            persist_agent_default(
+                runtime.file_system.as_ref(),
+                config_path.as_path(),
+                AgentKind::from(agent),
+            )?;
         }
-        let db_path = startup
-            .scope
-            .repo_root
-            .as_ref()
-            .unwrap_or(&startup.scope.working_dir)
-            .join(".cache/gardener/backlog.sqlite");
-        let snapshot_path = startup
-            .scope
-            .working_dir
-            .join(".cache/gardener/backlog-snapshot.md");
-        if let Some(parent) = snapshot_path.parent() {
-            runtime.file_system.create_dir_all(parent)?;
-        }
-        let store = BacklogStore::open(db_path)?;
-        let _ = export_markdown_snapshot(&store, &snapshot_path)?;
-        runtime.terminal.write_line(&format!(
-            "sync complete: snapshot={}",
-            snapshot_path.display()
-        ))?;
-        return Ok(0);
-    }
 
-    let default_quit_after = if cli.target.is_none()
-        && !cli.prune_only
-        && !cli.backlog_only
-        && !cli.quality_grades_only
-        && !cli.sync_only
-        && !cli.triage_only
-        && !cli.retriage
-    {
-        Some(1)
-    } else {
-        None
-    };
+        let validation = resolve_validation_command(&cfg, cli.validation_command.as_deref());
+        let startup = StartupSnapshot { scope, validation };
 
-    if let Some(target) = cli.target.or(default_quit_after) {
-        let mut cfg_for_startup = cfg.clone();
-        draw_boot_stage(
-            runtime,
-            "INIT",
-            "Starting Gardener runtime and loading orchestrator state",
-        )?;
-
-        let triage_state = triage_needed(&startup.scope, &cfg_for_startup, runtime, false)?;
-        match triage_state {
-            TriageDecision::Needed => draw_boot_stage(
-                runtime,
-                "TRIAGE",
-                "Collecting repository intelligence and validating setup",
-            )?,
-            TriageDecision::NotNeeded => draw_boot_stage(
-                runtime,
-                "CHECK_TRIAGE",
-                "Existing repository intelligence is valid",
-            )?,
-        }
-        if !cfg_for_startup.execution.test_mode {
-            let profile = ensure_profile_for_run(
+        if cli.triage_only || cli.retriage {
+            let _profile = ensure_profile_for_run(
                 runtime,
                 &startup.scope,
-                &cfg_for_startup,
+                &cfg,
                 &env_map,
-                false,
+                cli.retriage,
                 cli.agent.map(Into::into),
             )?;
-            apply_profile_runtime_preferences(&mut cfg_for_startup, profile.as_ref());
+            runtime.terminal.write_line("triage complete")?;
+            return Ok(0);
         }
-        draw_boot_stage(
-            runtime,
-            "STARTUP_AUDITS",
-            "Refreshing quality grades, worktree/PR health, and startup checks",
-        )?;
-        validate_model(&cfg_for_startup.seeding.model)?;
-        if !cfg_for_startup.execution.test_mode {
-            let factory = AdapterFactory::with_defaults();
-            let mut active = Vec::new();
-            if let Some(adapter) = factory.get(cfg_for_startup.seeding.backend) {
-                active.push(adapter);
-            } else {
-                return Err(GardenerError::InvalidConfig(format!(
-                    "no adapter registered for backend {:?}",
-                    cfg_for_startup.seeding.backend
-                )));
-            }
-            let refs = active
-                .iter()
-                .map(|adapter| adapter.as_ref() as &dyn agent::AgentAdapter)
-                .collect::<Vec<_>>();
-            let _caps = probe_and_persist(
-                &refs,
-                runtime.process_runner.as_ref(),
-                runtime.file_system.as_ref(),
-                &startup.scope.working_dir,
-            )?;
+
+        if cli.prune_only {
+            runtime.terminal.write_line(&format!(
+                "phase1 prune-only: scope={} validation={}",
+                startup.scope.working_dir.display(),
+                startup.validation.command
+            ))?;
+            return Ok(0);
         }
-        draw_boot_stage(
-            runtime,
-            "BACKLOG_SYNC",
-            "Seeding and reconciling backlog before worker assignment",
-        )?;
-        if !cfg_for_startup.execution.test_mode {
+
+        if cli.backlog_only {
+            let mut cfg_for_startup = cfg.clone();
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
+            runtime.terminal.write_line("phase3 backlog-only")?;
+            return Ok(0);
         }
-        if cfg_for_startup.execution.worker_mode == "stub_complete" {
+
+        if cli.quality_grades_only {
+            let mut cfg_for_startup = cfg.clone();
+            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+            runtime.terminal.write_line("phase3 quality-grades-only")?;
+            return Ok(0);
+        }
+
+        if cli.sync_only {
+            let mut cfg_for_startup = cfg.clone();
+            if !cfg_for_startup.execution.test_mode {
+                let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+            }
+            let db_path = startup
+                .scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&startup.scope.working_dir)
+                .join(".cache/gardener/backlog.sqlite");
+            let snapshot_path = startup
+                .scope
+                .working_dir
+                .join(".cache/gardener/backlog-snapshot.md");
+            if let Some(parent) = snapshot_path.parent() {
+                runtime.file_system.create_dir_all(parent)?;
+            }
+            let store = BacklogStore::open(db_path)?;
+            let _ = export_markdown_snapshot(&store, &snapshot_path)?;
+            runtime.terminal.write_line(&format!(
+                "sync complete: snapshot={}",
+                snapshot_path.display()
+            ))?;
+            return Ok(0);
+        }
+
+        let default_quit_after = if cli.target.is_none()
+            && !cli.prune_only
+            && !cli.backlog_only
+            && !cli.quality_grades_only
+            && !cli.sync_only
+            && !cli.triage_only
+            && !cli.retriage
+        {
+            Some(1)
+        } else {
+            None
+        };
+
+        if let Some(target) = cli.target.or(default_quit_after) {
+            let mut cfg_for_startup = cfg.clone();
+            draw_boot_stage(
+                runtime,
+                "INIT",
+                "Starting Gardener runtime and loading orchestrator state",
+            )?;
+
+            let triage_state = triage_needed(&startup.scope, &cfg_for_startup, runtime, false)?;
+            match triage_state {
+                TriageDecision::Needed => draw_boot_stage(
+                    runtime,
+                    "TRIAGE",
+                    "Collecting repository intelligence and validating setup",
+                )?,
+                TriageDecision::NotNeeded => draw_boot_stage(
+                    runtime,
+                    "CHECK_TRIAGE",
+                    "Existing repository intelligence is valid",
+                )?,
+            }
+            if !cfg_for_startup.execution.test_mode {
+                let profile = ensure_profile_for_run(
+                    runtime,
+                    &startup.scope,
+                    &cfg_for_startup,
+                    &env_map,
+                    false,
+                    cli.agent.map(Into::into),
+                )?;
+                apply_profile_runtime_preferences(&mut cfg_for_startup, profile.as_ref());
+            }
+            draw_boot_stage(
+                runtime,
+                "STARTUP_AUDITS",
+                "Refreshing quality grades, worktree/PR health, and startup checks",
+            )?;
+            validate_model(&cfg_for_startup.seeding.model)?;
+            if !cfg_for_startup.execution.test_mode {
+                let factory = AdapterFactory::with_defaults();
+                let mut active = Vec::new();
+                if let Some(adapter) = factory.get(cfg_for_startup.seeding.backend) {
+                    active.push(adapter);
+                } else {
+                    return Err(GardenerError::InvalidConfig(format!(
+                        "no adapter registered for backend {:?}",
+                        cfg_for_startup.seeding.backend
+                    )));
+                }
+                let refs = active
+                    .iter()
+                    .map(|adapter| adapter.as_ref() as &dyn agent::AgentAdapter)
+                    .collect::<Vec<_>>();
+                let _caps = probe_and_persist(
+                    &refs,
+                    runtime.process_runner.as_ref(),
+                    runtime.file_system.as_ref(),
+                    runtime.clock.as_ref(),
+                    &startup.scope.working_dir,
+                )?;
+            }
+            draw_boot_stage(
+                runtime,
+                "BACKLOG_SYNC",
+                "Seeding and reconciling backlog before worker assignment",
+            )?;
+            if !cfg_for_startup.execution.test_mode {
+                let _ = run_startup_audits_with_progress(
+                    runtime,
+                    &mut cfg_for_startup,
+                    &startup.scope,
+                    true,
+                    |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
+                )?;
+            }
             let db_path = startup
                 .scope
                 .repo_root
@@ -336,62 +381,51 @@ pub fn run_with_runtime(
                 .unwrap_or(&startup.scope.working_dir)
                 .join(".cache/gardener/backlog.sqlite");
             let store = BacklogStore::open(db_path)?;
-            let summary = run_worker_pool_stub(
-                &store,
-                cfg_for_startup.orchestrator.parallelism as usize,
-                target as usize,
+            draw_boot_stage(
+                runtime,
+                "WORKING",
+                "Dispatching tasks to workers and streaming progress",
             )?;
-            runtime.terminal.write_line(&format!(
-                "phase4 scheduler-stub complete: target={} completed={}",
-                target, summary.completed_count
-            ))?;
+            let completed = run_worker_pool_fsm(
+                runtime,
+                &startup.scope,
+                &cfg_for_startup,
+                &store,
+                runtime.terminal.as_ref(),
+                target as usize,
+                cli.task.as_deref(),
+            )?;
+            if !runtime.terminal.stdin_is_tty() {
+                runtime.terminal.write_line(&structured_fallback_line(
+                    "pool",
+                    "complete",
+                    &format!("target={target} completed={completed}"),
+                ))?;
+            }
             return Ok(0);
         }
-        let db_path = startup
-            .scope
-            .repo_root
-            .as_ref()
-            .unwrap_or(&startup.scope.working_dir)
-            .join(".cache/gardener/backlog.sqlite");
-        let store = BacklogStore::open(db_path)?;
-        draw_boot_stage(
-            runtime,
-            "WORKING",
-            "Dispatching tasks to workers and streaming progress",
-        )?;
-        let completed = run_worker_pool_fsm(
+
+        let _profile = ensure_profile_for_run(
             runtime,
             &startup.scope,
-            &cfg_for_startup,
-            &store,
-            runtime.terminal.as_ref(),
-            target as usize,
-            cli.task.as_deref(),
+            &cfg,
+            &env_map,
+            false,
+            cli.agent.map(Into::into),
         )?;
-        if !runtime.terminal.stdin_is_tty() {
-            runtime.terminal.write_line(&structured_fallback_line(
-                "pool",
-                "complete",
-                &format!("target={target} completed={completed}"),
-            ))?;
-        }
-        return Ok(0);
+
+        runtime
+            .terminal
+            .write_line("phase1 runtime skeleton initialized")?;
+
+        Ok(0)
+    })();
+
+    match &result {
+        Ok(code) => append_run_log("info", "run.completed", json!({ "exit_code": code })),
+        Err(error) => append_run_log("error", "run.failed", json!({ "error": error.to_string() })),
     }
-
-    let _profile = ensure_profile_for_run(
-        runtime,
-        &startup.scope,
-        &cfg,
-        &env_map,
-        false,
-        cli.agent.map(Into::into),
-    )?;
-
-    runtime
-        .terminal
-        .write_line("phase1 runtime skeleton initialized")?;
-
-    Ok(0)
+    result
 }
 
 fn draw_boot_stage(
@@ -399,6 +433,14 @@ fn draw_boot_stage(
     stage: &str,
     detail: &str,
 ) -> Result<(), GardenerError> {
+    append_run_log(
+        "info",
+        "boot.stage",
+        json!({
+            "stage": stage,
+            "detail": detail
+        }),
+    );
     if !runtime.terminal.stdin_is_tty() {
         return Ok(());
     }
@@ -433,9 +475,17 @@ struct UiGuard<'a> {
     terminal: &'a dyn runtime::Terminal,
 }
 
+struct RunLogGuard;
+
 impl<'a> UiGuard<'a> {
     fn new(terminal: &'a dyn runtime::Terminal) -> Self {
         Self { terminal }
+    }
+}
+
+impl Drop for RunLogGuard {
+    fn drop(&mut self) {
+        clear_run_logger();
     }
 }
 

@@ -44,7 +44,7 @@ pub struct BacklogView {
     pub queued: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProblemClass {
     Healthy,
     Stalled,
@@ -81,7 +81,7 @@ pub fn render_dashboard(
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
-        .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog))
+        .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog, 15, 900))
         .expect("draw");
 
     let mut out = String::new();
@@ -100,15 +100,38 @@ fn draw_dashboard_frame(
     workers: &[WorkerRow],
     stats: &QueueStats,
     backlog: &BacklogView,
+    heartbeat_interval_seconds: u64,
+    lease_timeout_seconds: u64,
 ) {
+    let human_problems = workers
+        .iter()
+        .filter_map(|row| {
+            let class = classify_problem(row, heartbeat_interval_seconds, lease_timeout_seconds);
+            if !requires_human_attention(class) {
+                return None;
+            }
+            Some(describe_problem_for_human(row, class))
+        })
+        .collect::<Vec<_>>();
+    let has_human_problems = !human_problems.is_empty();
+
+    let layout_constraints = if has_human_problems {
+        vec![
+            Constraint::Length(3),
+            Constraint::Min(11),
+            Constraint::Length(5),
+            Constraint::Length(2),
+        ]
+    } else {
+        vec![
+            Constraint::Length(3),
+            Constraint::Min(16),
+            Constraint::Length(2),
+        ]
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(11),
-            Constraint::Length(7),
-            Constraint::Length(3),
-        ])
+        .constraints(layout_constraints)
         .split(frame.area());
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -116,36 +139,46 @@ fn draw_dashboard_frame(
         .split(chunks[1]);
 
     let summary = Paragraph::new(Line::from(vec![
-        Span::styled("Ready ", Style::default().fg(Color::Cyan)),
-        Span::raw(format!("{}   ", stats.ready)),
-        Span::styled("Active ", Style::default().fg(Color::Yellow)),
-        Span::raw(format!("{}   ", stats.active)),
-        Span::styled("Failed ", Style::default().fg(Color::Red)),
-        Span::raw(format!("{}    ", stats.failed)),
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "live queue  ",
+            Style::default().fg(Color::Rgb(170, 178, 210)),
+        ),
+        Span::styled("ready ", Style::default().fg(Color::Cyan)),
+        Span::raw(format!("{}  ", stats.ready)),
+        Span::styled("active ", Style::default().fg(Color::Yellow)),
+        Span::raw(format!("{}  ", stats.active)),
+        Span::styled("failed ", Style::default().fg(Color::Red)),
+        Span::raw(format!("{}   ", stats.failed)),
         Span::styled(
             "P0",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("={}  ", stats.p0)),
+        Span::raw(format!(" {}  ", stats.p0)),
         Span::styled(
             "P1",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("={}  ", stats.p1)),
+        Span::raw(format!(" {}  ", stats.p1)),
         Span::styled(
             "P2",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("={}", stats.p2)),
+        Span::raw(format!(" {}", stats.p2)),
     ]))
     .block(
         Block::default()
-            .borders(Borders::ALL)
-            .title("Gardener Live Queue"),
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
     );
     frame.render_widget(summary, chunks[0]);
 
@@ -155,7 +188,12 @@ fn draw_dashboard_frame(
             let state_style = match row.state.as_str() {
                 "complete" => Style::default().fg(Color::Green),
                 "failed" => Style::default().fg(Color::Red),
-                "doing" | "gitting" | "reviewing" | "merging" => Style::default().fg(Color::Yellow),
+                "doing" | "gitting" | "reviewing" | "merging" | "planning" => {
+                    Style::default().fg(Color::Yellow)
+                }
+                "init" | "backlog_sync" | "working" | "understand" => {
+                    Style::default().fg(Color::Cyan)
+                }
                 _ => Style::default().fg(Color::Gray),
             };
             ListItem::new(vec![
@@ -171,22 +209,39 @@ fn draw_dashboard_frame(
                 ]),
                 Line::from(vec![
                     Span::raw("    "),
-                    Span::styled("status=", Style::default().fg(Color::Blue)),
-                    Span::styled(format!("{:<10}", row.state), state_style),
+                    Span::styled("State: ", Style::default().fg(Color::Blue)),
+                    Span::styled(format!("{:<13}", humanize_state(&row.state)), state_style),
                     Span::raw("  "),
-                    Span::styled("action=", Style::default().fg(Color::Blue)),
-                    Span::raw(format!("{:<24}", row.tool_line)),
+                    Span::styled("Action: ", Style::default().fg(Color::Blue)),
+                    Span::raw(format!("{:<22}", humanize_action(&row.tool_line))),
                     Span::raw("  "),
-                    Span::styled("path=", Style::default().fg(Color::Blue)),
-                    Span::raw(row.breadcrumb.clone()),
+                    Span::styled("Flow: ", Style::default().fg(Color::Blue)),
+                    Span::raw(humanize_breadcrumb(&row.breadcrumb)),
                 ]),
             ])
         })
         .collect::<Vec<_>>();
 
+    let workers_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(body[0]);
     frame.render_widget(
-        List::new(worker_items).block(Block::default().borders(Borders::ALL).title("Workers")),
-        body[0],
+        Paragraph::new(Line::from(vec![Span::styled(
+            "Workers",
+            Style::default()
+                .fg(Color::Rgb(126, 231, 135))
+                .add_modifier(Modifier::BOLD),
+        )])),
+        workers_panel[0],
+    );
+    frame.render_widget(
+        List::new(worker_items).block(
+            Block::default()
+                .borders(Borders::RIGHT)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        workers_panel[1],
     );
 
     let mut backlog_items = Vec::new();
@@ -223,39 +278,50 @@ fn draw_dashboard_frame(
                 .map(|line| ListItem::new(format!("- {line}"))),
         );
     }
+    let backlog_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(body[1]);
     frame.render_widget(
-        List::new(backlog_items).block(Block::default().borders(Borders::ALL).title("Backlog")),
-        body[1],
+        Paragraph::new(Line::from(vec![Span::styled(
+            "Backlog",
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        )])),
+        backlog_panel[0],
     );
+    frame.render_widget(List::new(backlog_items), backlog_panel[1]);
 
-    let mut problems = workers
-        .iter()
-        .filter_map(|row| {
-            let class = classify_problem(row, 15, 900);
-            if class == ProblemClass::Healthy {
-                return None;
-            }
-            Some(format!(
-                "{} {} blocking={} action=retry/release/escalate",
-                row.worker_id,
-                class.as_str(),
-                row.tool_line
-            ))
-        })
-        .collect::<Vec<_>>();
-    if problems.is_empty() {
-        problems.push("No blockers detected. Workers are healthy.".to_string());
+    if has_human_problems {
+        frame.render_widget(
+            Paragraph::new(human_problems.join("\n")).block(
+                Block::default()
+                    .title(Line::from(vec![Span::styled(
+                        "Problems Requiring Human",
+                        Style::default()
+                            .fg(Color::Rgb(255, 125, 125))
+                            .add_modifier(Modifier::BOLD),
+                    )]))
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+            ),
+            chunks[2],
+        );
     }
 
-    frame.render_widget(
-        Paragraph::new(problems.join("\n"))
-            .block(Block::default().borders(Borders::ALL).title("Problems")),
-        chunks[2],
+    let controls_legend =
+        if workers.len() == 1 && workers[0].worker_id == "boot" && workers[0].state == "init" {
+            "Controls: startup in progress; hotkeys activate in WORKING stage".to_string()
+        } else {
+            dashboard_controls_legend()
+        };
+    let footer = Paragraph::new(controls_legend).block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
     );
-
-    let footer = Paragraph::new(dashboard_controls_legend())
-        .block(Block::default().borders(Borders::ALL).title("Controls"));
-    frame.render_widget(footer, chunks[3]);
+    frame.render_widget(footer, chunks[chunks.len() - 1]);
 }
 
 pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> String {
@@ -307,16 +373,28 @@ fn draw_report_frame(frame: &mut ratatui::Frame<'_>, path: &str, report_lines: &
 
 thread_local! {
     static LIVE_TUI: RefCell<Option<Terminal<CrosstermBackend<Stdout>>>> = const { RefCell::new(None) };
+    static LIVE_TUI_SIZE: RefCell<Option<(u16, u16)>> = const { RefCell::new(None) };
 }
 
 pub fn draw_dashboard_live(
     workers: &[WorkerRow],
     stats: &QueueStats,
     backlog: &BacklogView,
+    heartbeat_interval_seconds: u64,
+    lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
     with_live_terminal(|terminal| {
         terminal
-            .draw(|frame| draw_dashboard_frame(frame, workers, stats, backlog))
+            .draw(|frame| {
+                draw_dashboard_frame(
+                    frame,
+                    workers,
+                    stats,
+                    backlog,
+                    heartbeat_interval_seconds,
+                    lease_timeout_seconds,
+                )
+            })
             .map(|_| ())
             .map_err(|e| GardenerError::Io(e.to_string()))
     })
@@ -332,6 +410,72 @@ pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
     })
 }
 
+pub fn draw_shutdown_screen_live(title: &str, message: &str) -> Result<(), GardenerError> {
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(|frame| draw_shutdown_frame(frame, title, message))
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
+fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &str) {
+    let is_error = title.to_ascii_lowercase().contains("error")
+        || title.to_ascii_lowercase().contains("fail");
+    let accent = if is_error {
+        Color::Red
+    } else {
+        Color::Rgb(85, 198, 255)
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "GARDENER ",
+                Style::default()
+                    .fg(Color::Rgb(85, 198, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                title,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        chunks[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(message.to_string()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(accent)),
+        ),
+        chunks[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new("Press Ctrl+C to exit").block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        chunks[2],
+    );
+}
+
 pub fn close_live_terminal() -> Result<(), GardenerError> {
     LIVE_TUI.with(|cell| -> Result<(), GardenerError> {
         let mut slot = cell.borrow_mut();
@@ -344,7 +488,11 @@ pub fn close_live_terminal() -> Result<(), GardenerError> {
                 .map_err(|e| GardenerError::Io(e.to_string()))?;
         }
         Ok(())
-    })
+    })?;
+    LIVE_TUI_SIZE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    Ok(())
 }
 
 fn with_live_terminal<F>(f: F) -> Result<(), GardenerError>
@@ -360,28 +508,106 @@ where
             let backend = CrosstermBackend::new(stdout);
             let terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
             *slot = Some(terminal);
+            let size = crossterm::terminal::size().map_err(|e| GardenerError::Io(e.to_string()))?;
+            LIVE_TUI_SIZE.with(|size_cell| {
+                *size_cell.borrow_mut() = Some(size);
+            });
         }
-        f(slot.as_mut().expect("live terminal initialized"))
+        let size = crossterm::terminal::size().map_err(|e| GardenerError::Io(e.to_string()))?;
+        let resized = LIVE_TUI_SIZE.with(|size_cell| {
+            let mut current = size_cell.borrow_mut();
+            let changed = current.map(|existing| existing != size).unwrap_or(true);
+            *current = Some(size);
+            changed
+        });
+        let terminal = slot.as_mut().expect("live terminal initialized");
+        if resized {
+            terminal
+                .autoresize()
+                .map_err(|e| GardenerError::Io(e.to_string()))?;
+            terminal
+                .clear()
+                .map_err(|e| GardenerError::Io(e.to_string()))?;
+        }
+        f(terminal)
     })
 }
 
-impl ProblemClass {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Healthy => "healthy",
-            Self::Stalled => "stalled",
-            Self::Zombie => "zombie",
-        }
+fn requires_human_attention(class: ProblemClass) -> bool {
+    matches!(class, ProblemClass::Zombie)
+}
+
+fn describe_problem_for_human(row: &WorkerRow, class: ProblemClass) -> String {
+    match class {
+        ProblemClass::Zombie => format!(
+            "{} needs intervention: worker lease/session is inconsistent (last action: {}).",
+            row.worker_id,
+            humanize_action(&row.tool_line)
+        ),
+        ProblemClass::Stalled | ProblemClass::Healthy => String::new(),
     }
 }
 
-pub fn handle_key(key: char) -> &'static str {
-    match key {
-        'q' => "quit",
-        'r' => "retry",
-        'l' => "release-lease",
-        'p' => "park-escalate",
-        _ => "noop",
+fn humanize_state(state: &str) -> String {
+    match state {
+        "init" => "Startup".to_string(),
+        "backlog_sync" => "Backlog Sync".to_string(),
+        "understand" => "Understand".to_string(),
+        "planning" => "Planning".to_string(),
+        "doing" => "Doing".to_string(),
+        "gitting" => "Git + PR".to_string(),
+        "reviewing" => "Reviewing".to_string(),
+        "merging" => "Merging".to_string(),
+        "complete" => "Complete".to_string(),
+        "failed" => "Failed".to_string(),
+        "working" => "Working".to_string(),
+        "idle" => "Idle".to_string(),
+        _ => title_case_words(state),
+    }
+}
+
+fn humanize_action(action: &str) -> String {
+    if action.eq_ignore_ascii_case("orchestrator") {
+        return "Coordinator".to_string();
+    }
+    title_case_words(action)
+}
+
+fn humanize_breadcrumb(path: &str) -> String {
+    path.split('>')
+        .map(title_case_words)
+        .collect::<Vec<_>>()
+        .join(" > ")
+}
+
+fn title_case_words(raw: &str) -> String {
+    let mut out = String::new();
+    let mut in_word = false;
+    let mut capitalize = true;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if !in_word {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                in_word = true;
+                capitalize = true;
+            }
+            if capitalize {
+                out.push(ch.to_ascii_uppercase());
+                capitalize = false;
+            } else {
+                out.push(ch.to_ascii_lowercase());
+            }
+        } else if in_word {
+            in_word = false;
+        }
+    }
+
+    if out.is_empty() {
+        raw.to_string()
+    } else {
+        out
     }
 }
 
@@ -539,8 +765,8 @@ fn teardown_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_problem, handle_key, render_dashboard, BacklogView, ProblemClass, QueueStats,
-        WorkerRow,
+        classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
+        BacklogView, ProblemClass, QueueStats, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -598,15 +824,45 @@ mod tests {
         );
         assert!(frame.contains("Queue"));
         assert!(frame.contains("Workers"));
-        assert!(frame.contains("Problems"));
+        assert!(!frame.contains("Problems"));
         assert!(frame.contains("Backlog"));
         assert!(frame.contains("In Progress"));
         assert!(frame.contains("Queued"));
+        assert!(frame.contains("State:"));
+        assert!(frame.contains("Action:"));
+        assert!(!frame.contains("status="));
+        assert!(!frame.contains("action="));
 
-        assert_eq!(handle_key('q'), "quit");
-        assert_eq!(handle_key('r'), "retry");
-        assert_eq!(handle_key('l'), "release-lease");
-        assert_eq!(handle_key('p'), "park-escalate");
-        assert_eq!(handle_key('x'), "noop");
+        // handle_key removed — real dispatch uses hotkeys::action_for_key
+    }
+
+    #[test]
+    fn shows_problems_only_when_human_intervention_is_needed() {
+        let frame = render_dashboard(
+            &[worker(901, false)],
+            &QueueStats {
+                ready: 0,
+                active: 1,
+                failed: 0,
+                p0: 1,
+                p1: 0,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            80,
+            20,
+        );
+        assert!(frame.contains("Problems Requiring Human"));
+        assert!(frame.contains("needs intervention"));
+    }
+
+    #[test]
+    fn humanized_labels_are_readable() {
+        assert_eq!(humanize_state("backlog_sync"), "Backlog Sync");
+        assert_eq!(humanize_action("orchestrator"), "Coordinator");
+        assert_eq!(
+            humanize_breadcrumb("boot>backlog_sync"),
+            "Boot > Backlog Sync"
+        );
     }
 }

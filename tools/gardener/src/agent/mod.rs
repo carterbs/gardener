@@ -1,10 +1,12 @@
 use crate::errors::GardenerError;
-use crate::protocol::StepResult;
-use crate::runtime::{FileSystem, ProcessRunner};
+use crate::logging::append_run_log;
+use crate::protocol::{AgentEvent, StepResult};
+use crate::runtime::{Clock, FileSystem, ProcessRunner};
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 pub mod claude;
 pub mod codex;
@@ -19,12 +21,10 @@ pub struct AdapterContext {
     pub cwd: PathBuf,
     pub prompt_version: String,
     pub context_manifest_hash: String,
-    pub knowledge_refs: Vec<String>,
     pub output_schema: Option<PathBuf>,
     pub output_file: Option<PathBuf>,
     pub permissive_mode: bool,
     pub max_turns: Option<u32>,
-    pub cancel_requested: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -57,6 +57,7 @@ pub trait AgentAdapter: Send + Sync {
         process_runner: &dyn ProcessRunner,
         context: &AdapterContext,
         prompt: &str,
+        on_event: Option<&mut dyn FnMut(&AgentEvent)>,
     ) -> Result<StepResult, GardenerError>;
 }
 
@@ -64,14 +65,58 @@ pub fn probe_and_persist(
     adapters: &[&dyn AgentAdapter],
     process_runner: &dyn ProcessRunner,
     file_system: &dyn FileSystem,
+    clock: &dyn Clock,
     cache_root: &Path,
 ) -> Result<CapabilitySnapshot, GardenerError> {
+    append_run_log(
+        "info",
+        "agent.probe.started",
+        json!({
+            "adapter_count": adapters.len(),
+            "cache_root": cache_root.display().to_string()
+        }),
+    );
     let mut caps = Vec::new();
     for adapter in adapters {
-        caps.push(adapter.probe_capabilities(process_runner)?);
+        let backend = adapter.backend();
+        append_run_log(
+            "debug",
+            "agent.probe.adapter",
+            json!({
+                "backend": backend.as_str()
+            }),
+        );
+        match adapter.probe_capabilities(process_runner) {
+            Ok(cap) => {
+                append_run_log(
+                    "info",
+                    "agent.probe.adapter.ok",
+                    json!({
+                        "backend": backend.as_str(),
+                        "version": cap.version,
+                        "supports_stream_json": cap.supports_stream_json,
+                        "supports_max_turns": cap.supports_max_turns,
+                        "supports_output_schema": cap.supports_output_schema
+                    }),
+                );
+                caps.push(cap);
+            }
+            Err(err) => {
+                append_run_log(
+                    "warn",
+                    "agent.probe.adapter.failed",
+                    json!({
+                        "backend": backend.as_str(),
+                        "error": err.to_string()
+                    }),
+                );
+                return Err(err);
+            }
+        }
     }
 
-    let generated_at_unix = SystemTime::now()
+    let generated_at_unix = clock
+        .now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
@@ -88,11 +133,28 @@ pub fn probe_and_persist(
         .map_err(|e| GardenerError::Process(format!("capability snapshot encode failed: {e}")))?;
     file_system.write_string(&path, &text)?;
 
+    append_run_log(
+        "info",
+        "agent.probe.persisted",
+        json!({
+            "path": path.display().to_string(),
+            "adapter_count": snapshot.adapters.len(),
+            "generated_at_unix": generated_at_unix
+        }),
+    );
+
     Ok(snapshot)
 }
 
 pub fn validate_model(model: &str) -> Result<(), GardenerError> {
     if model.trim().is_empty() || model.trim() == "..." || model.eq_ignore_ascii_case("todo") {
+        append_run_log(
+            "error",
+            "agent.model.invalid",
+            json!({
+                "model": model
+            }),
+        );
         return Err(GardenerError::InvalidConfig(
             "model value is invalid; configure a real model id".to_string(),
         ));
@@ -106,7 +168,7 @@ mod tests {
         probe_and_persist, validate_model, AdapterCapabilities, AdapterContext, AgentAdapter,
     };
     use crate::protocol::{AgentTerminal, StepResult};
-    use crate::runtime::{FakeFileSystem, FakeProcessRunner, FileSystem};
+    use crate::runtime::{FakeClock, FakeFileSystem, FakeProcessRunner, FileSystem};
     use crate::types::AgentKind;
     use serde_json::json;
     use std::path::Path;
@@ -134,6 +196,7 @@ mod tests {
             _process_runner: &dyn crate::runtime::ProcessRunner,
             _context: &AdapterContext,
             _prompt: &str,
+            _on_event: Option<&mut dyn FnMut(&crate::protocol::AgentEvent)>,
         ) -> Result<StepResult, crate::errors::GardenerError> {
             Ok(StepResult {
                 terminal: AgentTerminal::Success,
@@ -148,9 +211,10 @@ mod tests {
     fn probe_persists_capability_snapshot() {
         let fs = FakeFileSystem::default();
         let runner = FakeProcessRunner::default();
+        let clock = FakeClock::default();
         let adapter = TestAdapter;
-        let snapshot =
-            probe_and_persist(&[&adapter], &runner, &fs, Path::new("/repo")).expect("snapshot");
+        let snapshot = probe_and_persist(&[&adapter], &runner, &fs, &clock, Path::new("/repo"))
+            .expect("snapshot");
         assert_eq!(snapshot.adapters.len(), 1);
         assert!(fs.exists(Path::new("/repo/.cache/gardener/adapter-capabilities.json")));
     }

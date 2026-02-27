@@ -1,8 +1,10 @@
 use crate::errors::GardenerError;
 use crate::git::{GitClient, MergeMode};
+use crate::logging::append_run_log;
 use crate::priority::Priority;
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use serde::Deserialize;
+use serde_json::json;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -34,7 +36,70 @@ impl<'a> GhClient<'a> {
         }
     }
 
+    pub fn create_pr(&self, title: &str, body: &str) -> Result<(u64, String), GardenerError> {
+        #[derive(Deserialize)]
+        struct PrCreateOutput {
+            number: u64,
+            url: String,
+        }
+        append_run_log(
+            "info",
+            "gh.pr.create.started",
+            json!({ "cwd": self.cwd.display().to_string(), "title": title }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "create".to_string(),
+                "--title".to_string(),
+                title.to_string(),
+                "--body".to_string(),
+                body.to_string(),
+                "--json".to_string(),
+                "number,url".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "gh.pr.create.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "title": title,
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "gh pr create failed: {}",
+                out.stderr
+            )));
+        }
+        let parsed: PrCreateOutput = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid gh pr create json: {e}")))?;
+        append_run_log(
+            "info",
+            "gh.pr.create.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "pr_number": parsed.number,
+                "pr_url": parsed.url
+            }),
+        );
+        Ok((parsed.number, parsed.url))
+    }
+
     pub fn view_pr(&self, pr_number: u64) -> Result<PrView, GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.view.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "pr_number": pr_number
+            }),
+        );
         let out = self.runner.run(ProcessRequest {
             program: "gh".to_string(),
             args: vec![
@@ -47,13 +112,36 @@ impl<'a> GhClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "gh.pr.view.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "pr_number": pr_number,
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
             return Err(GardenerError::Process(format!(
                 "gh pr view failed: {}",
                 out.stderr
             )));
         }
-        serde_json::from_str(&out.stdout)
-            .map_err(|e| GardenerError::Process(format!("invalid gh pr view json: {e}")))
+        let pr: PrView = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid gh pr view json: {e}")))?;
+        append_run_log(
+            "info",
+            "gh.pr.view.fetched",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "pr_number": pr_number,
+                "state": pr.state,
+                "head_ref_name": pr.head_ref_name,
+                "merged_at": pr.merged_at,
+                "merge_commit_oid": pr.merge_commit.as_ref().map(|c| c.oid.as_str())
+            }),
+        );
+        Ok(pr)
     }
 
     pub fn verify_merged_and_validated(
@@ -63,9 +151,28 @@ impl<'a> GhClient<'a> {
         merge_mode: MergeMode,
         validation_command: &str,
     ) -> Result<String, GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.verify.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "pr_number": pr_number,
+                "merge_mode": format!("{:?}", merge_mode),
+                "validation_command": validation_command
+            }),
+        );
         let pr = self.view_pr(pr_number)?;
         let is_merged = pr.state.eq_ignore_ascii_case("merged") || pr.merged_at.is_some();
         if !is_merged {
+            append_run_log(
+                "warn",
+                "gh.pr.verify.not_merged",
+                json!({
+                    "pr_number": pr_number,
+                    "state": pr.state,
+                    "merged_at": pr.merged_at
+                }),
+            );
             return Err(GardenerError::Process(
                 "pr is not merged; deterministic escalation required".to_string(),
             ));
@@ -74,21 +181,52 @@ impl<'a> GhClient<'a> {
             .merge_commit
             .as_ref()
             .map(|c| c.oid.clone())
-            .ok_or_else(|| GardenerError::Process("merged pr missing merge commit".to_string()))?;
+            .ok_or_else(|| {
+                append_run_log(
+                    "error",
+                    "gh.pr.verify.missing_merge_commit",
+                    json!({
+                        "pr_number": pr_number,
+                        "state": pr.state
+                    }),
+                );
+                GardenerError::Process("merged pr missing merge commit".to_string())
+            })?;
 
         if merge_mode == MergeMode::MergeToMain && !git.verify_ancestor(&merge_sha, "main")? {
+            append_run_log(
+                "error",
+                "gh.pr.verify.not_ancestor_of_main",
+                json!({
+                    "pr_number": pr_number,
+                    "merge_sha": merge_sha
+                }),
+            );
             return Err(GardenerError::Process(
                 "merge commit is not an ancestor of main".to_string(),
             ));
         }
 
         git.run_validation_command(validation_command)?;
+        append_run_log(
+            "info",
+            "gh.pr.verify.succeeded",
+            json!({
+                "pr_number": pr_number,
+                "merge_sha": merge_sha,
+                "merge_mode": format!("{:?}", merge_mode)
+            }),
+        );
         Ok(merge_sha)
     }
 }
 
-pub fn upgrade_unmerged_collision_priority(_existing: Priority) -> Priority {
-    Priority::P0
+pub fn upgrade_unmerged_collision_priority(existing: Priority) -> Priority {
+    match existing {
+        Priority::P0 => Priority::P0,
+        Priority::P1 => Priority::P0,
+        Priority::P2 => Priority::P1,
+    }
 }
 
 #[cfg(test)]
@@ -126,10 +264,18 @@ mod tests {
     }
 
     #[test]
-    fn unmerged_collision_always_upgrades_to_p0() {
+    fn unmerged_collision_priority_escalates_one_level() {
+        assert_eq!(
+            upgrade_unmerged_collision_priority(Priority::P0),
+            Priority::P0
+        );
+        assert_eq!(
+            upgrade_unmerged_collision_priority(Priority::P1),
+            Priority::P0
+        );
         assert_eq!(
             upgrade_unmerged_collision_priority(Priority::P2),
-            Priority::P0
+            Priority::P1
         );
     }
 }

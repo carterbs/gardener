@@ -1,12 +1,16 @@
 use crate::errors::GardenerError;
 use crate::log_retention::enforce_total_budget;
-use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 50 * 1024 * 1024;
+pub const DEFAULT_RUN_LOG_RELATIVE_PATH: &str = ".cache/gardener/otel-logs.jsonl";
 
 #[derive(Debug, Clone)]
 pub struct JsonlLogger {
@@ -15,11 +19,24 @@ pub struct JsonlLogger {
     pub budget_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct LogEvent<'a> {
-    pub level: &'a str,
-    pub event_type: &'a str,
-    pub payload: Value,
+#[derive(Debug, Clone)]
+struct RunLogContext {
+    run_id: String,
+    trace_id: String,
+    span_id: String,
+    working_dir: String,
+}
+
+static RUN_LOGGER: OnceLock<Mutex<Option<JsonlLogger>>> = OnceLock::new();
+static RUN_CONTEXT: OnceLock<Mutex<Option<RunLogContext>>> = OnceLock::new();
+static RUN_LOG_NONCE: AtomicU64 = AtomicU64::new(1);
+
+fn run_logger_slot() -> &'static Mutex<Option<JsonlLogger>> {
+    RUN_LOGGER.get_or_init(|| Mutex::new(None))
+}
+
+fn run_context_slot() -> &'static Mutex<Option<RunLogContext>> {
+    RUN_CONTEXT.get_or_init(|| Mutex::new(None))
 }
 
 impl JsonlLogger {
@@ -31,17 +48,11 @@ impl JsonlLogger {
         }
     }
 
-    pub fn append(&self, event: &LogEvent<'_>) -> Result<(), GardenerError> {
+    pub fn append_json(&self, payload: &Value) -> Result<(), GardenerError> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| GardenerError::Io(e.to_string()))?;
         }
-        let truncated = truncate_json(event.payload.clone(), self.max_payload_bytes);
-        let line = serde_json::to_string(&LogEvent {
-            level: event.level,
-            event_type: event.event_type,
-            payload: truncated,
-        })
-        .map_err(|e| GardenerError::Io(e.to_string()))?;
+        let line = serde_json::to_string(payload).map_err(|e| GardenerError::Io(e.to_string()))?;
 
         let mut file = OpenOptions::new()
             .create(true)
@@ -58,6 +69,127 @@ impl JsonlLogger {
         }
 
         Ok(())
+    }
+}
+
+pub fn default_run_log_path(working_dir: &Path) -> PathBuf {
+    working_dir.join(DEFAULT_RUN_LOG_RELATIVE_PATH)
+}
+
+pub fn init_run_logger(path: impl AsRef<Path>, working_dir: &Path) -> String {
+    let run_id = random_hex(16);
+    let context = RunLogContext {
+        run_id: run_id.clone(),
+        trace_id: random_hex(16),
+        span_id: random_hex(8),
+        working_dir: working_dir.display().to_string(),
+    };
+
+    let mut logger_slot = run_logger_slot().lock().expect("run logger lock");
+    *logger_slot = Some(JsonlLogger::new(path));
+
+    let mut context_slot = run_context_slot().lock().expect("run context lock");
+    *context_slot = Some(context);
+    run_id
+}
+
+pub fn clear_run_logger() {
+    let mut logger_slot = run_logger_slot().lock().expect("run logger lock");
+    *logger_slot = None;
+    let mut context_slot = run_context_slot().lock().expect("run context lock");
+    *context_slot = None;
+}
+
+pub fn set_run_working_dir(path: &Path) {
+    let mut context_slot = run_context_slot().lock().expect("run context lock");
+    if let Some(context) = context_slot.as_mut() {
+        context.working_dir = path.display().to_string();
+    }
+}
+
+pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
+    let logger = {
+        let logger_slot = run_logger_slot().lock().expect("run logger lock");
+        logger_slot.clone()
+    };
+    let context = {
+        let context_slot = run_context_slot().lock().expect("run context lock");
+        context_slot.clone()
+    };
+
+    let (Some(logger), Some(context)) = (logger, context) else {
+        return;
+    };
+
+    let ts_ns = now_unix_nanos();
+    let (severity_text, severity_number) = to_otel_severity(level);
+    let truncated_payload = truncate_json(payload, logger.max_payload_bytes);
+    let payload_string =
+        serde_json::to_string(&truncated_payload).unwrap_or_else(|_| "\"<encode-error>\"".into());
+
+    let line = json!({
+        "resource": {
+            "attributes": [
+                kv_attr("service.name", "gardener"),
+                kv_attr("service.version", env!("CARGO_PKG_VERSION")),
+                kv_attr("service.namespace", "gardener"),
+                kv_attr("process.runtime.name", "rust")
+            ]
+        },
+        "scope": {
+            "name": "gardener.runtime",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "logRecord": {
+            "timeUnixNano": ts_ns,
+            "observedTimeUnixNano": ts_ns,
+            "severityNumber": severity_number,
+            "severityText": severity_text,
+            "body": {
+                "stringValue": event_type
+            },
+            "attributes": [
+                kv_attr("event.type", event_type),
+                kv_attr("run.id", &context.run_id),
+                kv_attr("run.working_dir", &context.working_dir),
+                kv_attr("gardener.payload", &payload_string)
+            ],
+            "traceId": context.trace_id,
+            "spanId": context.span_id,
+            "flags": 1
+        },
+        "event_type": event_type,
+        "payload": truncated_payload
+    });
+
+    let _ = logger.append_json(&line);
+}
+
+fn kv_attr(key: &str, value: &str) -> Value {
+    json!({
+        "key": key,
+        "value": {
+            "stringValue": value
+        }
+    })
+}
+
+fn now_unix_nanos() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        .to_string()
+}
+
+fn to_otel_severity(level: &str) -> (&'static str, u8) {
+    match level.to_ascii_lowercase().as_str() {
+        "trace" => ("TRACE", 1),
+        "debug" => ("DEBUG", 5),
+        "warn" | "warning" => ("WARN", 13),
+        "error" => ("ERROR", 17),
+        "fatal" => ("FATAL", 21),
+        _ => ("INFO", 9),
     }
 }
 
@@ -78,30 +210,94 @@ fn truncate_json(value: Value, max_bytes: usize) -> Value {
     Value::String(format!("{truncated}..."))
 }
 
+fn random_hex(bytes: usize) -> String {
+    use std::fmt::Write as _;
+    let mut hasher = Sha256::new();
+    let nonce = RUN_LOG_NONCE.fetch_add(1, Ordering::Relaxed);
+    let now_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    hasher.update(nonce.to_le_bytes());
+    hasher.update(now_ns.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(bytes * 2);
+    for byte in digest.iter().take(bytes) {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{structured_fallback_line, JsonlLogger, LogEvent};
+    use super::{
+        append_run_log, clear_run_logger, default_run_log_path, init_run_logger,
+        structured_fallback_line, JsonlLogger,
+    };
     use serde_json::json;
+    use std::path::Path;
 
     #[test]
-    fn logger_truncates_large_payloads_and_writes_jsonl() {
+    fn logger_writes_jsonl() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.jsonl");
+        let logger = JsonlLogger::new(&path);
+        logger
+            .append_json(&json!({"event_type":"tool","payload":{"text":"ok"}}))
+            .expect("append");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"event_type\":\"tool\""));
+    }
+
+    #[test]
+    fn otel_log_line_contains_log_record_shape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("otel.jsonl");
+        let run_id = init_run_logger(&path, dir.path());
+        append_run_log("info", "run.started", json!({"foo":"bar"}));
+        clear_run_logger();
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"logRecord\""));
+        assert!(text.contains("\"severityText\":\"INFO\""));
+        assert!(text.contains(&run_id));
+    }
+
+    #[test]
+    fn payload_is_truncated_when_needed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("otel.jsonl");
+        let _run_id = init_run_logger(&path, dir.path());
+        {
+            let mut slot = super::run_logger_slot().lock().expect("run logger lock");
+            let logger = slot.as_mut().expect("logger initialized");
+            logger.max_payload_bytes = 20;
+        }
+        append_run_log(
+            "info",
+            "payload.large",
+            json!({"text": "abcdefghijklmnopqrstuvwxyz"}),
+        );
+        clear_run_logger();
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("..."));
+    }
+
+    #[test]
+    fn default_path_points_at_cache_file() {
+        let path = default_run_log_path(Path::new("/repo"));
+        assert!(path.ends_with(".cache/gardener/otel-logs.jsonl"));
+    }
+
+    #[test]
+    fn logger_enforces_budget() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("run.jsonl");
         let mut logger = JsonlLogger::new(&path);
-        logger.max_payload_bytes = 20;
         logger.budget_bytes = 1024;
-
         logger
-            .append(&LogEvent {
-                level: "info",
-                event_type: "tool",
-                payload: json!({"text": "abcdefghijklmnopqrstuvwxyz"}),
-            })
+            .append_json(&json!({"event_type":"tool"}))
             .expect("append");
-
-        let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.contains("\"event_type\":\"tool\""));
-        assert!(text.contains("..."));
+        assert!(path.exists());
     }
 
     #[test]

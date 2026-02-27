@@ -1,9 +1,11 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner};
-use crate::triage_discovery::{DimensionAssessment, DiscoveryAssessment};
+use crate::triage_discovery::DiscoveryAssessment;
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use serde_json::json;
+use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +73,18 @@ pub fn write_profile(
     }
     let toml =
         toml::to_string_pretty(profile).map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+    append_run_log(
+        "info",
+        "repo_intelligence.profile.written",
+        json!({
+            "path": path.display().to_string(),
+            "schema_version": profile.meta.schema_version,
+            "head_sha": profile.meta.head_sha,
+            "primary_agent": profile.detected_agent.primary,
+            "readiness_grade": profile.agent_readiness.readiness_grade,
+            "readiness_score": profile.agent_readiness.readiness_score
+        }),
+    );
     fs.write_string(path, &toml)
 }
 
@@ -78,8 +92,28 @@ pub fn read_profile(
     fs: &dyn FileSystem,
     path: &Path,
 ) -> Result<RepoIntelligenceProfile, GardenerError> {
+    append_run_log(
+        "debug",
+        "repo_intelligence.profile.reading",
+        json!({
+            "path": path.display().to_string()
+        }),
+    );
     let raw = fs.read_to_string(path)?;
-    toml::from_str(&raw).map_err(|e| GardenerError::ConfigParse(e.to_string()))
+    let profile: RepoIntelligenceProfile =
+        toml::from_str(&raw).map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+    append_run_log(
+        "debug",
+        "repo_intelligence.profile.read",
+        json!({
+            "path": path.display().to_string(),
+            "head_sha": profile.meta.head_sha,
+            "schema_version": profile.meta.schema_version,
+            "primary_agent": profile.detected_agent.primary,
+            "readiness_grade": profile.agent_readiness.readiness_grade
+        }),
+    );
+    Ok(profile)
 }
 
 pub fn current_head_sha(
@@ -92,9 +126,27 @@ pub fn current_head_sha(
         cwd: Some(cwd.to_path_buf()),
     })?;
     if out.exit_code != 0 {
+        append_run_log(
+            "warn",
+            "repo_intelligence.git.head_sha_failed",
+            json!({
+                "cwd": cwd.display().to_string(),
+                "exit_code": out.exit_code,
+                "stderr": out.stderr
+            }),
+        );
         return Err(GardenerError::Process(out.stderr));
     }
-    Ok(out.stdout.trim().to_string())
+    let sha = out.stdout.trim().to_string();
+    append_run_log(
+        "debug",
+        "repo_intelligence.git.head_sha",
+        json!({
+            "cwd": cwd.display().to_string(),
+            "sha": sha
+        }),
+    );
+    Ok(sha)
 }
 
 pub fn commits_since_profile_head(
@@ -112,27 +164,28 @@ pub fn commits_since_profile_head(
         cwd: Some(cwd.to_path_buf()),
     })?;
     if out.exit_code != 0 {
+        append_run_log(
+            "warn",
+            "repo_intelligence.git.commits_since_failed",
+            json!({
+                "cwd": cwd.display().to_string(),
+                "profile_head": profile_head,
+                "exit_code": out.exit_code
+            }),
+        );
         return Ok(0);
     }
-    Ok(out.stdout.trim().parse::<u64>().unwrap_or(0))
-}
-
-pub fn is_stale(
-    profile: &RepoIntelligenceProfile,
-    process_runner: &dyn ProcessRunner,
-    cwd: &Path,
-    stale_after_commits: u64,
-) -> bool {
-    if let Ok(current) = current_head_sha(process_runner, cwd) {
-        if current == profile.meta.head_sha {
-            return false;
-        }
-        if let Ok(diff) = commits_since_profile_head(process_runner, cwd, &profile.meta.head_sha) {
-            return diff > stale_after_commits;
-        }
-        return true;
-    }
-    false
+    let count = out.stdout.trim().parse::<u64>().unwrap_or(0);
+    append_run_log(
+        "debug",
+        "repo_intelligence.git.commits_since",
+        json!({
+            "cwd": cwd.display().to_string(),
+            "profile_head": profile_head,
+            "commits_since": count
+        }),
+    );
+    Ok(count)
 }
 
 pub fn build_profile(
@@ -146,7 +199,24 @@ pub fn build_profile(
     claude_signals: Vec<String>,
     codex_signals: Vec<String>,
     validation_command: String,
+    agents_md_present: bool,
 ) -> RepoIntelligenceProfile {
+    append_run_log(
+        "info",
+        "repo_intelligence.build_profile.started",
+        json!({
+            "working_dir": working_dir.display().to_string(),
+            "repo_root": repo_root.display().to_string(),
+            "head_sha": head_sha,
+            "discovery_used": discovery_used,
+            "primary_agent": primary_agent.map(|a| a.as_str()),
+            "agents_md_present": agents_md_present,
+            "validation_command": validation_command,
+            "claude_signals_count": claude_signals.len(),
+            "codex_signals_count": codex_signals.len()
+        }),
+    );
+
     let now_secs = clock
         .now()
         .duration_since(UNIX_EPOCH)
@@ -156,10 +226,29 @@ pub fn build_profile(
 
     let mut effective_discovery = discovery.clone();
     if !discovery_used {
+        append_run_log(
+            "debug",
+            "repo_intelligence.build_profile.discovery_skipped",
+            json!({ "reason": "discovery_used=false, substituting unknown assessment" }),
+        );
         effective_discovery = DiscoveryAssessment::unknown();
     }
 
     let readiness = derive_agent_readiness(&effective_discovery);
+    append_run_log(
+        "info",
+        "repo_intelligence.build_profile.readiness",
+        json!({
+            "readiness_grade": readiness.readiness_grade,
+            "readiness_score": readiness.readiness_score,
+            "primary_gap": readiness.primary_gap,
+            "agent_steering_score": readiness.agent_steering_score,
+            "knowledge_accessible_score": readiness.knowledge_accessible_score,
+            "mechanical_guardrails_score": readiness.mechanical_guardrails_score,
+            "local_feedback_loop_score": readiness.local_feedback_loop_score,
+            "coverage_signal_score": readiness.coverage_signal_score
+        }),
+    );
     RepoIntelligenceProfile {
         meta: RepoMeta {
             schema_version: 1,
@@ -175,7 +264,7 @@ pub fn build_profile(
                 .unwrap_or_else(|| "unknown".to_string()),
             claude_signals,
             codex_signals,
-            agents_md_present: false,
+            agents_md_present,
             user_confirmed: true,
         },
         discovery: effective_discovery,
@@ -245,19 +334,4 @@ fn readiness_grade(score: i64) -> &'static str {
         40..=59 => "D",
         _ => "F",
     }
-}
-
-#[allow(dead_code)]
-pub fn profile_path_from_config(path: &str, working_dir: &PathBuf) -> PathBuf {
-    let profile = PathBuf::from(path);
-    if profile.is_absolute() {
-        profile
-    } else {
-        working_dir.join(profile)
-    }
-}
-
-#[allow(dead_code)]
-fn _is_unknown(dim: &DimensionAssessment) -> bool {
-    dim.grade == "unknown"
 }

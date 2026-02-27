@@ -1,1 +1,6 @@
 target/
+.cache/
+.DS_STORE
+.worktrees/
+docs/quality-grades.md
+docs/quality-grades.md.stamp

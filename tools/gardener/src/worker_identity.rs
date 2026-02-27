@@ -36,12 +36,6 @@ impl WorkerIdentity {
         self.attempt = self.attempt.saturating_add(1);
         self.session = next_session(None);
     }
-
-    pub fn restart_with_resume_link(&mut self) {
-        self.attempt = self.attempt.saturating_add(1);
-        let previous = self.session.session_id.clone();
-        self.session = next_session(Some(previous));
-    }
 }
 
 fn next_session(resume_from_session_id: Option<String>) -> SessionIdentity {
@@ -68,14 +62,5 @@ mod tests {
         assert_eq!(id.worker_id, worker_id);
         assert_ne!(id.session.session_id, first_session);
         assert!(id.session.resume_from_session_id.is_none());
-
-        let retry_session = id.session.session_id.clone();
-        id.restart_with_resume_link();
-        assert_eq!(id.worker_id, worker_id);
-        assert_ne!(id.session.session_id, retry_session);
-        assert_eq!(
-            id.session.resume_from_session_id.as_deref(),
-            Some(retry_session.as_str())
-        );
     }
 }

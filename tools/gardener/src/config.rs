@@ -1,11 +1,13 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::runtime::{FileSystem, ProcessRequest, ProcessRunner};
-use crate::types::{
-    AgentKind, RuntimeScope, ValidationCommandResolution, ValidationCommandSource, WorkerState,
-};
+use crate::types::{AgentKind, RuntimeScope, ValidationCommandResolution, WorkerState};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+const DEFAULT_CONFIG_FILE: &str = "gardener.toml";
 
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
@@ -60,7 +62,6 @@ pub struct StartupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationConfig {
     pub command: String,
-    pub allow_agent_discovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,8 +79,6 @@ pub struct StateConfig {
 pub struct SchedulerConfig {
     pub lease_timeout_seconds: u64,
     pub heartbeat_interval_seconds: u64,
-    pub starvation_threshold_seconds: u64,
-    pub reconcile_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,11 +109,31 @@ pub struct SeedingConfig {
     pub max_turns: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GitOutputMode {
+    CommitOnly,
+    Push,
+    #[default]
+    PullRequest,
+}
+
+impl GitOutputMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CommitOnly => "commit_only",
+            Self::Push => "push",
+            Self::PullRequest => "pull_request",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionConfig {
     pub permissions_mode: String,
     pub worker_mode: String,
     pub test_mode: bool,
+    pub git_output_mode: GitOutputMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,7 +161,6 @@ impl Default for AppConfig {
             },
             validation: ValidationConfig {
                 command: "npm run validate".to_string(),
-                allow_agent_discovery: true,
             },
             agent: AgentConfig {
                 default: Some(AgentKind::Codex),
@@ -151,8 +169,6 @@ impl Default for AppConfig {
             scheduler: SchedulerConfig {
                 lease_timeout_seconds: 900,
                 heartbeat_interval_seconds: 15,
-                starvation_threshold_seconds: 180,
-                reconcile_interval_seconds: 30,
             },
             prompts: PromptsConfig {
                 token_budget: TokenBudgetConfig {
@@ -177,6 +193,7 @@ impl Default for AppConfig {
                 permissions_mode: "permissive_v1".to_string(),
                 worker_mode: "normal".to_string(),
                 test_mode: false,
+                git_output_mode: GitOutputMode::PullRequest,
             },
             triage: TriageConfig {
                 output_path: ".gardener/repo-intelligence.toml".to_string(),
@@ -228,15 +245,12 @@ struct PartialStartupConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PartialValidationConfig {
     command: Option<String>,
-    allow_agent_discovery: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PartialSchedulerConfig {
     lease_timeout_seconds: Option<u64>,
     heartbeat_interval_seconds: Option<u64>,
-    starvation_threshold_seconds: Option<u64>,
-    reconcile_interval_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -272,6 +286,7 @@ struct PartialExecutionConfig {
     permissions_mode: Option<String>,
     worker_mode: Option<String>,
     test_mode: Option<bool>,
+    git_output_mode: Option<GitOutputMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -294,20 +309,108 @@ pub fn load_config(
     fs: &dyn FileSystem,
     process_runner: &dyn ProcessRunner,
 ) -> Result<(AppConfig, RuntimeScope), GardenerError> {
+    append_run_log(
+        "info",
+        "config.load.started",
+        json!({
+            "process_cwd": process_cwd.display().to_string(),
+            "config_path_override": overrides.config_path.as_ref().map(|p| p.display().to_string()),
+            "parallelism_override": overrides.parallelism,
+            "agent_override": overrides.agent.map(|a| format!("{:?}", a))
+        }),
+    );
+
     let mut cfg = AppConfig::default();
 
-    if let Some(path) = &overrides.config_path {
-        let file_contents = fs.read_to_string(path)?;
-        let partial: PartialAppConfig = toml::from_str(&file_contents)
-            .map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
+    if let Some(path) = resolve_config_path(overrides, process_cwd, fs, process_runner) {
+        append_run_log(
+            "info",
+            "config.file.found",
+            json!({
+                "path": path.display().to_string()
+            }),
+        );
+        let file_contents = fs.read_to_string(&path)?;
+        let partial: PartialAppConfig = toml::from_str(&file_contents).map_err(|e| {
+            append_run_log(
+                "error",
+                "config.file.parse_error",
+                json!({
+                    "path": path.display().to_string(),
+                    "error": e.to_string()
+                }),
+            );
+            GardenerError::ConfigParse(e.to_string())
+        })?;
         merge_partial_config(&mut cfg, partial);
+    } else {
+        append_run_log(
+            "info",
+            "config.file.not_found",
+            json!({
+                "process_cwd": process_cwd.display().to_string(),
+                "using_defaults": true
+            }),
+        );
     }
 
     apply_cli_overrides(&mut cfg, overrides);
 
     let scope = resolve_scope(process_cwd, &cfg, overrides, process_runner);
-    validate_config(&cfg)?;
+
+    if let Err(e) = validate_config(&cfg) {
+        append_run_log(
+            "error",
+            "config.validation.failed",
+            json!({
+                "error": e.to_string()
+            }),
+        );
+        return Err(e);
+    }
+
+    append_run_log(
+        "info",
+        "config.loaded",
+        json!({
+            "parallelism": cfg.orchestrator.parallelism,
+            "agent_default": cfg.agent.default.map(|a| format!("{:?}", a)),
+            "validation_command": cfg.validation.command,
+            "working_dir": scope.working_dir.display().to_string(),
+            "repo_root": scope.repo_root.as_ref().map(|p| p.display().to_string()),
+            "test_mode": cfg.execution.test_mode,
+            "seeding_backend": format!("{:?}", cfg.seeding.backend),
+            "quality_report_path": cfg.quality_report.path
+        }),
+    );
+
     Ok((cfg, scope))
+}
+
+fn resolve_config_path<'a>(
+    overrides: &'a CliOverrides,
+    process_cwd: &'a Path,
+    fs: &dyn FileSystem,
+    process_runner: &dyn ProcessRunner,
+) -> Option<PathBuf> {
+    if let Some(path) = &overrides.config_path {
+        return Some(absolutize_path(process_cwd, path));
+    }
+
+    let repo_root = detect_repo_root(process_cwd, process_runner);
+    if let Some(root) = repo_root {
+        let candidate = root.join(DEFAULT_CONFIG_FILE);
+        if fs.exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    let cwd_candidate = process_cwd.join(DEFAULT_CONFIG_FILE);
+    if fs.exists(&cwd_candidate) {
+        return Some(cwd_candidate);
+    }
+
+    None
 }
 
 fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
@@ -334,9 +437,6 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         if let Some(command) = validation.command {
             cfg.validation.command = command;
         }
-        if let Some(allow_agent_discovery) = validation.allow_agent_discovery {
-            cfg.validation.allow_agent_discovery = allow_agent_discovery;
-        }
     }
 
     if let Some(agent) = partial.agent {
@@ -353,12 +453,6 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = scheduler.heartbeat_interval_seconds {
             cfg.scheduler.heartbeat_interval_seconds = value;
-        }
-        if let Some(value) = scheduler.starvation_threshold_seconds {
-            cfg.scheduler.starvation_threshold_seconds = value;
-        }
-        if let Some(value) = scheduler.reconcile_interval_seconds {
-            cfg.scheduler.reconcile_interval_seconds = value;
         }
     }
 
@@ -415,6 +509,9 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = execution.test_mode {
             cfg.execution.test_mode = value;
+        }
+        if let Some(value) = execution.git_output_mode {
+            cfg.execution.git_output_mode = value;
         }
     }
 
@@ -474,6 +571,16 @@ pub fn resolve_scope(
         process_cwd.clone()
     };
 
+    append_run_log(
+        "info",
+        "config.scope.resolved",
+        json!({
+            "process_cwd": process_cwd.display().to_string(),
+            "repo_root": repo_root.as_ref().map(|p| p.display().to_string()),
+            "working_dir": working_dir.display().to_string()
+        }),
+    );
+
     RuntimeScope {
         process_cwd,
         repo_root,
@@ -499,15 +606,38 @@ fn detect_repo_root(process_cwd: &Path, process_runner: &dyn ProcessRunner) -> O
         .ok()?;
 
     if output.exit_code != 0 {
+        append_run_log(
+            "debug",
+            "config.repo_root.not_found",
+            json!({
+                "process_cwd": process_cwd.display().to_string(),
+                "exit_code": output.exit_code
+            }),
+        );
         return None;
     }
 
     let trimmed = output.stdout.trim();
     if trimmed.is_empty() {
+        append_run_log(
+            "debug",
+            "config.repo_root.empty_output",
+            json!({
+                "process_cwd": process_cwd.display().to_string()
+            }),
+        );
         return None;
     }
 
-    Some(PathBuf::from(trimmed))
+    let root = PathBuf::from(trimmed);
+    append_run_log(
+        "debug",
+        "config.repo_root.detected",
+        json!({
+            "repo_root": root.display().to_string()
+        }),
+    );
+    Some(root)
 }
 
 pub fn resolve_validation_command(
@@ -515,35 +645,64 @@ pub fn resolve_validation_command(
     cli_override: Option<&str>,
 ) -> ValidationCommandResolution {
     if let Some(cli) = cli_override {
+        append_run_log(
+            "info",
+            "config.validation_command.resolved",
+            json!({
+                "source": "cli_override",
+                "command": cli
+            }),
+        );
         return ValidationCommandResolution {
             command: cli.to_string(),
-            source: ValidationCommandSource::CliOverride,
             startup_validate_on_boot: cfg.startup.validate_on_boot,
             startup_validation_command: cfg.startup.validation_command.clone(),
         };
     }
 
     if !cfg.validation.command.trim().is_empty() {
+        append_run_log(
+            "info",
+            "config.validation_command.resolved",
+            json!({
+                "source": "config.validation",
+                "command": cfg.validation.command
+            }),
+        );
         return ValidationCommandResolution {
             command: cfg.validation.command.clone(),
-            source: ValidationCommandSource::ConfigValidation,
             startup_validate_on_boot: cfg.startup.validate_on_boot,
             startup_validation_command: cfg.startup.validation_command.clone(),
         };
     }
 
     if let Some(startup) = &cfg.startup.validation_command {
+        append_run_log(
+            "info",
+            "config.validation_command.resolved",
+            json!({
+                "source": "config.startup",
+                "command": startup
+            }),
+        );
         return ValidationCommandResolution {
             command: startup.clone(),
-            source: ValidationCommandSource::StartupValidation,
             startup_validate_on_boot: cfg.startup.validate_on_boot,
             startup_validation_command: cfg.startup.validation_command.clone(),
         };
     }
 
+    append_run_log(
+        "warn",
+        "config.validation_command.resolved",
+        json!({
+            "source": "fallback",
+            "command": "true",
+            "reason": "no validation command configured"
+        }),
+    );
     ValidationCommandResolution {
         command: "true".to_string(),
-        source: ValidationCommandSource::AutoDiscovery,
         startup_validate_on_boot: cfg.startup.validate_on_boot,
         startup_validation_command: cfg.startup.validation_command.clone(),
     }
@@ -566,13 +725,20 @@ fn validate_config(cfg: &AppConfig) -> Result<(), GardenerError> {
         }
     }
 
-    if cfg.seeding.model.trim().is_empty()
-        || cfg.seeding.model == "..."
-        || cfg.seeding.model.eq_ignore_ascii_case("todo")
-    {
+    if model_is_invalid(&cfg.seeding.model) {
         return Err(GardenerError::InvalidConfig(
             "seeding.model must be a real model id".to_string(),
         ));
+    }
+
+    for (state_name, state_cfg) in &cfg.states {
+        if let Some(model) = &state_cfg.model {
+            if model_is_invalid(model) {
+                return Err(GardenerError::InvalidConfig(format!(
+                    "states.{state_name}.model must be a real model id"
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -588,6 +754,16 @@ pub fn effective_agent_for_state(cfg: &AppConfig, state: WorkerState) -> Option<
     cfg.agent.default
 }
 
+pub fn effective_model_for_state(cfg: &AppConfig, state: WorkerState) -> String {
+    let key = state_key(state);
+    if let Some(state_cfg) = cfg.states.get(key) {
+        if let Some(model) = &state_cfg.model {
+            return model.clone();
+        }
+    }
+    cfg.seeding.model.clone()
+}
+
 fn state_key(state: WorkerState) -> &'static str {
     match state {
         WorkerState::Understand => "understand",
@@ -601,4 +777,8 @@ fn state_key(state: WorkerState) -> &'static str {
         WorkerState::Failed => "failed",
         WorkerState::Parked => "parked",
     }
+}
+
+fn model_is_invalid(model: &str) -> bool {
+    model.trim().is_empty() || model == "..." || model.eq_ignore_ascii_case("todo")
 }

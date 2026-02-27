@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gardener Experience Mock</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg0: #0b1022;
+        --bg1: #0f1b3d;
+        --bg2: #1b2f63;
+        --ink: #e6edff;
+        --muted: #9eb0de;
+        --line: rgba(138, 161, 227, 0.23);
+        --panel: rgba(17, 27, 58, 0.74);
+        --panel-strong: rgba(16, 26, 55, 0.92);
+        --accent: #78d9ff;
+        --good: #7fe694;
+        --warn: #ffcf69;
+        --bad: #ff7a7a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        font-family: "Space Grotesk", "Avenir Next", sans-serif;
+        background:
+          radial-gradient(circle at 18% 10%, #2c64bb5a 0%, transparent 45%),
+          radial-gradient(circle at 87% 24%, #3a9abd3f 0%, transparent 50%),
+          linear-gradient(165deg, var(--bg0), var(--bg1) 48%, var(--bg2));
+        padding: 18px;
+      }
+
+      .shell {
+        max-width: 1500px;
+        margin: 0 auto;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        overflow: hidden;
+        background: linear-gradient(180deg, #0f1a3cbc 0%, #0c1633e0 100%);
+        box-shadow: 0 28px 86px rgba(1, 4, 14, 0.6);
+      }
+
+      .top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 14px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(90deg, #0d1838d4 0%, #12224a9c 100%);
+        padding: 12px 16px;
+      }
+
+      .brand h1 {
+        margin: 0;
+        font-size: 15px;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
+      .mode-switch {
+        display: flex;
+        gap: 8px;
+      }
+
+      button {
+        border: 1px solid #8ea6d455;
+        background: #182a5d66;
+        color: #dce7ff;
+        border-radius: 9px;
+        padding: 6px 11px;
+        cursor: pointer;
+        font: 600 12px "IBM Plex Mono", monospace;
+      }
+
+      button.active {
+        background: #21418e88;
+        border-color: #8fc6ff88;
+        color: white;
+      }
+
+      .view {
+        padding: 14px;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .now {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel-strong);
+        padding: 12px;
+        margin-bottom: 12px;
+      }
+
+      .now h2 {
+        margin: 0;
+        font-size: 12px;
+        color: var(--muted);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .now h3 {
+        margin: 4px 0 6px;
+        font-size: 22px;
+      }
+
+      .now p {
+        margin: 0;
+        color: #d0dcff;
+        font-size: 14px;
+      }
+
+      .garden-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .spin {
+        color: #8fd6ff;
+        font: 600 18px "IBM Plex Mono", monospace;
+      }
+
+      .verb-current {
+        color: #dff2ff;
+      }
+
+      .ellipsis {
+        display: inline-flex;
+        margin-left: 2px;
+      }
+
+      .ellipsis span {
+        opacity: 0.25;
+        animation: dotPulse 1.2s infinite;
+      }
+
+      .ellipsis span:nth-child(2) {
+        animation-delay: 0.2s;
+      }
+
+      .ellipsis span:nth-child(3) {
+        animation-delay: 0.4s;
+      }
+
+      @keyframes dotPulse {
+        0%,
+        20% {
+          opacity: 0.25;
+        }
+        50% {
+          opacity: 1;
+        }
+        100% {
+          opacity: 0.25;
+        }
+      }
+
+      .worker-metrics {
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 9px;
+        font: 600 11px "IBM Plex Mono", monospace;
+        color: #9eb0de;
+        background: rgba(19, 31, 67, 0.35);
+      }
+
+      .metric b {
+        color: #ddedff;
+      }
+
+      .step-track {
+        margin-top: 12px;
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .step {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 4px 9px;
+        font: 600 11px "IBM Plex Mono", monospace;
+        color: #8b9bc2;
+        background: rgba(19, 31, 67, 0.35);
+      }
+
+      .step.done {
+        color: #8b9bc2;
+        border-color: var(--line);
+        background: rgba(19, 31, 67, 0.35);
+      }
+
+      .step.current {
+        color: #dff2ff;
+        border-color: rgba(120, 217, 255, 0.75);
+        background: rgba(20, 63, 92, 0.55);
+      }
+
+      .step.future {
+        color: #8b9bc2;
+      }
+
+      .arrow {
+        color: #6f80ad;
+        font: 600 12px "IBM Plex Mono", monospace;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1.3fr 1fr;
+        gap: 12px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        padding: 12px;
+      }
+
+      .card h4 {
+        margin: 0 0 10px;
+        font-size: 13px;
+        color: #9cd4ff;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .activity {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        font: 500 12px "IBM Plex Mono", monospace;
+      }
+
+      .activity li {
+        padding: 8px 0;
+        border-top: 1px solid #8499bf22;
+      }
+
+      .activity li:first-child {
+        border-top: 0;
+        padding-top: 0;
+      }
+
+      .time {
+        color: #8fb9ff;
+        margin-right: 8px;
+      }
+
+      .queue {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .queue li {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        border-top: 1px solid #8499bf22;
+        padding: 8px 0;
+        font: 500 12px "IBM Plex Mono", monospace;
+      }
+
+      .queue li:first-child {
+        border-top: 0;
+      }
+
+      .pri {
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        padding: 2px 8px;
+        font-weight: 600;
+      }
+
+      .p0 {
+        color: var(--bad);
+      }
+
+      .p1 {
+        color: var(--warn);
+      }
+
+      .p2 {
+        color: var(--good);
+      }
+
+      .workers-grid {
+        display: none;
+      }
+
+      .work-stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .workers-scroll {
+        max-height: 360px;
+        overflow-y: auto;
+        padding-right: 4px;
+      }
+
+      .workers-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .worker {
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 10px;
+        background: rgba(20, 31, 62, 0.75);
+      }
+
+      .worker-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+
+      .worker-name {
+        font-size: 13px;
+        font-weight: 700;
+        color: #8fd6ff;
+      }
+
+      .worker-state {
+        color: var(--warn);
+        font: 600 11px "IBM Plex Mono", monospace;
+      }
+
+      .task {
+        font-size: 13px;
+        color: #d6e3ff;
+        margin-bottom: 7px;
+      }
+
+      .log {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        font: 500 11px "IBM Plex Mono", monospace;
+        color: #b9cbf5;
+      }
+
+      .log li {
+        border-top: 1px solid #839ac01f;
+        padding: 5px 0;
+      }
+
+      .log li:first-child {
+        border-top: 0;
+      }
+
+      .ts {
+        color: #8fb9ff;
+        margin-right: 8px;
+      }
+
+      .cmd-details {
+        margin-top: 8px;
+        border-top: 1px dashed #8598c233;
+        padding-top: 8px;
+      }
+
+      .cmd-details summary {
+        cursor: pointer;
+        color: #96c4ff;
+        font: 600 11px "IBM Plex Mono", monospace;
+      }
+
+      .cmd-details[open] summary {
+        color: #b7d8ff;
+      }
+
+      .cmd-log {
+        list-style: none;
+        margin: 8px 0 0;
+        padding: 0;
+        font: 500 11px "IBM Plex Mono", monospace;
+        color: #bcd0f8;
+      }
+
+      .cmd-log li {
+        border-top: 1px solid #839ac01f;
+        padding: 5px 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cmd-log li:first-child {
+        border-top: 0;
+      }
+
+      .help {
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        padding: 10px 14px;
+        font: 500 12px "IBM Plex Mono", monospace;
+      }
+
+      @media (max-width: 1120px) {
+        .top {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .workers-scroll {
+          max-height: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="top">
+        <div class="brand">
+          <h1>Gardener</h1>
+        </div>
+        <div class="mode-switch">
+          <button id="triageBtn">Triage/Onboarding</button>
+          <button id="workBtn">In Progress</button>
+        </div>
+      </header>
+
+      <section id="triageView" class="view">
+        <article class="now">
+          <h2>Now</h2>
+          <h3>Triage and onboarding</h3>
+          <p>Reading repo signals, discovering standards, and building a quality-ranked backlog.</p>
+          <div class="step-track">
+            <span class="step done">Scan repository shape</span>
+            <span class="arrow">→</span>
+            <span class="step done">Detect tools and docs</span>
+            <span class="arrow">→</span>
+            <span class="step current">Build project profile</span>
+            <span class="arrow">→</span>
+            <span class="step future">Seed prioritized backlog</span>
+          </div>
+        </article>
+
+        <div class="layout">
+          <article class="card">
+            <h4>Live activity</h4>
+            <ul class="activity">
+              <li><span class="time">14:18:11</span>Loaded AGENTS.md instructions for runtime + skills.</li>
+              <li><span class="time">14:18:17</span>Detected Rust runtime entrypoint and startup policy.</li>
+              <li><span class="time">14:18:26</span>Checking quality-grade artifact and validation command wiring.</li>
+              <li><span class="time">14:18:32</span>Classifying domains by risk to seed first backlog candidates.</li>
+            </ul>
+          </article>
+
+          <aside class="card">
+            <h4>Triage artifacts</h4>
+            <ul class="queue">
+              <li><span>Detected domains</span><span class="pri p2">12</span></li>
+              <li><span>Standards/docs indexed</span><span class="pri p2">8</span></li>
+              <li><span>Candidate tasks drafted</span><span class="pri p1">17</span></li>
+              <li><span>Prioritized ready for execution</span><span class="pri p1">9</span></li>
+            </ul>
+          </aside>
+        </div>
+      </section>
+
+      <section id="workView" class="view hidden">
+        <article class="now">
+          <h2>Now</h2>
+          <h3 class="garden-title">
+            <span id="spinGlyph" class="spin">⠋</span>
+            <span id="verbCurrent" class="verb-current">Pruning</span>
+            <span class="ellipsis" aria-hidden="true"><span>.</span><span>.</span><span>.</span></span>
+          </h3>
+          <p>Working the queue in priority order and showing exactly what each worker is doing.</p>
+          <div class="worker-metrics">
+            <span class="metric"><b id="parallelConfigured">10</b> parallel workers</span>
+            <span class="metric"><b id="parallelDoing">0</b> doing</span>
+            <span class="metric"><b id="parallelReviewing">0</b> reviewing</span>
+            <span class="metric"><b id="parallelIdle">0</b> idle</span>
+          </div>
+        </article>
+
+        <div class="work-stack">
+          <article class="card">
+            <h4>Workers</h4>
+            <div class="workers-scroll">
+              <div class="workers-list">
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Lawn Mower</span>
+                    <span class="worker-state">Doing</span>
+                  </div>
+                  <div class="task">P0: startup validation recovery</div>
+                  <ul class="log">
+                    <li><span class="ts">14:22:11</span>Claimed task from scheduler</li>
+                    <li><span class="ts">14:22:18</span>Edited startup.rs recovery enqueue path</li>
+                    <li><span class="ts">14:22:29</span>Running focused tests</li>
+                  </ul>
+                  <details class="cmd-details">
+                    <summary>Optional command detail</summary>
+                    <ul class="cmd-log">
+                      <li><span class="ts">14:22:12</span>git checkout -b codex/recovery-startup-validation</li>
+                      <li><span class="ts">14:22:15</span>rg -n "validate_on_boot|validation_command" tools/gardener/src</li>
+                      <li><span class="ts">14:22:30</span>cargo test -p gardener startup -- --nocapture</li>
+                    </ul>
+                  </details>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Leaf Blower</span>
+                    <span class="worker-state">Reviewing</span>
+                  </div>
+                  <div class="task">P1: worktree cleanup hardening</div>
+                  <ul class="log">
+                    <li><span class="ts">14:21:44</span>Validation finished successfully</li>
+                    <li><span class="ts">14:21:57</span>Preparing summary for merge decision</li>
+                  </ul>
+                  <details class="cmd-details">
+                    <summary>Optional command detail</summary>
+                    <ul class="cmd-log">
+                      <li><span class="ts">14:21:31</span>cargo test -p gardener worktree -- --nocapture</li>
+                      <li><span class="ts">14:21:38</span>rg -n "worktree prune|cleanup" tools/gardener/src</li>
+                    </ul>
+                  </details>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Hedge Trimmer</span>
+                    <span class="worker-state">Idle</span>
+                  </div>
+                  <div class="task">Awaiting next claim from queue</div>
+                  <ul class="log">
+                    <li><span class="ts">14:22:33</span>Heartbeat ok (12s)</li>
+                    <li><span class="ts">14:22:35</span>Listening for scheduler dispatch</li>
+                  </ul>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Edger</span>
+                    <span class="worker-state">Doing</span>
+                  </div>
+                  <div class="task">P1: prompt packet guardrails</div>
+                  <ul class="log">
+                    <li><span class="ts">14:22:04</span>Analyzing packet size boundaries</li>
+                    <li><span class="ts">14:22:24</span>Applying token cap handling update</li>
+                  </ul>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">String Trimmer</span>
+                    <span class="worker-state">Doing</span>
+                  </div>
+                  <div class="task">P2: refine worker event copy</div>
+                  <ul class="log">
+                    <li><span class="ts">14:21:49</span>Drafting readable event text mapping</li>
+                    <li><span class="ts">14:22:06</span>Updating display formatter tests</li>
+                  </ul>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Wheelbarrow</span>
+                    <span class="worker-state">Reviewing</span>
+                  </div>
+                  <div class="task">P1: scheduler request-order visibility</div>
+                  <ul class="log">
+                    <li><span class="ts">14:21:19</span>Collecting scheduler event samples</li>
+                    <li><span class="ts">14:22:01</span>Assembling review checklist</li>
+                  </ul>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Seed Spreader</span>
+                    <span class="worker-state">Doing</span>
+                  </div>
+                  <div class="task">P1: startup audit messaging</div>
+                  <ul class="log">
+                    <li><span class="ts">14:22:12</span>Refining startup diagnostics wording</li>
+                    <li><span class="ts">14:22:34</span>Running startup-focused tests</li>
+                  </ul>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Pruning Shears</span>
+                    <span class="worker-state">Idle</span>
+                  </div>
+                  <div class="task">Ready to claim highest-priority queued task</div>
+                  <ul class="log">
+                    <li><span class="ts">14:22:37</span>No lease held</li>
+                  </ul>
+                </section>
+
+                <section class="worker">
+                  <div class="worker-head">
+                    <span class="worker-name">Sprinkler</span>
+                    <span class="worker-state">Doing</span>
+                  </div>
+                  <div class="task">P2: report view readability pass</div>
+                  <ul class="log">
+                    <li><span class="ts">14:21:54</span>Comparing typography and spacing variants</li>
+                    <li><span class="ts">14:22:20</span>Applying label cleanup</li>
+                  </ul>
+                </section>
+
+              </div>
+            </div>
+          </article>
+
+          <aside class="card">
+            <h4>Backlog (priority order)</h4>
+            <ul class="queue">
+              <li><span>Add startup validation failure recovery task</span><span class="pri p0">P0</span></li>
+              <li><span>Harden worktree cleanup on interrupted sessions</span><span class="pri p1">P1</span></li>
+              <li><span>Improve prompt packet size guardrails</span><span class="pri p1">P1</span></li>
+              <li><span>Add scheduler claim/dispatch timeline view</span><span class="pri p1">P1</span></li>
+              <li><span>Refine TUI copy for worker events</span><span class="pri p2">P2</span></li>
+              <li><span>Improve report view typography</span><span class="pri p2">P2</span></li>
+            </ul>
+          </aside>
+        </div>
+      </section>
+
+      <footer class="help">Keys: q quit  v view report  g regenerate</footer>
+    </main>
+
+    <script>
+      const triageView = document.getElementById("triageView");
+      const workView = document.getElementById("workView");
+      const triageBtn = document.getElementById("triageBtn");
+      const workBtn = document.getElementById("workBtn");
+      const verbCurrent = document.getElementById("verbCurrent");
+      const spinGlyph = document.getElementById("spinGlyph");
+      const parallelConfigured = document.getElementById("parallelConfigured");
+      const parallelDoing = document.getElementById("parallelDoing");
+      const parallelReviewing = document.getElementById("parallelReviewing");
+      const parallelIdle = document.getElementById("parallelIdle");
+      const gardeningVerbs = ["Scanning", "Seeding", "Pruning", "Cultivating", "Grafting", "Harvesting"];
+      const spinnerFrames = ["⠋", "⠙", "⠸", "⠴", "⠦", "⠇"];
+
+      function runStartupAnimation() {
+        if (!verbCurrent || !spinGlyph) {
+          return;
+        }
+
+        let frame = 0;
+        const startupVerb = gardeningVerbs[Math.floor(Math.random() * gardeningVerbs.length)];
+        verbCurrent.textContent = startupVerb;
+        spinGlyph.textContent = spinnerFrames[0];
+
+        const startupTimer = setInterval(() => {
+          frame += 1;
+          spinGlyph.textContent = spinnerFrames[frame % spinnerFrames.length];
+          if (frame >= 30) {
+            clearInterval(startupTimer);
+          }
+        }, 150);
+      }
+
+      function refreshWorkerMetrics() {
+        const workers = Array.from(document.querySelectorAll(".workers-list .worker"));
+        const states = workers.map((node) => {
+          const el = node.querySelector(".worker-state");
+          return (el?.textContent || "").trim().toLowerCase();
+        });
+        const doing = states.filter((state) => state === "doing").length;
+        const reviewing = states.filter((state) => state === "reviewing").length;
+        const idle = states.filter((state) => state === "idle").length;
+        parallelConfigured.textContent = String(workers.length);
+        parallelDoing.textContent = String(doing);
+        parallelReviewing.textContent = String(reviewing);
+        parallelIdle.textContent = String(idle);
+      }
+
+      function setMode(mode) {
+        const triage = mode !== "work";
+        triageView.classList.toggle("hidden", !triage);
+        workView.classList.toggle("hidden", triage);
+        triageBtn.classList.toggle("active", triage);
+        workBtn.classList.toggle("active", !triage);
+      }
+
+      triageBtn.addEventListener("click", () => {
+        window.location.hash = "triage";
+        setMode("triage");
+      });
+      workBtn.addEventListener("click", () => {
+        window.location.hash = "work";
+        setMode("work");
+      });
+
+      refreshWorkerMetrics();
+      runStartupAnimation();
+      setMode(window.location.hash === "#work" ? "work" : "triage");
+    </script>
+  </body>
+</html>

@@ -1,0 +1,59 @@
+[scope]
+working_dir = "."
+
+[orchestrator]
+parallelism = 1
+
+[validation]
+command = "cargo test -p gardener --all-targets"
+
+[startup]
+validate_on_boot = false
+validation_command = "cargo test -p gardener --all-targets"
+
+[agent]
+default = "codex"
+
+[states.understand]
+backend = "codex"
+model = "gpt-5.3-codex"
+
+[states.planning]
+backend = "claude"
+model = "opus"
+
+[states.doing]
+backend = "codex"
+model = "gpt-5.3-codex"
+
+[states.gitting]
+backend = "claude"
+model = "haiku"
+
+[states.reviewing]
+backend = "codex"
+model = "gpt-5.3-codex"
+
+[states.merging]
+backend = "claude"
+model = "sonnet"
+
+[seeding]
+backend = "codex"
+model = "gpt-5.3-codex"
+max_turns = 12
+
+[execution]
+permissions_mode = "permissive_v1"
+worker_mode = "normal"
+test_mode = false
+
+[triage]
+output_path = ".gardener/repo-intelligence.toml"
+stale_after_commits = 10
+discovery_max_turns = 12
+
+[quality_report]
+path = "docs/quality-grades.md"
+stale_after_days = 7
+stale_if_head_commit_differs = true

@@ -1,6 +1,8 @@
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::types::WorkerState;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 pub const MAX_DOING_TURNS: u32 = 100;
 pub const MAX_REVIEW_LOOPS: u32 = 3;
@@ -32,6 +34,7 @@ pub struct UnderstandOutput {
 pub struct DoingOutput {
     pub summary: String,
     pub files_changed: Vec<String>,
+    pub commit_message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +44,7 @@ pub struct GittingOutput {
     pub pr_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReviewVerdict {
     Approve,
@@ -83,30 +86,76 @@ impl Default for FsmSnapshot {
 
 impl FsmSnapshot {
     pub fn transition(&mut self, next: WorkerState) -> Result<(), GardenerError> {
-        validate_transition(self.state, next)?;
+        let from = self.state;
+        validate_transition(from, next)?;
+        append_run_log(
+            "info",
+            "fsm.transition",
+            json!({
+                "from": from.as_str(),
+                "to": next.as_str(),
+                "doing_turns": self.doing_turns,
+                "review_loops": self.review_loops
+            }),
+        );
         self.state = next;
         Ok(())
     }
 
     pub fn apply_understand(&mut self, output: &UnderstandOutput) -> Result<(), GardenerError> {
         if self.state != WorkerState::Understand {
+            append_run_log(
+                "error",
+                "fsm.apply_understand.invalid_state",
+                json!({
+                    "current_state": self.state.as_str()
+                }),
+            );
             return Err(GardenerError::InvalidConfig(
                 "understand output can only be applied in UNDERSTAND state".to_string(),
             ));
         }
         self.category = Some(output.task_type);
-        let next = if output.task_type.requires_planning() {
+        let requires_planning = output.task_type.requires_planning();
+        let next = if requires_planning {
             WorkerState::Planning
         } else {
             WorkerState::Doing
         };
+        append_run_log(
+            "info",
+            "fsm.understand.applied",
+            json!({
+                "task_type": format!("{:?}", output.task_type),
+                "requires_planning": requires_planning,
+                "next_state": next.as_str()
+            }),
+        );
         self.transition(next)
     }
 
     pub fn on_doing_turn_completed(&mut self) -> Result<(), GardenerError> {
         self.doing_turns = self.doing_turns.saturating_add(1);
+        append_run_log(
+            "debug",
+            "fsm.doing.turn_completed",
+            json!({
+                "doing_turns": self.doing_turns,
+                "max": MAX_DOING_TURNS
+            }),
+        );
         if self.doing_turns > MAX_DOING_TURNS {
-            self.failure_reason = Some("doing turn limit exceeded (100)".to_string());
+            let reason = "doing turn limit exceeded (100)".to_string();
+            append_run_log(
+                "warn",
+                "fsm.doing.turn_limit_exceeded",
+                json!({
+                    "doing_turns": self.doing_turns,
+                    "limit": MAX_DOING_TURNS,
+                    "reason": reason
+                }),
+            );
+            self.failure_reason = Some(reason);
             self.transition(WorkerState::Parked)?;
         }
         Ok(())
@@ -114,8 +163,26 @@ impl FsmSnapshot {
 
     pub fn on_review_loop_back(&mut self) -> Result<(), GardenerError> {
         self.review_loops = self.review_loops.saturating_add(1);
+        append_run_log(
+            "debug",
+            "fsm.review.loop_back",
+            json!({
+                "review_loops": self.review_loops,
+                "max": MAX_REVIEW_LOOPS
+            }),
+        );
         if self.review_loops > MAX_REVIEW_LOOPS {
-            self.failure_reason = Some("review loop cap exceeded (3)".to_string());
+            let reason = "review loop cap exceeded (3)".to_string();
+            append_run_log(
+                "warn",
+                "fsm.review.loop_cap_exceeded",
+                json!({
+                    "review_loops": self.review_loops,
+                    "limit": MAX_REVIEW_LOOPS,
+                    "reason": reason
+                }),
+            );
+            self.failure_reason = Some(reason);
             self.transition(WorkerState::Parked)?;
         }
         Ok(())
@@ -136,6 +203,14 @@ pub fn validate_transition(from: WorkerState, to: WorkerState) -> Result<(), Gar
     };
 
     if !allowed {
+        append_run_log(
+            "error",
+            "fsm.transition.invalid",
+            json!({
+                "from": from.as_str(),
+                "to": to.as_str()
+            }),
+        );
         return Err(GardenerError::InvalidConfig(format!(
             "illegal transition: {:?} -> {:?}",
             from, to

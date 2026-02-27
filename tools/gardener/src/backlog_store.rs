@@ -5,9 +5,11 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
+use serde_json::json;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 use crate::priority::Priority;
 use crate::task_identity::{compute_task_id, TaskIdentity, TaskKind};
 
@@ -119,6 +121,11 @@ pub struct BacklogStore {
 impl BacklogStore {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
+        append_run_log(
+            "info",
+            "backlog_store.open",
+            json!({ "path": path.display().to_string() }),
+        );
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| GardenerError::Database(e.to_string()))?;
         }
@@ -179,10 +186,18 @@ impl BacklogStore {
             write_tx,
             read_pool,
             _writer_join: writer_join,
-            db_path: path,
+            db_path: path.clone(),
         };
 
-        store.recover_stale_leases(system_time_unix())?;
+        let recovered = store.recover_stale_leases(system_time_unix())?;
+        append_run_log(
+            "info",
+            "backlog_store.opened",
+            json!({
+                "path": path.display().to_string(),
+                "stale_recovered": recovered,
+            }),
+        );
 
         Ok(store)
     }
@@ -193,6 +208,17 @@ impl BacklogStore {
 
     pub fn upsert_task(&self, task: NewTask) -> StoreResult<BacklogTask> {
         let now = system_time_unix();
+        append_run_log(
+            "debug",
+            "backlog.task.upsert",
+            json!({
+                "kind": task.kind.as_str(),
+                "title": task.title,
+                "scope_key": task.scope_key,
+                "priority": task.priority.as_str(),
+                "source": task.source,
+            }),
+        );
         let (reply_tx, reply_rx) = oneshot::channel();
         self.write_tx
             .blocking_send(WriteCmd::Upsert {
@@ -201,9 +227,25 @@ impl BacklogStore {
                 reply: reply_tx,
             })
             .map_err(|e| GardenerError::Database(e.to_string()))?;
-        reply_rx
+        let result = reply_rx
             .blocking_recv()
-            .map_err(|e| GardenerError::Database(e.to_string()))?
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        if let Ok(ref row) = result {
+            append_run_log(
+                "info",
+                "backlog.task.upserted",
+                json!({
+                    "task_id": row.task_id,
+                    "kind": row.kind.as_str(),
+                    "title": row.title,
+                    "scope_key": row.scope_key,
+                    "priority": row.priority.as_str(),
+                    "status": row.status.as_str(),
+                    "source": row.source,
+                }),
+            );
+        }
+        result
     }
 
     pub fn claim_next(
@@ -213,6 +255,14 @@ impl BacklogStore {
     ) -> StoreResult<Option<BacklogTask>> {
         let now = system_time_unix();
         let lease_expires_at = now.saturating_add(lease_duration_secs.saturating_mul(1000));
+        append_run_log(
+            "debug",
+            "backlog.task.claim_next",
+            json!({
+                "lease_owner": lease_owner,
+                "lease_duration_secs": lease_duration_secs,
+            }),
+        );
         let (reply_tx, reply_rx) = oneshot::channel();
         self.write_tx
             .blocking_send(WriteCmd::ClaimNext {
@@ -222,9 +272,45 @@ impl BacklogStore {
                 reply: reply_tx,
             })
             .map_err(|e| GardenerError::Database(e.to_string()))?;
-        reply_rx
+        let result = reply_rx
             .blocking_recv()
-            .map_err(|e| GardenerError::Database(e.to_string()))?
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(Some(task)) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.claimed",
+                    json!({
+                        "task_id": task.task_id,
+                        "kind": task.kind.as_str(),
+                        "title": task.title,
+                        "priority": task.priority.as_str(),
+                        "lease_owner": lease_owner,
+                        "attempt_count": task.attempt_count,
+                    }),
+                );
+            }
+            Ok(None) => {
+                append_run_log(
+                    "debug",
+                    "backlog.task.claim_next.empty",
+                    json!({
+                        "lease_owner": lease_owner,
+                    }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.claim_next.failed",
+                    json!({
+                        "lease_owner": lease_owner,
+                        "error": e.to_string(),
+                    }),
+                );
+            }
+        }
+        result
     }
 
     pub fn mark_in_progress(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
@@ -237,9 +323,33 @@ impl BacklogStore {
                 reply: reply_tx,
             })
             .map_err(|e| GardenerError::Database(e.to_string()))?;
-        reply_rx
+        let result = reply_rx
             .blocking_recv()
-            .map_err(|e| GardenerError::Database(e.to_string()))?
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.in_progress",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.in_progress.rejected",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.in_progress.failed",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner, "error": e.to_string() }),
+                );
+            }
+        }
+        result
     }
 
     pub fn mark_complete(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
@@ -252,9 +362,33 @@ impl BacklogStore {
                 reply: reply_tx,
             })
             .map_err(|e| GardenerError::Database(e.to_string()))?;
-        reply_rx
+        let result = reply_rx
             .blocking_recv()
-            .map_err(|e| GardenerError::Database(e.to_string()))?
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.completed",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.completed.rejected",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.completed.failed",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner, "error": e.to_string() }),
+                );
+            }
+        }
+        result
     }
 
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
@@ -265,9 +399,27 @@ impl BacklogStore {
                 reply: reply_tx,
             })
             .map_err(|e| GardenerError::Database(e.to_string()))?;
-        reply_rx
+        let result = reply_rx
             .blocking_recv()
-            .map_err(|e| GardenerError::Database(e.to_string()))?
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(count) if *count > 0 => {
+                append_run_log(
+                    "warn",
+                    "backlog.stale_leases.recovered",
+                    json!({ "count": count }),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.stale_leases.recovery_failed",
+                    json!({ "error": e.to_string() }),
+                );
+            }
+        }
+        result
     }
 
     pub fn list_tasks(&self) -> StoreResult<Vec<BacklogTask>> {
@@ -277,7 +429,11 @@ impl BacklogStore {
                     "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated, \
                             lease_owner, lease_expires_at, source, related_pr, related_branch, attempt_count, created_at \
                      FROM backlog_tasks \
-                     ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END, last_updated ASC, created_at ASC",
+                     ORDER BY
+                        CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                        CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                        last_updated ASC,
+                        created_at ASC",
                 )
                 .map_err(db_err)?;
             let rows = statement
@@ -357,6 +513,11 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
             continue;
         }
 
+        append_run_log(
+            "info",
+            "backlog_store.migration.applying",
+            json!({ "version": version }),
+        );
         let tx = conn.transaction().map_err(db_err)?;
         tx.execute_batch(sql).map_err(db_err)?;
         tx.execute(
@@ -365,6 +526,11 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
         )
         .map_err(db_err)?;
         tx.commit().map_err(db_err)?;
+        append_run_log(
+            "info",
+            "backlog_store.migration.applied",
+            json!({ "version": version }),
+        );
     }
 
     Ok(())
@@ -453,7 +619,11 @@ fn claim_next_in_tx(
                 SELECT task_id
                 FROM backlog_tasks
                 WHERE status = 'ready'
-                ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END, last_updated ASC, created_at ASC
+                ORDER BY
+                    CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                    CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                    last_updated ASC,
+                    created_at ASC
                 LIMIT 1
             )
             UPDATE backlog_tasks
@@ -722,6 +892,39 @@ mod tests {
         assert_eq!(first.title, "task-2");
         assert_eq!(second.title, "task-3");
         assert_eq!(third.title, "task-1");
+    }
+
+    #[test]
+    fn claim_prioritizes_retries_within_same_priority() {
+        let store = temp_store();
+        let first = store
+            .upsert_task(task("retry-me-first", Priority::P1))
+            .expect("seed retry");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let _second = store
+            .upsert_task(task("fresh-task", Priority::P1))
+            .expect("seed fresh");
+
+        let leased = store
+            .claim_next("worker-a", 60)
+            .expect("claim retry")
+            .expect("retry row");
+        assert_eq!(leased.task_id, first.task_id);
+        let transitioned = store
+            .mark_in_progress(&first.task_id, "worker-a")
+            .expect("mark in progress");
+        assert!(transitioned);
+        let recovered = store
+            .recover_stale_leases(i64::MAX)
+            .expect("recover stale");
+        assert_eq!(recovered, 1);
+
+        let claimed = store
+            .claim_next("worker-b", 60)
+            .expect("claim after retry")
+            .expect("task");
+        assert_eq!(claimed.task_id, first.task_id);
+        assert_eq!(claimed.attempt_count, 2);
     }
 
     #[test]

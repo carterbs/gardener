@@ -33,7 +33,7 @@ pub enum NonInteractiveReason {
     NonTtyStdin,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkerState {
     Understand,
@@ -43,6 +43,26 @@ pub enum WorkerState {
     Reviewing,
     Merging,
     Seeding,
+    Complete,
+    Failed,
+    Parked,
+}
+
+impl WorkerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Understand => "understand",
+            Self::Planning => "planning",
+            Self::Doing => "doing",
+            Self::Gitting => "gitting",
+            Self::Reviewing => "reviewing",
+            Self::Merging => "merging",
+            Self::Seeding => "seeding",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Parked => "parked",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

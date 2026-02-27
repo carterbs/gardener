@@ -596,5 +596,8 @@ fn state_key(state: WorkerState) -> &'static str {
         WorkerState::Reviewing => "reviewing",
         WorkerState::Merging => "merging",
         WorkerState::Seeding => "seeding",
+        WorkerState::Complete => "complete",
+        WorkerState::Failed => "failed",
+        WorkerState::Parked => "parked",
     }
 }

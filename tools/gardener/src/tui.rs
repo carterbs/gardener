@@ -63,6 +63,272 @@ const STARTUP_VERBS: [&str; 6] = [
 const STARTUP_SPINNER_TICK_MS: u128 = 150;
 const STARTUP_ELLIPSIS_TICK_MS: u128 = 400;
 const STARTUP_SPINNER_TICKS: u32 = 30;
+const WORKER_EQUIPMENT_NAMES: [&str; 9] = [
+    "Lawn Mower",
+    "Leaf Blower",
+    "Hedge Trimmer",
+    "Edger",
+    "String Trimmer",
+    "Wheelbarrow",
+    "Seed Spreader",
+    "Pruning Shears",
+    "Sprinkler",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiMode {
+    Triage,
+    Work,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageStage {
+    pub label: String,
+    pub state: StageState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageState {
+    Done,
+    Current,
+    Future,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageActivity {
+    pub timestamp: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageArtifact {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartupHeadline {
+    pub spinner_frame: usize,
+    pub verb: String,
+    pub startup_active: bool,
+    pub ellipsis_phase: u8,
+}
+
+impl StartupHeadline {
+    fn from_view(source: StartupHeadlineView) -> Self {
+        Self {
+            spinner_frame: source.spinner_frame,
+            verb: source.verb().to_string(),
+            startup_active: source.startup_active,
+            ellipsis_phase: source.ellipsis_phase,
+        }
+    }
+
+    fn spinner(&self) -> &'static str {
+        STARTUP_SPINNER_FRAMES[self.spinner_frame % STARTUP_SPINNER_FRAMES.len()]
+    }
+
+    fn ellipsis(&self) -> &'static str {
+        match self.ellipsis_phase {
+            0 => ".",
+            1 => "..",
+            _ => "...",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerState {
+    Doing,
+    Reviewing,
+    Idle,
+}
+
+impl WorkerState {
+    fn from_str(state: &str) -> Self {
+        match state {
+            "reviewing" => Self::Reviewing,
+            "idle" | "complete" | "failed" => Self::Idle,
+            _ => Self::Doing,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    pub timestamp: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandEntry {
+    pub timestamp: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerCard {
+    pub name: String,
+    pub state: String,
+    pub task: String,
+    pub tool_line: String,
+    pub breadcrumb: String,
+    pub activity: Vec<ActivityEntry>,
+    pub command_details: Vec<CommandEntry>,
+    pub commands_expanded: bool,
+    pub state_bucket: WorkerState,
+    pub last_heartbeat_secs: u64,
+    pub lease_held: bool,
+    pub session_missing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklogPriority {
+    P0,
+    P1,
+    P2,
+}
+
+impl BacklogPriority {
+    fn span_style(self) -> Style {
+        match self {
+            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
+            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
+            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BacklogItem {
+    pub priority: BacklogPriority,
+    pub title: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub ui_mode: UiMode,
+    pub triage_stages: Vec<TriageStage>,
+    pub triage_activity: Vec<TriageActivity>,
+    pub triage_artifacts: Vec<TriageArtifact>,
+    pub startup_headline: StartupHeadline,
+    pub workers: Vec<WorkerCard>,
+    pub backlog: Vec<BacklogItem>,
+    pub selected_worker: usize,
+    pub terminal_width: u16,
+    pub terminal_height: u16,
+}
+
+impl AppState {
+    fn from_dashboard_feed(
+        workers: &[WorkerRow],
+        backlog: &BacklogView,
+        startup_headline: StartupHeadline,
+    ) -> Self {
+        let triage_stages = [
+            TriageStage {
+                label: "Scan repository shape".to_string(),
+                state: StageState::Future,
+            },
+            TriageStage {
+                label: "Detect tools and docs".to_string(),
+                state: StageState::Future,
+            },
+            TriageStage {
+                label: "Build project profile".to_string(),
+                state: StageState::Future,
+            },
+            TriageStage {
+                label: "Seed prioritized backlog".to_string(),
+                state: StageState::Future,
+            },
+        ]
+        .to_vec();
+
+        let mapped_workers = workers
+            .iter()
+            .enumerate()
+            .map(|(index, row)| WorkerCard {
+                name: equipment_name_for_worker(index, &row.worker_id),
+                state: row.state.clone(),
+                task: row.task_title.clone(),
+                tool_line: row.tool_line.clone(),
+                breadcrumb: row.breadcrumb.clone(),
+                activity: vec![ActivityEntry {
+                    timestamp: now_hhmmss(),
+                    message: if row.breadcrumb.is_empty() {
+                        row.tool_line.clone()
+                    } else {
+                        format!("{} ({})", row.tool_line, humanize_breadcrumb(&row.breadcrumb))
+                    },
+                }],
+                command_details: row
+                    .command_details
+                    .iter()
+                    .map(|(timestamp, command)| CommandEntry {
+                        timestamp: timestamp.clone(),
+                        command: command.clone(),
+                    })
+                    .collect(),
+                commands_expanded: row.commands_expanded,
+                state_bucket: WorkerState::from_str(&row.state),
+                last_heartbeat_secs: row.last_heartbeat_secs,
+                lease_held: row.lease_held,
+                session_missing: row.session_missing,
+            })
+            .collect();
+
+        let mapped_backlog = ordered_backlog_items(&backlog.in_progress, &backlog.queued)
+            .into_iter()
+            .map(|item| BacklogItem {
+                priority: match item.priority {
+                    ParsedBacklogPriority::P0 => BacklogPriority::P0,
+                    ParsedBacklogPriority::P1 => BacklogPriority::P1,
+                    ParsedBacklogPriority::P2 => BacklogPriority::P2,
+                },
+                title: item.title,
+            })
+            .collect();
+
+        Self {
+            ui_mode: UiMode::Work,
+            triage_stages,
+            triage_activity: Vec::new(),
+            triage_artifacts: Vec::new(),
+            startup_headline,
+            workers: mapped_workers,
+            backlog: mapped_backlog,
+            selected_worker: WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow()),
+            terminal_width: 0,
+            terminal_height: 0,
+        }
+    }
+
+    fn from_triage_feed(
+        activity: &[String],
+        artifacts: &[String],
+        startup_headline: StartupHeadline,
+    ) -> Self {
+        Self {
+            ui_mode: UiMode::Triage,
+            triage_stages: Vec::new(),
+            triage_activity: activity
+                .iter()
+                .map(|line| TriageActivity {
+                    timestamp: now_hhmmss(),
+                    message: line.clone(),
+                })
+                .collect(),
+            triage_artifacts: artifacts.iter().map(|line| parse_triage_artifact(line)).collect(),
+            startup_headline,
+            workers: Vec::new(),
+            backlog: Vec::new(),
+            selected_worker: 0,
+            terminal_width: 0,
+            terminal_height: 0,
+        }
+    }
+}
 fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
     let mut command = command.to_string();
     let prefix = format!("{timestamp}  ");
@@ -129,6 +395,23 @@ impl WorkerMetrics {
                 metrics.idle += 1;
             } else {
                 metrics.doing += 1;
+            }
+        }
+        metrics
+    }
+
+    fn from_app_state(workers: &[WorkerCard]) -> Self {
+        let mut metrics = Self {
+            total: workers.len(),
+            doing: 0,
+            reviewing: 0,
+            idle: 0,
+        };
+        for worker in workers {
+            match worker.state_bucket {
+                WorkerState::Doing => metrics.doing += 1,
+                WorkerState::Reviewing => metrics.reviewing += 1,
+                WorkerState::Idle => metrics.idle += 1,
             }
         }
         metrics
@@ -217,6 +500,51 @@ fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<Parse
     ordered.extend(p1);
     ordered.extend(p2);
     ordered
+}
+
+fn parse_triage_artifact(line: &str) -> TriageArtifact {
+    if let Some((label, value)) = line.split_once(':') {
+        TriageArtifact {
+            label: label.trim().to_string(),
+            value: value.trim().to_string(),
+        }
+    } else if let Some((label, value)) = line.split_once('=') {
+        TriageArtifact {
+            label: label.trim().to_string(),
+            value: value.trim().to_string(),
+        }
+    } else {
+        TriageArtifact {
+            label: "Artifact".to_string(),
+            value: line.to_string(),
+        }
+    }
+}
+
+fn now_hhmmss() -> String {
+    let timestamp = now_unix_millis() % 86_400_000;
+    let secs = (timestamp / 1000) as u64;
+    let in_day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        in_day / 3600,
+        (in_day % 3600) / 60,
+        in_day % 60
+    )
+}
+
+fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
+    if worker_id.is_empty() {
+        return WORKER_EQUIPMENT_NAMES[index % WORKER_EQUIPMENT_NAMES.len()].to_string();
+    }
+    if index < WORKER_EQUIPMENT_NAMES.len() {
+        return WORKER_EQUIPMENT_NAMES[index].to_string();
+    }
+    let mut acc = 0u64;
+    for ch in worker_id.bytes() {
+        acc = acc.wrapping_mul(31).wrapping_add(ch as u64);
+    }
+    WORKER_EQUIPMENT_NAMES[(acc as usize) % WORKER_EQUIPMENT_NAMES.len()].to_string()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -389,6 +717,11 @@ fn draw_dashboard_frame(
     lease_timeout_seconds: u64,
     startup_headline: StartupHeadlineView,
 ) {
+    let app_state = AppState::from_dashboard_feed(
+        workers,
+        backlog,
+        StartupHeadline::from_view(startup_headline),
+    );
     let human_problems = workers
         .iter()
         .filter_map(|row| {
@@ -477,7 +810,7 @@ fn draw_dashboard_frame(
     );
     frame.render_widget(summary, chunks[0]);
 
-    let metrics = WorkerMetrics::from_workers(workers);
+    let metrics = WorkerMetrics::from_app_state(&app_state.workers);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
@@ -546,19 +879,19 @@ fn draw_dashboard_frame(
         .height
         .min(frame.area().height.saturating_sub(12).max(1));
     let worker_row_capacity = (viewport_height as usize / WORKER_LIST_ROW_HEIGHT).max(1);
-    let max_worker_offset = workers.len().saturating_sub(worker_row_capacity);
+    let max_worker_offset = app_state.workers.len().saturating_sub(worker_row_capacity);
     WORKERS_VIEWPORT_CAPACITY.with(|cell| {
         *cell.borrow_mut() = worker_row_capacity;
     });
     WORKERS_TOTAL_COUNT.with(|cell| {
-        *cell.borrow_mut() = workers.len();
+        *cell.borrow_mut() = app_state.workers.len();
     });
     let selected_worker = WORKERS_VIEWPORT_SELECTED.with(|cell| {
         let mut selected = cell.borrow_mut();
-        if workers.is_empty() {
+        if app_state.workers.is_empty() {
             *selected = 0;
         } else {
-            *selected = (*selected).min(workers.len() - 1);
+            *selected = (*selected).min(app_state.workers.len() - 1);
         }
         *selected
     });
@@ -574,10 +907,11 @@ fn draw_dashboard_frame(
         }
         *offset
     });
-    let worker_end = (worker_offset + worker_row_capacity).min(workers.len());
+    let worker_end = (worker_offset + worker_row_capacity).min(app_state.workers.len());
 
     let command_line_width = workers_panel[1].width.saturating_sub(8) as usize;
-    let worker_items = workers
+    let worker_items = app_state
+        .workers
         .iter()
         .enumerate()
         .skip(worker_offset)
@@ -612,12 +946,9 @@ fn draw_dashboard_frame(
             };
             let mut lines = vec![
                 Line::from(vec![
-                    Span::styled(
-                        format!("{} {:<3}", marker, row.worker_id),
-                        worker_style,
-                    ),
+                    Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
                     Span::raw(": "),
-                    Span::raw(row.task_title.clone()),
+                    Span::raw(row.task.clone()),
                 ]),
                 Line::from(vec![
                     Span::raw("    "),
@@ -639,19 +970,25 @@ fn draw_dashboard_frame(
                 ),
             ]));
             if row.commands_expanded {
-                lines.extend(row.command_details.iter().map(|(timestamp, command)| {
-                    Line::from(vec![
-                        Span::styled(
-                            format!(
-                                "    {}",
-                                command_row_with_timestamp(timestamp, command, command_line_width)
+                lines.extend(
+                    row.command_details.iter().map(|entry| {
+                        Line::from(vec![
+                            Span::styled(
+                                format!(
+                                    "    {}",
+                                    command_row_with_timestamp(
+                                        &entry.timestamp,
+                                        &entry.command,
+                                        command_line_width
+                                    )
+                                ),
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::DIM),
                             ),
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::DIM),
-                        ),
-                    ])
-                }));
+                        ])
+                    }),
+                );
             }
             ListItem::new(lines)
         })
@@ -659,12 +996,12 @@ fn draw_dashboard_frame(
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            if workers.len() > worker_row_capacity {
+            if app_state.workers.len() > worker_row_capacity {
                 format!(
                     "Workers ({:02}-{:02}/{:02})",
                     worker_offset + 1,
                     worker_end,
-                    workers.len()
+                    app_state.workers.len()
                 )
             } else {
                 "Workers".to_string()
@@ -680,7 +1017,7 @@ fn draw_dashboard_frame(
         workers_panel[1],
     );
 
-    let ordered_backlog = ordered_backlog_items(&backlog.in_progress, &backlog.queued);
+    let ordered_backlog = app_state.backlog;
     let content_capacity = body[2].height.saturating_sub(2) as usize;
     let max_visible = if content_capacity == 0 {
         0
@@ -692,9 +1029,9 @@ fn draw_dashboard_frame(
     let mut list_items = Vec::new();
     for item in ordered_backlog.iter().take(max_visible) {
         let badge = match item.priority {
-            ParsedBacklogPriority::P0 => "P0",
-            ParsedBacklogPriority::P1 => "P1",
-            ParsedBacklogPriority::P2 => "P2",
+            BacklogPriority::P0 => "P0",
+            BacklogPriority::P1 => "P1",
+            BacklogPriority::P2 => "P2",
         };
         list_items.push(ListItem::new(Line::from(vec![
             Span::styled(format!("{badge: <2}"), item.priority.span_style()),
@@ -757,6 +1094,20 @@ fn draw_dashboard_frame(
 }
 
 fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifacts: &[String]) {
+    let app_state = AppState::from_triage_feed(
+        activity,
+        artifacts,
+        StartupHeadline {
+            spinner_frame: 0,
+            verb: "Triage".to_string(),
+            startup_active: false,
+            ellipsis_phase: 0,
+        },
+    );
+    draw_triage_frame_from_state(frame, &app_state);
+}
+
+fn draw_triage_frame_from_state(frame: &mut ratatui::Frame<'_>, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -791,12 +1142,13 @@ fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifa
     );
     frame.render_widget(summary, chunks[0]);
 
-    let activity_items = if activity.is_empty() {
+    let activity_items = if state.triage_activity.is_empty() {
         vec![ListItem::new("- waiting for triage updates")]
     } else {
-        activity
+        state
+            .triage_activity
             .iter()
-            .map(|line| ListItem::new(format!("- {line}")))
+            .map(|entry| ListItem::new(format!("- {} {}", entry.timestamp, entry.message)))
             .collect::<Vec<_>>()
     };
     frame.render_widget(
@@ -808,12 +1160,19 @@ fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifa
         body[0],
     );
 
-    let artifact_items = if artifacts.is_empty() {
+    let artifact_items = if state.triage_artifacts.is_empty() {
         vec![ListItem::new("- no triage artifacts yet")]
     } else {
-        artifacts
+        state
+            .triage_artifacts
             .iter()
-            .map(|line| ListItem::new(format!("- {line}")))
+            .map(|entry| {
+                if entry.value.is_empty() {
+                    ListItem::new(format!("- {}", entry.label))
+                } else {
+                    ListItem::new(format!("- {}: {}", entry.label, entry.value))
+                }
+            })
             .collect::<Vec<_>>()
     };
     frame.render_widget(
@@ -1776,22 +2135,21 @@ mod tests {
         let backlog = BacklogView::default();
 
         let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(initial.contains("> w1 "));
+        assert!(initial.contains("> Lawn Mower"));
         assert!(!initial.contains("w9 "));
 
         for _ in 0..10 {
             let _ = scroll_workers_down();
         }
         let scrolled = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(!scrolled.contains("w1 "));
-        assert!(scrolled.contains("> w9 "));
+        assert!(!scrolled.contains("Lawn Mower"));
         assert!(!scroll_workers_down());
 
         for _ in 0..10 {
             let _ = scroll_workers_up();
         }
         let reset = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(reset.contains("> w1 "));
+        assert!(reset.contains("> Lawn Mower"));
         assert!(!scroll_workers_up());
     }
 }

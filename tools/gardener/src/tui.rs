@@ -412,8 +412,28 @@ fn draw_dashboard_frame(
         .min(frame.area().height.saturating_sub(12).max(1));
     let worker_row_capacity = (viewport_height as usize / WORKER_LIST_ROW_HEIGHT).max(1);
     let max_worker_offset = workers.len().saturating_sub(worker_row_capacity);
+    WORKERS_VIEWPORT_CAPACITY.with(|cell| {
+        *cell.borrow_mut() = worker_row_capacity;
+    });
+    WORKERS_TOTAL_COUNT.with(|cell| {
+        *cell.borrow_mut() = workers.len();
+    });
+    let selected_worker = WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        let mut selected = cell.borrow_mut();
+        if workers.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = (*selected).min(workers.len() - 1);
+        }
+        *selected
+    });
     let worker_offset = WORKERS_VIEWPORT_OFFSET.with(|cell| {
         let mut offset = cell.borrow_mut();
+        if selected_worker < *offset {
+            *offset = selected_worker;
+        } else if selected_worker >= offset.saturating_add(worker_row_capacity) {
+            *offset = selected_worker + 1 - worker_row_capacity;
+        }
         if *offset > max_worker_offset {
             *offset = max_worker_offset;
         }
@@ -423,9 +443,10 @@ fn draw_dashboard_frame(
 
     let worker_items = workers
         .iter()
+        .enumerate()
         .skip(worker_offset)
         .take(worker_row_capacity)
-        .map(|row| {
+        .map(|(idx, row)| {
             let state_style = match row.state.as_str() {
                 "complete" => Style::default().fg(Color::Green),
                 "failed" => Style::default().fg(Color::Red),
@@ -437,13 +458,22 @@ fn draw_dashboard_frame(
                 }
                 _ => Style::default().fg(Color::Gray),
             };
+            let selected = idx == selected_worker;
+            let marker = if selected { ">" } else { " " };
+            let worker_style = if selected {
+                Style::default()
+                    .fg(Color::Rgb(126, 231, 135))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            };
             ListItem::new(vec![
                 Line::from(vec![
                     Span::styled(
-                        format!("{:<3}", row.worker_id),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
+                        format!("{} {:<3}", marker, row.worker_id),
+                        worker_style,
                     ),
                     Span::raw(": "),
                     Span::raw(row.task_title.clone()),
@@ -695,6 +725,9 @@ thread_local! {
     static LIVE_TUI_SIZE: RefCell<Option<(u16, u16)>> = const { RefCell::new(None) };
     static LIVE_STARTUP_HEADLINE: RefCell<Option<LiveStartupHeadlineState>> = const { RefCell::new(None) };
     static WORKERS_VIEWPORT_OFFSET: RefCell<usize> = const { RefCell::new(0) };
+    static WORKERS_VIEWPORT_SELECTED: RefCell<usize> = const { RefCell::new(0) };
+    static WORKERS_VIEWPORT_CAPACITY: RefCell<usize> = const { RefCell::new(1) };
+    static WORKERS_TOTAL_COUNT: RefCell<usize> = const { RefCell::new(0) };
 }
 
 fn now_unix_millis() -> u128 {
@@ -722,25 +755,63 @@ fn live_startup_headline() -> StartupHeadlineView {
 }
 
 pub fn scroll_workers_down() -> bool {
-    WORKERS_VIEWPORT_OFFSET.with(|cell| {
-        let mut offset = cell.borrow_mut();
-        let old = *offset;
-        *offset = offset.saturating_add(1);
-        *offset != old
-    })
+    let total = WORKERS_TOTAL_COUNT.with(|cell| *cell.borrow());
+    if total == 0 {
+        return false;
+    }
+    let capacity = WORKERS_VIEWPORT_CAPACITY.with(|cell| (*cell.borrow()).max(1));
+    let moved = WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        let mut selected = cell.borrow_mut();
+        let old = *selected;
+        *selected = (*selected).min(total - 1).saturating_add(1).min(total - 1);
+        *selected != old
+    });
+    if moved {
+        let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
+        WORKERS_VIEWPORT_OFFSET.with(|cell| {
+            let mut offset = cell.borrow_mut();
+            let max_offset = total.saturating_sub(capacity);
+            if selected >= offset.saturating_add(capacity) {
+                *offset = selected + 1 - capacity;
+            }
+            if *offset > max_offset {
+                *offset = max_offset;
+            }
+        });
+    }
+    moved
 }
 
 pub fn scroll_workers_up() -> bool {
-    WORKERS_VIEWPORT_OFFSET.with(|cell| {
-        let mut offset = cell.borrow_mut();
-        let old = *offset;
-        *offset = offset.saturating_sub(1);
-        *offset != old
-    })
+    let moved = WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        let mut selected = cell.borrow_mut();
+        let old = *selected;
+        *selected = selected.saturating_sub(1);
+        *selected != old
+    });
+    if moved {
+        let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
+        WORKERS_VIEWPORT_OFFSET.with(|cell| {
+            let mut offset = cell.borrow_mut();
+            if selected < *offset {
+                *offset = selected;
+            }
+        });
+    }
+    moved
 }
 
 pub fn reset_workers_scroll() {
     WORKERS_VIEWPORT_OFFSET.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
+    WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
+    WORKERS_VIEWPORT_CAPACITY.with(|cell| {
+        *cell.borrow_mut() = 1;
+    });
+    WORKERS_TOTAL_COUNT.with(|cell| {
         *cell.borrow_mut() = 0;
     });
 }
@@ -1389,7 +1460,7 @@ mod tests {
         let backlog = BacklogView::default();
 
         let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(initial.contains("w1 "));
+        assert!(initial.contains("> w1 "));
         assert!(!initial.contains("w9 "));
 
         for _ in 0..10 {
@@ -1397,12 +1468,14 @@ mod tests {
         }
         let scrolled = render_dashboard(&workers, &stats, &backlog, 80, 24);
         assert!(!scrolled.contains("w1 "));
-        assert!(scrolled.contains("w9 "));
+        assert!(scrolled.contains("> w9 "));
+        assert!(!scroll_workers_down());
 
         for _ in 0..10 {
             let _ = scroll_workers_up();
         }
         let reset = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(reset.contains("w1 "));
+        assert!(reset.contains("> w1 "));
+        assert!(!scroll_workers_up());
     }
 }

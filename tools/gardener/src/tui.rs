@@ -33,6 +33,12 @@ pub struct QueueStats {
     pub p2: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BacklogView {
+    pub in_progress: Vec<String>,
+    pub queued: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProblemClass {
     Healthy,
@@ -60,7 +66,13 @@ pub fn classify_problem(
     ProblemClass::Healthy
 }
 
-pub fn render_dashboard(workers: &[WorkerRow], stats: &QueueStats, width: u16, height: u16) -> String {
+pub fn render_dashboard(
+    workers: &[WorkerRow],
+    stats: &QueueStats,
+    backlog: &BacklogView,
+    width: u16,
+    height: u16,
+) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
@@ -69,11 +81,19 @@ pub fn render_dashboard(workers: &[WorkerRow], stats: &QueueStats, width: u16, h
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(4),
-                    Constraint::Min(7),
+                    Constraint::Min(11),
                     Constraint::Length(7),
                     Constraint::Length(3),
                 ])
                 .split(frame.size());
+            let body = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+                .split(chunks[1]);
+            let backlog_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+                .split(body[1]);
 
             let summary = Paragraph::new(Line::from(vec![
                 Span::styled("Ready ", Style::default().fg(Color::Cyan)),
@@ -130,7 +150,37 @@ pub fn render_dashboard(workers: &[WorkerRow], stats: &QueueStats, width: u16, h
 
             frame.render_widget(
                 List::new(worker_items).block(Block::default().borders(Borders::ALL).title("Workers")),
-                chunks[1],
+                body[0],
+            );
+
+            let active_items = if backlog.in_progress.is_empty() {
+                vec![ListItem::new("none")]
+            } else {
+                backlog
+                    .in_progress
+                    .iter()
+                    .map(|line| ListItem::new(line.clone()))
+                    .collect::<Vec<_>>()
+            };
+            frame.render_widget(
+                List::new(active_items)
+                    .block(Block::default().borders(Borders::ALL).title("Backlog In Progress")),
+                backlog_chunks[0],
+            );
+
+            let queued_items = if backlog.queued.is_empty() {
+                vec![ListItem::new("none")]
+            } else {
+                backlog
+                    .queued
+                    .iter()
+                    .map(|line| ListItem::new(line.clone()))
+                    .collect::<Vec<_>>()
+            };
+            frame.render_widget(
+                List::new(queued_items)
+                    .block(Block::default().borders(Borders::ALL).title("Backlog Queue")),
+                backlog_chunks[1],
             );
 
             let mut problems = workers
@@ -344,7 +394,10 @@ fn teardown_terminal(mut terminal: Terminal<CrosstermBackend<Stdout>>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_problem, handle_key, render_dashboard, ProblemClass, QueueStats, WorkerRow};
+    use super::{
+        classify_problem, handle_key, render_dashboard, BacklogView, ProblemClass, QueueStats,
+        WorkerRow,
+    };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
         WorkerRow {
@@ -379,12 +432,18 @@ mod tests {
                 p1: 0,
                 p2: 0,
             },
+            &BacklogView {
+                in_progress: vec!["P1 abc123 fix queue".to_string()],
+                queued: vec!["P2 def456 tune logs".to_string()],
+            },
             80,
             20,
         );
         assert!(frame.contains("Queue"));
         assert!(frame.contains("Workers"));
         assert!(frame.contains("Problems"));
+        assert!(frame.contains("Backlog In Progress"));
+        assert!(frame.contains("Backlog Queue"));
 
         assert_eq!(handle_key('q'), "quit");
         assert_eq!(handle_key('r'), "retry");

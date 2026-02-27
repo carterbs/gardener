@@ -40,10 +40,7 @@ pub struct StepResult {
 }
 
 pub fn map_codex_event(raw: &Value) -> AgentEvent {
-    let event_type = raw
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let event_type = raw.get("type").and_then(Value::as_str).unwrap_or("unknown");
 
     let kind = match event_type {
         "thread.started" => AgentEventKind::ThreadStarted,
@@ -64,10 +61,7 @@ pub fn map_codex_event(raw: &Value) -> AgentEvent {
 }
 
 pub fn map_claude_event(raw: &Value) -> AgentEvent {
-    let event_type = raw
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let event_type = raw.get("type").and_then(Value::as_str).unwrap_or("unknown");
 
     let kind = match event_type {
         "message_start" => AgentEventKind::ThreadStarted,

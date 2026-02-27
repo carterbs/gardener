@@ -4,6 +4,7 @@ use crate::runtime::{FileSystem, ProcessRunner};
 use crate::types::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod claude;
 pub mod codex;
@@ -70,8 +71,12 @@ pub fn probe_and_persist(
         caps.push(adapter.probe_capabilities(process_runner)?);
     }
 
+    let generated_at_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let snapshot = CapabilitySnapshot {
-        generated_at_unix: 1,
+        generated_at_unix,
         adapters: caps,
     };
 
@@ -98,7 +103,7 @@ pub fn validate_model(model: &str) -> Result<(), GardenerError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        probe_and_persist, validate_model, AdapterCapabilities, AgentAdapter, AdapterContext,
+        probe_and_persist, validate_model, AdapterCapabilities, AdapterContext, AgentAdapter,
     };
     use crate::protocol::{AgentTerminal, StepResult};
     use crate::runtime::{FakeFileSystem, FakeProcessRunner, FileSystem};
@@ -144,12 +149,10 @@ mod tests {
         let fs = FakeFileSystem::default();
         let runner = FakeProcessRunner::default();
         let adapter = TestAdapter;
-        let snapshot = probe_and_persist(&[&adapter], &runner, &fs, Path::new("/repo"))
-            .expect("snapshot");
+        let snapshot =
+            probe_and_persist(&[&adapter], &runner, &fs, Path::new("/repo")).expect("snapshot");
         assert_eq!(snapshot.adapters.len(), 1);
-        assert!(fs.exists(Path::new(
-            "/repo/.cache/gardener/adapter-capabilities.json"
-        )));
+        assert!(fs.exists(Path::new("/repo/.cache/gardener/adapter-capabilities.json")));
     }
 
     #[test]

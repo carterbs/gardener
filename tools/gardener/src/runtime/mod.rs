@@ -237,6 +237,13 @@ impl Terminal for ProductionTerminal {
         }
         match crossterm::event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
             crossterm::event::Event::Key(key) => match key.code {
+                crossterm::event::KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    Ok(Some('q'))
+                }
                 crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
             },

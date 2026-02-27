@@ -127,6 +127,9 @@ mod tests {
 
     #[test]
     fn unmerged_collision_always_upgrades_to_p0() {
-        assert_eq!(upgrade_unmerged_collision_priority(Priority::P2), Priority::P0);
+        assert_eq!(
+            upgrade_unmerged_collision_priority(Priority::P2),
+            Priority::P0
+        );
     }
 }

@@ -4,6 +4,17 @@ pub struct HotkeyBinding {
     pub action: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyAction {
+    Quit,
+    Retry,
+    ReleaseLease,
+    ParkEscalate,
+    ViewReport,
+    RegenerateReport,
+    Back,
+}
+
 pub const DASHBOARD_BINDINGS: [HotkeyBinding; 6] = [
     HotkeyBinding {
         key: 'q',
@@ -42,14 +53,25 @@ pub const REPORT_BINDINGS: [HotkeyBinding; 2] = [
     },
 ];
 
-pub const WORKER_POOL_HOTKEYS: [char; 3] = ['v', 'g', 'b'];
-
 pub fn dashboard_controls_legend() -> String {
     format_bindings("Keys: ", &DASHBOARD_BINDINGS)
 }
 
 pub fn report_controls_legend() -> String {
     format_bindings("Keys: ", &REPORT_BINDINGS)
+}
+
+pub fn action_for_key(key: char) -> Option<HotkeyAction> {
+    match key {
+        'q' => Some(HotkeyAction::Quit),
+        'r' => Some(HotkeyAction::Retry),
+        'l' => Some(HotkeyAction::ReleaseLease),
+        'p' => Some(HotkeyAction::ParkEscalate),
+        'v' => Some(HotkeyAction::ViewReport),
+        'g' => Some(HotkeyAction::RegenerateReport),
+        'b' => Some(HotkeyAction::Back),
+        _ => None,
+    }
 }
 
 fn format_bindings(prefix: &str, bindings: &[HotkeyBinding]) -> String {

@@ -22,7 +22,11 @@ impl<'a> GitClient<'a> {
     }
 
     pub fn clear_stale_lock_file(&self) -> Result<(), GardenerError> {
-        let out = self.run(["sh", "-lc", "test -f .git/index.lock && rm .git/index.lock || true"])?;
+        let out = self.run([
+            "sh",
+            "-lc",
+            "test -f .git/index.lock && rm .git/index.lock || true",
+        ])?;
         if out.exit_code != 0 {
             return Err(GardenerError::Process(
                 "failed to clear stale lock file".to_string(),
@@ -36,7 +40,11 @@ impl<'a> GitClient<'a> {
         Ok(out.exit_code != 0)
     }
 
-    pub fn verify_ancestor(&self, maybe_ancestor: &str, branch: &str) -> Result<bool, GardenerError> {
+    pub fn verify_ancestor(
+        &self,
+        maybe_ancestor: &str,
+        branch: &str,
+    ) -> Result<bool, GardenerError> {
         let out = self.run(["git", "merge-base", "--is-ancestor", maybe_ancestor, branch])?;
         Ok(out.exit_code == 0)
     }

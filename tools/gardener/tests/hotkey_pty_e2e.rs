@@ -21,8 +21,7 @@ fn upsert_task(store: &BacklogStore, title: &str) {
         .expect("upsert task");
 }
 
-#[test]
-fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
+fn setup_pty_fixture() -> (std::path::PathBuf, TempDir, BacklogStore, Command) {
     let bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_gardener"));
     let dir = TempDir::new().expect("tempdir");
     let config_path = dir.path().join("config.toml");
@@ -81,7 +80,7 @@ stale_if_head_commit_differs = true
         upsert_task(&store, &format!("PTY task {idx}"));
     }
 
-    let mut cmd = Command::new(bin);
+    let mut cmd = Command::new(&bin);
     cmd.arg("--config")
         .arg(&config_path)
         .arg("--working-dir")
@@ -89,6 +88,12 @@ stale_if_head_commit_differs = true
         .arg("--quit-after")
         .arg("500")
         .env("GARDENER_FORCE_TTY", "1");
+    (report_path, dir, store, cmd)
+}
+
+#[test]
+fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
+    let (report_path, _dir, store, cmd) = setup_pty_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
 
     session.send("v").expect("send v");
@@ -112,5 +117,22 @@ stale_if_head_commit_differs = true
     assert!(
         remaining > 0,
         "expected quit hotkey to stop run before finishing all seeded tasks"
+    );
+}
+
+#[test]
+fn pty_e2e_ctrl_c_quits() {
+    let (_report_path, _dir, store, cmd) = setup_pty_fixture();
+    let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
+    session.send("\u{3}").expect("send ctrl-c");
+    session.expect(Eof).expect("session exited");
+    let tasks = store.list_tasks().expect("list tasks");
+    let remaining = tasks
+        .iter()
+        .filter(|task| task.status != TaskStatus::Complete)
+        .count();
+    assert!(
+        remaining > 0,
+        "expected ctrl-c to stop run before finishing all seeded tasks"
     );
 }

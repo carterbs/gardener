@@ -1,11 +1,14 @@
 use crate::backlog_store::BacklogStore;
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
+use crate::hotkeys::{action_for_key, HotkeyAction as AppHotkeyAction};
 use crate::logging::structured_fallback_line;
+use crate::priority::Priority;
 use crate::runtime::ProductionRuntime;
 use crate::runtime::Terminal;
 use crate::scheduler::{SchedulerEngine, SchedulerRunSummary};
 use crate::startup::refresh_quality_report;
+use crate::task_identity::TaskKind;
 use crate::tui::{BacklogView, QueueStats, WorkerRow};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
@@ -29,7 +32,7 @@ pub fn run_worker_pool_fsm(
     task_override: Option<&str>,
 ) -> Result<usize, GardenerError> {
     let mut report_visible = false;
-    let parallelism = cfg.orchestrator.parallelism.max(1) as usize;
+    let parallelism = (cfg.orchestrator.parallelism.max(1) as usize).min(target.max(1));
     let mut workers = (0..parallelism)
         .map(|idx| WorkerRow {
             worker_id: format!("worker-{}", idx + 1),
@@ -47,13 +50,33 @@ pub fn run_worker_pool_fsm(
     render(terminal, &workers, &dashboard_snapshot(store)?)?;
 
     while completed < target {
-        handle_hotkeys(runtime, scope, cfg, terminal, &mut report_visible)?;
+        if handle_hotkeys(
+            runtime,
+            scope,
+            cfg,
+            store,
+            &workers,
+            terminal,
+            &mut report_visible,
+        )? {
+            return Ok(completed);
+        }
         if report_visible {
             continue;
         }
         let mut claimed_any = false;
         for idx in 0..workers.len() {
-            handle_hotkeys(runtime, scope, cfg, terminal, &mut report_visible)?;
+            if handle_hotkeys(
+                runtime,
+                scope,
+                cfg,
+                store,
+                &workers,
+                terminal,
+                &mut report_visible,
+            )? {
+                return Ok(completed);
+            }
             if report_visible {
                 break;
             }
@@ -83,7 +106,10 @@ pub fn run_worker_pool_fsm(
 
             let summary = execute_task(
                 cfg,
+                runtime.process_runner.as_ref(),
+                scope,
                 &worker_id,
+                &task.task_id,
                 task_override.unwrap_or(task.title.as_str()),
             )?;
             for event in summary.logs {
@@ -117,21 +143,55 @@ fn handle_hotkeys(
     runtime: &ProductionRuntime,
     scope: &RuntimeScope,
     cfg: &AppConfig,
+    store: &BacklogStore,
+    workers: &[WorkerRow],
     terminal: &dyn Terminal,
     report_visible: &mut bool,
-) -> Result<(), GardenerError> {
+) -> Result<bool, GardenerError> {
     if !terminal.stdin_is_tty() {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(key) = terminal.poll_key(10)? {
-        match report_hotkey_action(key) {
-            ReportHotkeyAction::ShowReport => *report_visible = true,
-            ReportHotkeyAction::RegenerateReport => {
+        match hotkey_action(key) {
+            Some(AppHotkeyAction::Quit) => return Ok(true),
+            Some(AppHotkeyAction::Retry) => {
+                let released = store.recover_stale_leases(now_unix_millis())?;
+                terminal.write_line(&format!(
+                    "retry requested: released {released} stale lease(s)"
+                ))?;
+            }
+            Some(AppHotkeyAction::ReleaseLease) => {
+                let release_now = now_unix_millis()
+                    .saturating_add((cfg.scheduler.lease_timeout_seconds as i64 + 1) * 1000);
+                let released = store.recover_stale_leases(release_now)?;
+                terminal.write_line(&format!(
+                    "release-lease requested: released {released} lease(s)"
+                ))?;
+            }
+            Some(AppHotkeyAction::ParkEscalate) => {
+                let active = workers.iter().filter(|row| row.state == "doing").count();
+                let task = store.upsert_task(crate::backlog_store::NewTask {
+                    kind: TaskKind::Maintenance,
+                    title: format!("Escalation requested for {active} active worker(s)"),
+                    details: "Operator requested park/escalate from TUI hotkey".to_string(),
+                    scope_key: "runtime".to_string(),
+                    priority: Priority::P0,
+                    source: "tui_hotkey".to_string(),
+                    related_pr: None,
+                    related_branch: None,
+                })?;
+                terminal.write_line(&format!(
+                    "park/escalate requested: created P0 escalation task {}",
+                    short_task_id(&task.task_id)
+                ))?;
+            }
+            Some(AppHotkeyAction::ViewReport) => *report_visible = true,
+            Some(AppHotkeyAction::RegenerateReport) => {
                 let _ = refresh_quality_report(runtime, cfg, scope, true)?;
                 *report_visible = true;
             }
-            ReportHotkeyAction::HideReport => *report_visible = false,
-            ReportHotkeyAction::Noop => {}
+            Some(AppHotkeyAction::Back) => *report_visible = false,
+            None => {}
         }
     }
     if *report_visible {
@@ -143,24 +203,18 @@ fn handle_hotkeys(
         };
         terminal.draw_report(&report_path.display().to_string(), &report)?;
     }
-    Ok(())
+    Ok(false)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReportHotkeyAction {
-    ShowReport,
-    RegenerateReport,
-    HideReport,
-    Noop,
+fn now_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
-fn report_hotkey_action(key: char) -> ReportHotkeyAction {
-    match key {
-        'v' => ReportHotkeyAction::ShowReport,
-        'g' => ReportHotkeyAction::RegenerateReport,
-        'b' => ReportHotkeyAction::HideReport,
-        _ => ReportHotkeyAction::Noop,
-    }
+fn hotkey_action(key: char) -> Option<AppHotkeyAction> {
+    action_for_key(key)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,10 +301,10 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 
 #[cfg(test)]
 mod tests {
-    use super::{report_hotkey_action, run_worker_pool_fsm, ReportHotkeyAction};
+    use super::{hotkey_action, run_worker_pool_fsm};
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
-    use crate::hotkeys::{REPORT_BINDINGS, WORKER_POOL_HOTKEYS};
+    use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
     use crate::priority::Priority;
     use crate::runtime::{
         FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
@@ -294,35 +348,30 @@ mod tests {
     #[test]
     fn report_hotkey_actions_cover_report_bindings() {
         for binding in REPORT_BINDINGS {
-            let action = report_hotkey_action(binding.key);
-            assert_ne!(action, ReportHotkeyAction::Noop);
+            let action = hotkey_action(binding.key);
+            assert!(action.is_some());
         }
     }
 
     #[test]
     fn report_hotkey_actions_match_contract() {
-        assert_eq!(report_hotkey_action('v'), ReportHotkeyAction::ShowReport);
-        assert_eq!(
-            report_hotkey_action('g'),
-            ReportHotkeyAction::RegenerateReport
-        );
-        assert_eq!(report_hotkey_action('b'), ReportHotkeyAction::HideReport);
-        assert_eq!(report_hotkey_action('x'), ReportHotkeyAction::Noop);
+        assert_eq!(hotkey_action('q'), Some(HotkeyAction::Quit)); // hotkey:q
+        assert_eq!(hotkey_action('r'), Some(HotkeyAction::Retry)); // hotkey:r
+        assert_eq!(hotkey_action('l'), Some(HotkeyAction::ReleaseLease)); // hotkey:l
+        assert_eq!(hotkey_action('p'), Some(HotkeyAction::ParkEscalate)); // hotkey:p
+        assert_eq!(hotkey_action('v'), Some(HotkeyAction::ViewReport)); // hotkey:v
+        assert_eq!(hotkey_action('g'), Some(HotkeyAction::RegenerateReport)); // hotkey:g
+        assert_eq!(hotkey_action('b'), Some(HotkeyAction::Back)); // hotkey:b
+        assert_eq!(hotkey_action('x'), None);
     }
 
     #[test]
-    fn worker_pool_hotkeys_have_behavioral_coverage() {
-        // hotkey:v
-        assert_eq!(report_hotkey_action('v'), ReportHotkeyAction::ShowReport);
-        // hotkey:g
-        assert_eq!(
-            report_hotkey_action('g'),
-            ReportHotkeyAction::RegenerateReport
-        );
-        // hotkey:b
-        assert_eq!(report_hotkey_action('b'), ReportHotkeyAction::HideReport);
-        for key in WORKER_POOL_HOTKEYS {
-            assert_ne!(report_hotkey_action(key), ReportHotkeyAction::Noop);
+    fn all_advertised_hotkeys_have_actions() {
+        for binding in DASHBOARD_BINDINGS {
+            assert!(action_for_key(binding.key).is_some());
+        }
+        for binding in REPORT_BINDINGS {
+            assert!(action_for_key(binding.key).is_some());
         }
     }
 
@@ -417,5 +466,68 @@ mod tests {
             .expect("read regenerated report");
         assert!(!report.contains("OLD_MARKER"));
         assert!(!terminal.report_draws().is_empty());
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_quits_on_q() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "quit task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['q']);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        assert_eq!(completed, 0);
+    }
+
+    #[test]
+    fn run_worker_pool_limits_worker_slots_to_target() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "single-slot task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 3;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let terminal = FakeTerminal::new(false);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        let writes = terminal.written_lines();
+        assert!(writes.iter().any(|line| line.contains("worker-1")));
+        assert!(!writes.iter().any(|line| line.contains("worker-2")));
     }
 }

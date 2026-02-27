@@ -2,15 +2,24 @@ pub mod backlog_snapshot;
 pub mod backlog_store;
 pub mod config;
 pub mod errors;
+pub mod fsm;
+pub mod learning_loop;
 pub mod output_envelope;
+pub mod postmerge_analysis;
+pub mod postmortem;
 pub mod pr_audit;
 pub mod priority;
+pub mod prompt_context;
+pub mod prompt_knowledge;
+pub mod prompt_registry;
+pub mod prompts;
 pub mod quality_domain_catalog;
 pub mod quality_evidence;
 pub mod quality_grades;
 pub mod quality_scoring;
 pub mod repo_intelligence;
 pub mod runtime;
+pub mod scheduler;
 pub mod seed_runner;
 pub mod seeding;
 pub mod startup;
@@ -20,8 +29,12 @@ pub mod triage_agent_detection;
 pub mod triage_discovery;
 pub mod triage_interview;
 pub mod types;
+pub mod worker;
+pub mod worker_identity;
+pub mod worker_pool;
 pub mod worktree_audit;
 
+use backlog_store::BacklogStore;
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
@@ -30,6 +43,7 @@ use startup::run_startup_audits;
 use triage::ensure_profile_for_run;
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
+use worker_pool::{run_worker_pool_fsm, run_worker_pool_stub};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gardener")]
@@ -185,6 +199,38 @@ pub fn run_with_runtime(
         let mut cfg_for_startup = cfg.clone();
         let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
         runtime.terminal.write_line("phase3 quality-grades-only")?;
+        return Ok(0);
+    }
+
+    if let Some(target) = cli.target {
+        let mut cfg_for_startup = cfg.clone();
+        if !cfg_for_startup.execution.test_mode {
+            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+        }
+        if cfg_for_startup.execution.worker_mode == "stub_complete" {
+            let db_path = startup
+                .scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&startup.scope.working_dir)
+                .join(".cache/gardener/backlog.sqlite");
+            let store = BacklogStore::open(db_path)?;
+            let summary = run_worker_pool_stub(
+                &store,
+                cfg_for_startup.orchestrator.parallelism as usize,
+                target as usize,
+            )?;
+            runtime.terminal.write_line(&format!(
+                "phase4 scheduler-stub complete: target={} completed={}",
+                target, summary.completed_count
+            ))?;
+            return Ok(0);
+        }
+        let completed = run_worker_pool_fsm(&cfg_for_startup, target as usize, cli.task.as_deref())?;
+        runtime.terminal.write_line(&format!(
+            "phase5 worker-fsm complete: target={} completed={}",
+            target, completed
+        ))?;
         return Ok(0);
     }
 

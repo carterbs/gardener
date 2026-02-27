@@ -1,6 +1,9 @@
 [scope]
 working_dir = "."
 
+[orchestrator]
+parallelism = 3
+
 [validation]
 command = "npm run validate"
 allow_agent_discovery = true
@@ -8,19 +11,26 @@ allow_agent_discovery = true
 [agent]
 default = "codex"
 
-[states.understand]
-backend = "codex"
-model = "gpt-5-codex"
-
-[states.doing]
-backend = "codex"
-model = "gpt-5-codex"
-
 [startup]
 validate_on_boot = false
 validation_command = "npm run validate"
 
+[quality_report]
+path = "tools/gardener/tests/fixtures/quality-grades-phase4.md"
+stale_after_days = 7
+stale_if_head_commit_differs = true
+
+[triage]
+output_path = "tools/gardener/tests/fixtures/triage/expected-profiles/phase03-profile.toml"
+stale_after_commits = 50
+discovery_max_turns = 12
+
+[seeding]
+backend = "codex"
+model = "gpt-5-codex"
+max_turns = 12
+
 [execution]
 permissions_mode = "permissive_v1"
-worker_mode = "normal"
+worker_mode = "stub_complete"
 test_mode = true

@@ -50,3 +50,12 @@ pub fn parse_last_envelope(
 
     Ok(envelope)
 }
+
+pub fn parse_typed_payload<T: serde::de::DeserializeOwned>(
+    raw_text: &str,
+    expected_state: WorkerState,
+) -> Result<T, GardenerError> {
+    let envelope = parse_last_envelope(raw_text, expected_state)?;
+    serde_json::from_value(envelope.payload)
+        .map_err(|e| GardenerError::OutputEnvelope(format!("payload deserialize error: {e}")))
+}

@@ -15,6 +15,7 @@ use crate::errors::GardenerError;
 pub struct WorkerRow {
     pub worker_id: String,
     pub state: String,
+    pub task_title: String,
     pub tool_line: String,
     pub breadcrumb: String,
     pub last_heartbeat_secs: u64,
@@ -132,19 +133,32 @@ pub fn render_dashboard(
                         }
                         _ => Style::default().fg(Color::Gray),
                     };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{:<8}", row.worker_id),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(format!("{:<10}", row.state), state_style),
-                        Span::raw("  "),
-                        Span::styled("tool=", Style::default().fg(Color::Blue)),
-                        Span::raw(format!("{:<28}", row.tool_line)),
-                        Span::raw("  "),
-                        Span::styled("path=", Style::default().fg(Color::Blue)),
-                        Span::raw(row.breadcrumb.clone()),
-                    ]))
+                    let checkbox = match row.state.as_str() {
+                        "complete" => "[x]",
+                        "failed" => "[!]",
+                        _ => "[ ]",
+                    };
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::styled(
+                                format!("{:<3}", row.worker_id),
+                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(": "),
+                            Span::raw(format!("{checkbox} {}", row.task_title)),
+                        ]),
+                        Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled("status=", Style::default().fg(Color::Blue)),
+                            Span::styled(format!("{:<10}", row.state), state_style),
+                            Span::raw("  "),
+                            Span::styled("action=", Style::default().fg(Color::Blue)),
+                            Span::raw(format!("{:<24}", row.tool_line)),
+                            Span::raw("  "),
+                            Span::styled("path=", Style::default().fg(Color::Blue)),
+                            Span::raw(row.breadcrumb.clone()),
+                        ]),
+                    ])
                 })
                 .collect::<Vec<_>>();
 
@@ -403,6 +417,7 @@ mod tests {
         WorkerRow {
             worker_id: "w1".to_string(),
             state: "doing".to_string(),
+            task_title: "task: demo".to_string(),
             tool_line: "rg --files".to_string(),
             breadcrumb: "understand>doing".to_string(),
             last_heartbeat_secs: heartbeat,

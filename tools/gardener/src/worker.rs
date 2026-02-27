@@ -80,6 +80,7 @@ pub fn execute_task(
     worker_id: &str,
     task_id: &str,
     task_summary: &str,
+    attempt_count: i64,
 ) -> Result<WorkerRunSummary, GardenerError> {
     append_run_log(
         "debug",
@@ -87,13 +88,14 @@ pub fn execute_task(
         json!({
             "worker_id": worker_id,
             "task_id": task_id,
+            "attempt_count": attempt_count,
             "test_mode": cfg.execution.test_mode
         }),
     );
     if cfg.execution.test_mode {
         return execute_task_simulated(cfg, worker_id, task_id, task_summary);
     }
-    execute_task_live(cfg, process_runner, scope, worker_id, task_id, task_summary)
+    execute_task_live(cfg, process_runner, scope, worker_id, task_id, task_summary, attempt_count)
 }
 
 fn execute_task_live(
@@ -103,6 +105,7 @@ fn execute_task_live(
     worker_id: &str,
     task_id: &str,
     task_summary: &str,
+    attempt_count: i64,
 ) -> Result<WorkerRunSummary, GardenerError> {
     append_run_log(
         "info",
@@ -124,6 +127,39 @@ fn execute_task_live(
     let branch = worktree_branch_for(worker_id, task_id);
     let worktree_client = WorktreeClient::new(process_runner, repo_root);
     worktree_client.create_or_resume(&worktree_path, &branch)?;
+
+    if attempt_count > 1 {
+        append_run_log(
+            "info",
+            "worker.task.rebase_before_retry",
+            json!({
+                "worker_id": worker_id,
+                "task_id": task_id,
+                "attempt_count": attempt_count,
+                "branch": branch
+            }),
+        );
+        let git = GitClient::new(process_runner, &worktree_path);
+        if let Err(e) = git.rebase_onto_main("main") {
+            append_run_log(
+                "warn",
+                "worker.task.rebase_failed",
+                json!({
+                    "worker_id": worker_id,
+                    "task_id": task_id,
+                    "error": e.to_string()
+                }),
+            );
+            return Ok(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Failed,
+                logs,
+                teardown: None,
+                failure_reason: Some(format!("rebase before retry failed: {e}")),
+            });
+        }
+    }
 
     let understand_result = run_agent_turn(
         cfg,
@@ -1150,6 +1186,7 @@ mod tests {
             "worker-1",
             "task-1",
             "feature: add prompt packet",
+            1,
         )
         .expect("ok");
 

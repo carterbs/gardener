@@ -133,6 +133,7 @@ pub fn run_worker_pool_fsm(
                 let worker_id = worker_id.clone();
                 let task_id = task.task_id.clone();
                 let task_summary = task_override.unwrap_or(task.title.as_str()).to_string();
+                let attempt_count = task.attempt_count;
                 scope_guard.spawn(move || {
                     let result = execute_task(
                         cfg,
@@ -141,6 +142,7 @@ pub fn run_worker_pool_fsm(
                         &worker_id,
                         &task_id,
                         &task_summary,
+                        attempt_count,
                     );
                     let _ = tx.send(result);
                 });

@@ -16,6 +16,8 @@ use std::cell::RefCell;
 use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const WORKER_LIST_ROW_HEIGHT: usize = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
     pub worker_id: String,
@@ -401,9 +403,28 @@ fn draw_dashboard_frame(
         ),
         body[0],
     );
+    let workers_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(body_columns[0]);
+    let viewport_height = workers_panel[1]
+        .height
+        .min(frame.area().height.saturating_sub(12).max(1));
+    let worker_row_capacity = (viewport_height as usize / WORKER_LIST_ROW_HEIGHT).max(1);
+    let max_worker_offset = workers.len().saturating_sub(worker_row_capacity);
+    let worker_offset = WORKERS_VIEWPORT_OFFSET.with(|cell| {
+        let mut offset = cell.borrow_mut();
+        if *offset > max_worker_offset {
+            *offset = max_worker_offset;
+        }
+        *offset
+    });
+    let worker_end = (worker_offset + worker_row_capacity).min(workers.len());
 
     let worker_items = workers
         .iter()
+        .skip(worker_offset)
+        .take(worker_row_capacity)
         .map(|row| {
             let state_style = match row.state.as_str() {
                 "complete" => Style::default().fg(Color::Green),
@@ -442,13 +463,18 @@ fn draw_dashboard_frame(
         })
         .collect::<Vec<_>>();
 
-    let workers_panel = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body_columns[0]);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "Workers",
+            if workers.len() > worker_row_capacity {
+                format!(
+                    "Workers ({:02}-{:02}/{:02})",
+                    worker_offset + 1,
+                    worker_end,
+                    workers.len()
+                )
+            } else {
+                "Workers".to_string()
+            },
             Style::default()
                 .fg(Color::Rgb(126, 231, 135))
                 .add_modifier(Modifier::BOLD),
@@ -668,6 +694,7 @@ thread_local! {
     static LIVE_TUI: RefCell<Option<Terminal<CrosstermBackend<Stdout>>>> = const { RefCell::new(None) };
     static LIVE_TUI_SIZE: RefCell<Option<(u16, u16)>> = const { RefCell::new(None) };
     static LIVE_STARTUP_HEADLINE: RefCell<Option<LiveStartupHeadlineState>> = const { RefCell::new(None) };
+    static WORKERS_VIEWPORT_OFFSET: RefCell<usize> = const { RefCell::new(0) };
 }
 
 fn now_unix_millis() -> u128 {
@@ -692,6 +719,30 @@ fn live_startup_headline() -> StartupHeadlineView {
         let elapsed = now.saturating_sub(state.started_at_ms);
         StartupHeadlineView::from_elapsed_ms(elapsed, state.verb_idx)
     })
+}
+
+pub fn scroll_workers_down() -> bool {
+    WORKERS_VIEWPORT_OFFSET.with(|cell| {
+        let mut offset = cell.borrow_mut();
+        let old = *offset;
+        *offset = offset.saturating_add(1);
+        *offset != old
+    })
+}
+
+pub fn scroll_workers_up() -> bool {
+    WORKERS_VIEWPORT_OFFSET.with(|cell| {
+        let mut offset = cell.borrow_mut();
+        let old = *offset;
+        *offset = offset.saturating_sub(1);
+        *offset != old
+    })
+}
+
+pub fn reset_workers_scroll() {
+    WORKERS_VIEWPORT_OFFSET.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
 }
 
 pub fn draw_dashboard_live(
@@ -1098,8 +1149,9 @@ fn teardown_terminal(
 mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
-        render_dashboard_at_tick, render_triage, BacklogView, ProblemClass, QueueStats,
-        StartupHeadlineView, WorkerMetrics, WorkerRow,
+        render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
+        scroll_workers_up, BacklogView, ProblemClass, QueueStats, StartupHeadlineView,
+        WorkerMetrics, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -1308,5 +1360,49 @@ mod tests {
         assert!(running.startup_active);
         assert!(!frozen.startup_active);
         assert_eq!(running.spinner(), frozen.spinner());
+    }
+
+    #[test]
+    fn workers_panel_uses_scrollable_viewport() {
+        reset_workers_scroll();
+        let workers = (1..=9)
+            .map(|idx| WorkerRow {
+                worker_id: format!("w{idx}"),
+                state: "doing".to_string(),
+                task_title: format!("task {idx}"),
+                tool_line: "tool".to_string(),
+                breadcrumb: "understand>doing".to_string(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: true,
+                session_missing: false,
+            })
+            .collect::<Vec<_>>();
+        let stats = QueueStats {
+            ready: 0,
+            active: workers.len(),
+            failed: 0,
+            p0: 0,
+            p1: workers.len(),
+            p2: 0,
+        };
+        let backlog = BacklogView::default();
+
+        let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
+        assert!(initial.contains("w1 "));
+        assert!(!initial.contains("w9 "));
+
+        for _ in 0..10 {
+            let _ = scroll_workers_down();
+        }
+        let scrolled = render_dashboard(&workers, &stats, &backlog, 80, 24);
+        assert!(!scrolled.contains("w1 "));
+        assert!(scrolled.contains("w9 "));
+
+        for _ in 0..10 {
+            let _ = scroll_workers_up();
+        }
+        let reset = render_dashboard(&workers, &stats, &backlog, 80, 24);
+        assert!(reset.contains("w1 "));
     }
 }

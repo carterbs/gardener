@@ -10,7 +10,10 @@ use crate::runtime::Terminal;
 use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
-use crate::tui::{BacklogView, QueueStats, WorkerRow};
+use crate::tui::{
+    reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
+    WorkerRow,
+};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 use serde_json::json;
@@ -25,6 +28,7 @@ pub fn run_worker_pool_fsm(
     task_override: Option<&str>,
 ) -> Result<usize, GardenerError> {
     clear_interrupt();
+    reset_workers_scroll();
     append_run_log(
         "info",
         "worker_pool.started",
@@ -324,6 +328,12 @@ fn handle_hotkeys(
                 request_interrupt();
                 return Ok(true);
             }
+            Some(AppHotkeyAction::ScrollDown) => {
+                redraw_dashboard = scroll_workers_down();
+            }
+            Some(AppHotkeyAction::ScrollUp) => {
+                redraw_dashboard = scroll_workers_up();
+            }
             Some(AppHotkeyAction::Retry) => {
                 let released = store.recover_stale_leases(now_unix_millis())?;
                 append_run_log(
@@ -584,6 +594,8 @@ mod tests {
     #[test]
     fn hotkey_actions_match_default_and_operator_contracts() {
         assert_eq!(hotkey_action('q', false), Some(HotkeyAction::Quit)); // hotkey:q
+        assert_eq!(hotkey_action('j', false), Some(HotkeyAction::ScrollDown)); // hotkey:j
+        assert_eq!(hotkey_action('k', false), Some(HotkeyAction::ScrollUp)); // hotkey:k
         assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
         assert_eq!(
             hotkey_action('g', false),

@@ -10,15 +10,25 @@ pub enum HotkeyAction {
     Retry,
     ReleaseLease,
     ParkEscalate,
+    ScrollDown,
+    ScrollUp,
     ViewReport,
     RegenerateReport,
     Back,
 }
 
-pub const DASHBOARD_BINDINGS: [HotkeyBinding; 3] = [
+pub const DASHBOARD_BINDINGS: [HotkeyBinding; 5] = [
     HotkeyBinding {
         key: 'q',
         action: "quit",
+    },
+    HotkeyBinding {
+        key: 'j',
+        action: "scroll down",
+    },
+    HotkeyBinding {
+        key: 'k',
+        action: "scroll up",
     },
     HotkeyBinding {
         key: 'v',
@@ -79,6 +89,8 @@ pub fn action_for_key(key: char) -> Option<HotkeyAction> {
 pub fn action_for_key_with_mode(key: char, operator_hotkeys: bool) -> Option<HotkeyAction> {
     match key {
         'q' => Some(HotkeyAction::Quit),
+        'j' => Some(HotkeyAction::ScrollDown),
+        'k' => Some(HotkeyAction::ScrollUp),
         'r' if operator_hotkeys => Some(HotkeyAction::Retry),
         'l' if operator_hotkeys => Some(HotkeyAction::ReleaseLease),
         'p' if operator_hotkeys => Some(HotkeyAction::ParkEscalate),

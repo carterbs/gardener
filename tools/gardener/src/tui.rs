@@ -17,6 +17,8 @@ use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WORKER_LIST_ROW_HEIGHT: usize = 2;
+const COMMAND_DETAIL_TOGGLE_HINT_OPEN: &str = "▾ Optional command detail";
+const COMMAND_DETAIL_TOGGLE_HINT_CLOSED: &str = "▸ Optional command detail";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
@@ -29,6 +31,8 @@ pub struct WorkerRow {
     pub session_age_secs: u64,
     pub lease_held: bool,
     pub session_missing: bool,
+    pub commands_expanded: bool,
+    pub command_details: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +63,35 @@ const STARTUP_VERBS: [&str; 6] = [
 const STARTUP_SPINNER_TICK_MS: u128 = 150;
 const STARTUP_ELLIPSIS_TICK_MS: u128 = 400;
 const STARTUP_SPINNER_TICKS: u32 = 30;
+fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
+    let mut command = command.to_string();
+    let prefix = format!("{timestamp}  ");
+    if max_width <= prefix.len() {
+        return prefix;
+    }
+    let available = max_width.saturating_sub(prefix.len());
+    if command.len() > available {
+        command = truncate_right(&command, available);
+    }
+    format!("{prefix}{command}")
+}
+
+fn truncate_right(input: &str, max_width: usize) -> String {
+    if input.len() <= max_width {
+        return input.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let mut chars = input.chars().collect::<Vec<_>>();
+    chars.truncate(max_width - 1);
+    let mut output = chars.into_iter().collect::<String>();
+    output.push('…');
+    output
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkerMetrics {
@@ -441,6 +474,7 @@ fn draw_dashboard_frame(
     });
     let worker_end = (worker_offset + worker_row_capacity).min(workers.len());
 
+    let command_line_width = workers_panel[1].width.saturating_sub(8) as usize;
     let worker_items = workers
         .iter()
         .enumerate()
@@ -469,7 +503,12 @@ fn draw_dashboard_frame(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)
             };
-            ListItem::new(vec![
+            let detail_hint = if row.commands_expanded {
+                COMMAND_DETAIL_TOGGLE_HINT_OPEN
+            } else {
+                COMMAND_DETAIL_TOGGLE_HINT_CLOSED
+            };
+            let mut lines = vec![
                 Line::from(vec![
                     Span::styled(
                         format!("{} {:<3}", marker, row.worker_id),
@@ -489,7 +528,30 @@ fn draw_dashboard_frame(
                     Span::styled("Flow: ", Style::default().fg(Color::Blue)),
                     Span::raw(humanize_breadcrumb(&row.breadcrumb)),
                 ]),
-            ])
+            ];
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    detail_hint,
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                ),
+            ]));
+            if row.commands_expanded {
+                lines.extend(row.command_details.iter().map(|(timestamp, command)| {
+                    Line::from(vec![
+                        Span::styled(
+                            format!(
+                                "    {}",
+                                command_row_with_timestamp(timestamp, command, command_line_width)
+                            ),
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::DIM),
+                        ),
+                    ])
+                }));
+            }
+            ListItem::new(lines)
         })
         .collect::<Vec<_>>();
 
@@ -799,6 +861,15 @@ pub fn scroll_workers_up() -> bool {
         });
     }
     moved
+}
+
+pub fn toggle_selected_worker_command_detail(workers: &mut [WorkerRow]) -> bool {
+    let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
+    if selected >= workers.len() {
+        return false;
+    }
+    workers[selected].commands_expanded = !workers[selected].commands_expanded;
+    true
 }
 
 pub fn reset_workers_scroll() {
@@ -1221,8 +1292,8 @@ mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
         render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
-        scroll_workers_up, BacklogView, ProblemClass, QueueStats, StartupHeadlineView,
-        WorkerMetrics, WorkerRow,
+        scroll_workers_up, toggle_selected_worker_command_detail, BacklogView, ProblemClass,
+        QueueStats, StartupHeadlineView, WorkerMetrics, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -1236,6 +1307,8 @@ mod tests {
             session_age_secs: 33,
             lease_held: true,
             session_missing: missing,
+            commands_expanded: false,
+            command_details: Vec::new(),
         }
     }
 
@@ -1381,6 +1454,110 @@ mod tests {
     }
 
     #[test]
+    fn command_detail_rendering_is_per_worker_and_toggable() {
+        let frame = render_dashboard(
+            &[
+                WorkerRow {
+                    worker_id: "w1".to_string(),
+                    state: "doing".to_string(),
+                    task_title: "task one".to_string(),
+                    tool_line: "tool".to_string(),
+                    breadcrumb: "understand>doing".to_string(),
+                    last_heartbeat_secs: 0,
+                    session_age_secs: 0,
+                    lease_held: true,
+                    session_missing: false,
+                    commands_expanded: false,
+                    command_details: vec![("12:34:56".to_string(), "echo first".to_string())],
+                },
+                WorkerRow {
+                    worker_id: "w2".to_string(),
+                    state: "reviewing".to_string(),
+                    task_title: "task two".to_string(),
+                    tool_line: "tool".to_string(),
+                    breadcrumb: "reviewing".to_string(),
+                    last_heartbeat_secs: 0,
+                    session_age_secs: 0,
+                    lease_held: true,
+                    session_missing: false,
+                    commands_expanded: true,
+                    command_details: vec![("23:45:01".to_string(), "echo second".to_string())],
+                },
+            ],
+            &QueueStats {
+                ready: 0,
+                active: 2,
+                failed: 0,
+                p0: 0,
+                p1: 2,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            120,
+            24,
+        );
+        assert!(frame.contains("▸ Optional command detail"));
+        assert!(frame.contains("▾ Optional command detail"));
+        assert!(!frame.contains("12:34:56  echo first"));
+        assert!(frame.contains("23:45:01  echo second"));
+    }
+
+    #[test]
+    fn toggle_selected_worker_command_detail_targets_selected_worker() {
+        reset_workers_scroll();
+        let mut workers = vec![
+            WorkerRow {
+                worker_id: "w1".to_string(),
+                state: "doing".to_string(),
+                task_title: "task one".to_string(),
+                tool_line: "tool".to_string(),
+                breadcrumb: "understand>doing".to_string(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: true,
+                session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
+            },
+            WorkerRow {
+                worker_id: "w2".to_string(),
+                state: "doing".to_string(),
+                task_title: "task two".to_string(),
+                tool_line: "tool".to_string(),
+                breadcrumb: "understand>doing".to_string(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: true,
+                session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
+            },
+        ];
+        let _ = render_dashboard(
+            &workers,
+            &QueueStats {
+                ready: 0,
+                active: 0,
+                failed: 0,
+                p0: 0,
+                p1: 2,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            80,
+            24,
+        );
+        assert!(toggle_selected_worker_command_detail(&mut workers));
+        assert!(workers[0].commands_expanded);
+        assert!(!workers[1].commands_expanded);
+        let w1_before = workers[1].commands_expanded;
+        let _ = scroll_workers_down();
+        assert!(toggle_selected_worker_command_detail(&mut workers));
+        assert_eq!(workers[0].commands_expanded, true);
+        assert_ne!(workers[1].commands_expanded, w1_before);
+    }
+
+    #[test]
     fn worker_metrics_are_derived_from_states() {
         let workers = vec![
             WorkerRow {
@@ -1393,6 +1570,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             },
             WorkerRow {
                 worker_id: "w2".to_string(),
@@ -1404,6 +1583,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             },
             WorkerRow {
                 worker_id: "w3".to_string(),
@@ -1415,6 +1596,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             },
         ];
         let metrics = WorkerMetrics::from_workers(&workers);
@@ -1447,6 +1630,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: true,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             })
             .collect::<Vec<_>>();
         let stats = QueueStats {

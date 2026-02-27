@@ -52,8 +52,9 @@ use errors::GardenerError;
 use runtime::ProductionRuntime;
 use logging::structured_fallback_line;
 use startup::run_startup_audits;
-use triage::ensure_profile_for_run;
+use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
+use tui::{render_dashboard, BacklogView, QueueStats, WorkerRow};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
 use worker_pool::{run_worker_pool_fsm, run_worker_pool_stub};
 
@@ -256,6 +257,25 @@ pub fn run_with_runtime(
 
     if let Some(target) = cli.target.or(default_quit_after) {
         let mut cfg_for_startup = cfg.clone();
+        draw_boot_stage(
+            runtime,
+            "INIT",
+            "Starting Gardener runtime and loading orchestrator state",
+        )?;
+
+        let triage_state = triage_needed(&startup.scope, &cfg_for_startup, runtime, false)?;
+        match triage_state {
+            TriageDecision::Needed => draw_boot_stage(
+                runtime,
+                "TRIAGE",
+                "Collecting repository intelligence and validating setup",
+            )?,
+            TriageDecision::NotNeeded => draw_boot_stage(
+                runtime,
+                "CHECK_TRIAGE",
+                "Existing repository intelligence is valid",
+            )?,
+        }
         if !cfg_for_startup.execution.test_mode {
             let profile = ensure_profile_for_run(
                 runtime,
@@ -267,6 +287,11 @@ pub fn run_with_runtime(
             )?;
             apply_profile_runtime_preferences(&mut cfg_for_startup, profile.as_ref());
         }
+        draw_boot_stage(
+            runtime,
+            "STARTUP_AUDITS",
+            "Refreshing quality grades, worktree/PR health, and startup checks",
+        )?;
         validate_model(&cfg_for_startup.seeding.model)?;
         if !cfg_for_startup.execution.test_mode {
             let factory = AdapterFactory::with_defaults();
@@ -290,6 +315,11 @@ pub fn run_with_runtime(
                 &startup.scope.working_dir,
             )?;
         }
+        draw_boot_stage(
+            runtime,
+            "BACKLOG_SYNC",
+            "Seeding and reconciling backlog before worker assignment",
+        )?;
         if !cfg_for_startup.execution.test_mode {
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
         }
@@ -319,6 +349,11 @@ pub fn run_with_runtime(
             .unwrap_or(&startup.scope.working_dir)
             .join(".cache/gardener/backlog.sqlite");
         let store = BacklogStore::open(db_path)?;
+        draw_boot_stage(
+            runtime,
+            "WORKING",
+            "Dispatching tasks to workers and streaming progress",
+        )?;
         let completed = run_worker_pool_fsm(
             &cfg_for_startup,
             &store,
@@ -355,6 +390,42 @@ pub fn run_with_runtime(
         .write_line("phase1 runtime skeleton initialized")?;
 
     Ok(0)
+}
+
+fn draw_boot_stage(
+    runtime: &ProductionRuntime,
+    stage: &str,
+    detail: &str,
+) -> Result<(), GardenerError> {
+    if !runtime.terminal.stdin_is_tty() {
+        return Ok(());
+    }
+
+    let workers = vec![WorkerRow {
+        worker_id: "sys".to_string(),
+        state: stage.to_ascii_lowercase(),
+        task_title: detail.to_string(),
+        tool_line: "orchestrator".to_string(),
+        breadcrumb: format!("boot>{}", stage.to_ascii_lowercase()),
+        last_heartbeat_secs: 0,
+        session_age_secs: 0,
+        lease_held: false,
+        session_missing: false,
+    }];
+    let stats = QueueStats {
+        ready: 0,
+        active: 0,
+        failed: 0,
+        p0: 0,
+        p1: 0,
+        p2: 0,
+    };
+    let backlog = BacklogView {
+        in_progress: vec![format!("INP SYS {stage}")],
+        queued: vec![],
+    };
+    let frame = render_dashboard(&workers, &stats, &backlog, 120, 30);
+    runtime.terminal.draw(&frame)
 }
 
 fn apply_profile_runtime_preferences(

@@ -10,6 +10,7 @@ fn fake_terminal_captures_tui_frames_and_interactions() {
         &[WorkerRow {
             worker_id: "worker-1".to_string(),
             state: "doing".to_string(),
+            task_title: "Implement queue panel".to_string(),
             tool_line: "git status".to_string(),
             breadcrumb: "understand>doing".to_string(),
             last_heartbeat_secs: 5,

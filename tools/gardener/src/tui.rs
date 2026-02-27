@@ -91,10 +91,6 @@ pub fn render_dashboard(
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
                 .split(chunks[1]);
-            let backlog_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-                .split(body[1]);
 
             let summary = Paragraph::new(Line::from(vec![
                 Span::styled("Ready ", Style::default().fg(Color::Cyan)),
@@ -133,11 +129,6 @@ pub fn render_dashboard(
                         }
                         _ => Style::default().fg(Color::Gray),
                     };
-                    let checkbox = match row.state.as_str() {
-                        "complete" => "[x]",
-                        "failed" => "[!]",
-                        _ => "[ ]",
-                    };
                     ListItem::new(vec![
                         Line::from(vec![
                             Span::styled(
@@ -145,7 +136,7 @@ pub fn render_dashboard(
                                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(": "),
-                            Span::raw(format!("{checkbox} {}", row.task_title)),
+                            Span::raw(row.task_title.clone()),
                         ]),
                         Line::from(vec![
                             Span::raw("    "),
@@ -167,34 +158,34 @@ pub fn render_dashboard(
                 body[0],
             );
 
-            let active_items = if backlog.in_progress.is_empty() {
-                vec![ListItem::new("none")]
+            let mut backlog_items = Vec::new();
+            backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
+                "In Progress",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )])));
+            if backlog.in_progress.is_empty() {
+                backlog_items.push(ListItem::new("- none"));
             } else {
-                backlog
-                    .in_progress
-                    .iter()
-                    .map(|line| ListItem::new(line.clone()))
-                    .collect::<Vec<_>>()
-            };
-            frame.render_widget(
-                List::new(active_items)
-                    .block(Block::default().borders(Borders::ALL).title("Backlog In Progress")),
-                backlog_chunks[0],
-            );
-
-            let queued_items = if backlog.queued.is_empty() {
-                vec![ListItem::new("none")]
+                backlog_items.extend(backlog.in_progress.iter().map(|line| {
+                    ListItem::new(format!("- {line}"))
+                }));
+            }
+            backlog_items.push(ListItem::new(""));
+            backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
+                "Queued",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )])));
+            if backlog.queued.is_empty() {
+                backlog_items.push(ListItem::new("- none"));
             } else {
-                backlog
-                    .queued
-                    .iter()
-                    .map(|line| ListItem::new(line.clone()))
-                    .collect::<Vec<_>>()
-            };
+                backlog_items.extend(backlog.queued.iter().map(|line| {
+                    ListItem::new(format!("- {line}"))
+                }));
+            }
             frame.render_widget(
-                List::new(queued_items)
-                    .block(Block::default().borders(Borders::ALL).title("Backlog Queue")),
-                backlog_chunks[1],
+                List::new(backlog_items)
+                    .block(Block::default().borders(Borders::ALL).title("Backlog")),
+                body[1],
             );
 
             let mut problems = workers
@@ -457,8 +448,9 @@ mod tests {
         assert!(frame.contains("Queue"));
         assert!(frame.contains("Workers"));
         assert!(frame.contains("Problems"));
-        assert!(frame.contains("Backlog In Progress"));
-        assert!(frame.contains("Backlog Queue"));
+        assert!(frame.contains("Backlog"));
+        assert!(frame.contains("In Progress"));
+        assert!(frame.contains("Queued"));
 
         assert_eq!(handle_key('q'), "quit");
         assert_eq!(handle_key('r'), "retry");

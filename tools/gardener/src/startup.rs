@@ -123,6 +123,30 @@ pub fn run_startup_audits(
                     seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
                 }
             }
+        } else {
+            let db_path = scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&scope.working_dir)
+                .join(".cache/gardener/backlog.sqlite");
+            let store = BacklogStore::open(db_path)?;
+            let bootstrap = store.upsert_task(NewTask {
+                kind: TaskKind::QualityGap,
+                title: format!(
+                    "Bootstrap backlog for {}",
+                    profile.agent_readiness.primary_gap
+                ),
+                details: "Seeding returned no tasks; investigate current repo gaps and create follow-up tasks."
+                    .to_string(),
+                scope_key: profile.agent_readiness.primary_gap.clone(),
+                priority: Priority::P1,
+                source: "seed_runner_v1_fallback".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })?;
+            if !bootstrap.task_id.is_empty() {
+                seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
+            }
         }
     }
 

@@ -124,7 +124,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
             crate::backlog_store::TaskStatus::Leased | crate::backlog_store::TaskStatus::InProgress => {
                 stats.active += 1;
                 backlog.in_progress.push(format!(
-                    "[ ] {} {} {}",
+                    "{} {} {}",
                     task.priority.as_str(),
                     short_task_id(&task.task_id),
                     task.title

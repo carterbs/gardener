@@ -109,6 +109,12 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<usize>>,
     },
+    ReleaseLease {
+        task_id: String,
+        lease_owner: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
 }
 
 pub struct BacklogStore {
@@ -175,6 +181,15 @@ impl BacklogStore {
                     }
                     WriteCmd::RecoverStale { now, reply } => {
                         let result = recover_stale(&write_conn, now);
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::ReleaseLease {
+                        task_id,
+                        lease_owner,
+                        now,
+                        reply,
+                    } => {
+                        let result = release_lease(&write_conn, &task_id, &lease_owner, now);
                         let _ = reply.send(result);
                     }
                 }
@@ -384,6 +399,45 @@ impl BacklogStore {
                 append_run_log(
                     "error",
                     "backlog.task.completed.failed",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
+    pub fn release_lease(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.write_tx
+            .blocking_send(WriteCmd::ReleaseLease {
+                task_id: task_id.to_string(),
+                lease_owner: lease_owner.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.lease_released",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.lease_released.rejected",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.lease_released.failed",
                     json!({ "task_id": task_id, "lease_owner": lease_owner, "error": e.to_string() }),
                 );
             }
@@ -673,6 +727,23 @@ fn mark_complete(
         .execute(
             "UPDATE backlog_tasks
              SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
+             WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress')",
+            params![now, task_id, lease_owner],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn release_lease(
+    conn: &Connection,
+    task_id: &str,
+    lease_owner: &str,
+    now: i64,
+) -> StoreResult<bool> {
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'ready', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
              WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress')",
             params![now, task_id, lease_owner],
         )

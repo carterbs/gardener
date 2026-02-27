@@ -17,6 +17,8 @@ use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WORKER_LIST_ROW_HEIGHT: usize = 2;
+const COMMAND_DETAIL_TOGGLE_HINT_OPEN: &str = "▾ Optional command detail";
+const COMMAND_DETAIL_TOGGLE_HINT_CLOSED: &str = "▸ Optional command detail";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
@@ -29,6 +31,8 @@ pub struct WorkerRow {
     pub session_age_secs: u64,
     pub lease_held: bool,
     pub session_missing: bool,
+    pub commands_expanded: bool,
+    pub command_details: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +63,301 @@ const STARTUP_VERBS: [&str; 6] = [
 const STARTUP_SPINNER_TICK_MS: u128 = 150;
 const STARTUP_ELLIPSIS_TICK_MS: u128 = 400;
 const STARTUP_SPINNER_TICKS: u32 = 30;
+const WORKER_EQUIPMENT_NAMES: [&str; 9] = [
+    "Lawn Mower",
+    "Leaf Blower",
+    "Hedge Trimmer",
+    "Edger",
+    "String Trimmer",
+    "Wheelbarrow",
+    "Seed Spreader",
+    "Pruning Shears",
+    "Sprinkler",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiMode {
+    Triage,
+    Work,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageStage {
+    pub label: String,
+    pub state: StageState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageState {
+    Done,
+    Current,
+    Future,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageActivity {
+    pub timestamp: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageArtifact {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartupHeadline {
+    pub spinner_frame: usize,
+    pub verb: String,
+    pub startup_active: bool,
+    pub ellipsis_phase: u8,
+}
+
+impl StartupHeadline {
+    fn from_view(source: StartupHeadlineView) -> Self {
+        Self {
+            spinner_frame: source.spinner_frame,
+            verb: source.verb().to_string(),
+            startup_active: source.startup_active,
+            ellipsis_phase: source.ellipsis_phase,
+        }
+    }
+
+    fn spinner(&self) -> &'static str {
+        STARTUP_SPINNER_FRAMES[self.spinner_frame % STARTUP_SPINNER_FRAMES.len()]
+    }
+
+    fn ellipsis(&self) -> &'static str {
+        match self.ellipsis_phase {
+            0 => ".",
+            1 => "..",
+            _ => "...",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerState {
+    Doing,
+    Reviewing,
+    Idle,
+}
+
+impl WorkerState {
+    fn from_str(state: &str) -> Self {
+        match state {
+            "reviewing" => Self::Reviewing,
+            "idle" | "complete" | "failed" => Self::Idle,
+            _ => Self::Doing,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
+    pub timestamp: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandEntry {
+    pub timestamp: String,
+    pub command: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkerCard {
+    pub name: String,
+    pub state: String,
+    pub task: String,
+    pub tool_line: String,
+    pub breadcrumb: String,
+    pub activity: Vec<ActivityEntry>,
+    pub command_details: Vec<CommandEntry>,
+    pub commands_expanded: bool,
+    pub state_bucket: WorkerState,
+    pub last_heartbeat_secs: u64,
+    pub lease_held: bool,
+    pub session_missing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacklogPriority {
+    P0,
+    P1,
+    P2,
+}
+
+impl BacklogPriority {
+    fn span_style(self) -> Style {
+        match self {
+            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
+            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
+            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BacklogItem {
+    pub priority: BacklogPriority,
+    pub title: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub ui_mode: UiMode,
+    pub triage_stages: Vec<TriageStage>,
+    pub triage_activity: Vec<TriageActivity>,
+    pub triage_artifacts: Vec<TriageArtifact>,
+    pub startup_headline: StartupHeadline,
+    pub workers: Vec<WorkerCard>,
+    pub backlog: Vec<BacklogItem>,
+    pub selected_worker: usize,
+    pub terminal_width: u16,
+    pub terminal_height: u16,
+}
+
+impl AppState {
+    fn from_dashboard_feed(
+        workers: &[WorkerRow],
+        backlog: &BacklogView,
+        startup_headline: StartupHeadline,
+    ) -> Self {
+        let triage_stages = [
+            TriageStage {
+                label: "Scan repository shape".to_string(),
+                state: StageState::Future,
+            },
+            TriageStage {
+                label: "Detect tools and docs".to_string(),
+                state: StageState::Future,
+            },
+            TriageStage {
+                label: "Build project profile".to_string(),
+                state: StageState::Future,
+            },
+            TriageStage {
+                label: "Seed prioritized backlog".to_string(),
+                state: StageState::Future,
+            },
+        ]
+        .to_vec();
+
+        let mapped_workers = workers
+            .iter()
+            .enumerate()
+            .map(|(index, row)| WorkerCard {
+                name: equipment_name_for_worker(index, &row.worker_id),
+                state: row.state.clone(),
+                task: row.task_title.clone(),
+                tool_line: row.tool_line.clone(),
+                breadcrumb: row.breadcrumb.clone(),
+                activity: vec![ActivityEntry {
+                    timestamp: now_hhmmss(),
+                    message: if row.breadcrumb.is_empty() {
+                        row.tool_line.clone()
+                    } else {
+                        format!("{} ({})", row.tool_line, humanize_breadcrumb(&row.breadcrumb))
+                    },
+                }],
+                command_details: row
+                    .command_details
+                    .iter()
+                    .map(|(timestamp, command)| CommandEntry {
+                        timestamp: timestamp.clone(),
+                        command: command.clone(),
+                    })
+                    .collect(),
+                commands_expanded: row.commands_expanded,
+                state_bucket: WorkerState::from_str(&row.state),
+                last_heartbeat_secs: row.last_heartbeat_secs,
+                lease_held: row.lease_held,
+                session_missing: row.session_missing,
+            })
+            .collect();
+
+        let mapped_backlog = ordered_backlog_items(&backlog.in_progress, &backlog.queued)
+            .into_iter()
+            .map(|item| BacklogItem {
+                priority: match item.priority {
+                    ParsedBacklogPriority::P0 => BacklogPriority::P0,
+                    ParsedBacklogPriority::P1 => BacklogPriority::P1,
+                    ParsedBacklogPriority::P2 => BacklogPriority::P2,
+                },
+                title: item.title,
+            })
+            .collect();
+
+        Self {
+            ui_mode: UiMode::Work,
+            triage_stages,
+            triage_activity: Vec::new(),
+            triage_artifacts: Vec::new(),
+            startup_headline,
+            workers: mapped_workers,
+            backlog: mapped_backlog,
+            selected_worker: WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow()),
+            terminal_width: 0,
+            terminal_height: 0,
+        }
+    }
+
+    fn from_triage_feed(
+        activity: &[String],
+        artifacts: &[String],
+        startup_headline: StartupHeadline,
+    ) -> Self {
+        Self {
+            ui_mode: UiMode::Triage,
+            triage_stages: Vec::new(),
+            triage_activity: activity
+                .iter()
+                .map(|line| TriageActivity {
+                    timestamp: now_hhmmss(),
+                    message: line.clone(),
+                })
+                .collect(),
+            triage_artifacts: artifacts.iter().map(|line| parse_triage_artifact(line)).collect(),
+            startup_headline,
+            workers: Vec::new(),
+            backlog: Vec::new(),
+            selected_worker: 0,
+            terminal_width: 0,
+            terminal_height: 0,
+        }
+    }
+}
+fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
+    let mut command = command.to_string();
+    let prefix = format!("{timestamp}  ");
+    if max_width <= prefix.len() {
+        return prefix;
+    }
+    let available = max_width.saturating_sub(prefix.len());
+    if command.len() > available {
+        command = truncate_right(&command, available);
+    }
+    format!("{prefix}{command}")
+}
+
+fn truncate_right(input: &str, max_width: usize) -> String {
+    if input.len() <= max_width {
+        return input.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_string();
+    }
+    let mut chars = input.chars().collect::<Vec<_>>();
+    chars.truncate(max_width - 1);
+    let mut output = chars.into_iter().collect::<String>();
+    output.push('…');
+    output
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct WorkerMetrics {
@@ -66,6 +365,19 @@ struct WorkerMetrics {
     doing: usize,
     reviewing: usize,
     idle: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ParsedBacklogPriority {
+    P0,
+    P1,
+    P2,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedBacklogItem {
+    priority: ParsedBacklogPriority,
+    title: String,
 }
 
 impl WorkerMetrics {
@@ -87,6 +399,236 @@ impl WorkerMetrics {
         }
         metrics
     }
+
+    fn from_app_state(workers: &[WorkerCard]) -> Self {
+        let mut metrics = Self {
+            total: workers.len(),
+            doing: 0,
+            reviewing: 0,
+            idle: 0,
+        };
+        for worker in workers {
+            match worker.state_bucket {
+                WorkerState::Doing => metrics.doing += 1,
+                WorkerState::Reviewing => metrics.reviewing += 1,
+                WorkerState::Idle => metrics.idle += 1,
+            }
+        }
+        metrics
+    }
+}
+
+impl ParsedBacklogPriority {
+    fn span_style(self) -> Style {
+        match self {
+            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
+            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
+            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
+        }
+    }
+}
+
+fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
+    match token {
+        "P0" | "p0" => Some(ParsedBacklogPriority::P0),
+        "P1" | "p1" => Some(ParsedBacklogPriority::P1),
+        "P2" | "p2" => Some(ParsedBacklogPriority::P2),
+        _ => None,
+    }
+}
+
+fn is_backlog_status_token(token: &str) -> bool {
+    matches!(token, "INP" | "inp" | "Q" | "q")
+}
+
+fn is_short_task_id(token: &str) -> bool {
+    token.len() >= 6
+        && token.len() <= 12
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch.is_ascii_alphanumeric())
+}
+
+fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    if is_backlog_status_token(tokens[idx]) {
+        idx += 1;
+    }
+    if idx >= tokens.len() {
+        return None;
+    }
+    let priority = parse_backlog_priority(tokens[idx])?;
+    idx += 1;
+    if idx >= tokens.len() {
+        return None;
+    }
+    if tokens.len() >= idx + 2 && is_short_task_id(tokens[idx]) {
+        idx += 1;
+    }
+    let title = tokens[idx..].join(" ");
+    if title.is_empty() {
+        None
+    } else {
+        Some(ParsedBacklogItem {
+            priority,
+            title,
+        })
+    }
+}
+
+fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<ParsedBacklogItem> {
+    let mut p0 = Vec::new();
+    let mut p1 = Vec::new();
+    let mut p2 = Vec::new();
+
+    for raw in in_progress.iter().chain(queued.iter()) {
+        if let Some(item) = parse_backlog_item(raw) {
+            match item.priority {
+                ParsedBacklogPriority::P0 => p0.push(item),
+                ParsedBacklogPriority::P1 => p1.push(item),
+                ParsedBacklogPriority::P2 => p2.push(item),
+            }
+        }
+    }
+
+    let mut ordered = Vec::new();
+    ordered.extend(p0);
+    ordered.extend(p1);
+    ordered.extend(p2);
+    ordered
+}
+
+fn parse_triage_artifact(line: &str) -> TriageArtifact {
+    if let Some((label, value)) = line.split_once(':') {
+        TriageArtifact {
+            label: label.trim().to_string(),
+            value: value.trim().to_string(),
+        }
+    } else if let Some((label, value)) = line.split_once('=') {
+        TriageArtifact {
+            label: label.trim().to_string(),
+            value: value.trim().to_string(),
+        }
+    } else {
+        TriageArtifact {
+            label: "Artifact".to_string(),
+            value: line.to_string(),
+        }
+    }
+}
+
+fn now_hhmmss() -> String {
+    let timestamp = now_unix_millis() % 86_400_000;
+    let secs = (timestamp / 1000) as u64;
+    let in_day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        in_day / 3600,
+        (in_day % 3600) / 60,
+        in_day % 60
+    )
+}
+
+fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
+    if worker_id.is_empty() {
+        return WORKER_EQUIPMENT_NAMES[index % WORKER_EQUIPMENT_NAMES.len()].to_string();
+    }
+    if index < WORKER_EQUIPMENT_NAMES.len() {
+        return WORKER_EQUIPMENT_NAMES[index].to_string();
+    }
+    let mut acc = 0u64;
+    for ch in worker_id.bytes() {
+        acc = acc.wrapping_mul(31).wrapping_add(ch as u64);
+    }
+    WORKER_EQUIPMENT_NAMES[(acc as usize) % WORKER_EQUIPMENT_NAMES.len()].to_string()
+}
+
+impl ParsedBacklogPriority {
+    fn span_style(self) -> Style {
+        match self {
+            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
+            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
+            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
+        }
+    }
+}
+
+fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
+    match token {
+        "P0" | "p0" => Some(ParsedBacklogPriority::P0),
+        "P1" | "p1" => Some(ParsedBacklogPriority::P1),
+        "P2" | "p2" => Some(ParsedBacklogPriority::P2),
+        _ => None,
+    }
+}
+
+fn is_backlog_status_token(token: &str) -> bool {
+    matches!(token, "INP" | "inp" | "Q" | "q")
+}
+
+fn is_short_task_id(token: &str) -> bool {
+    token.len() >= 6
+        && token.len() <= 12
+        && token
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch.is_ascii_alphanumeric())
+}
+
+fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    if is_backlog_status_token(tokens[idx]) {
+        idx += 1;
+    }
+    if idx >= tokens.len() {
+        return None;
+    }
+    let priority = parse_backlog_priority(tokens[idx])?;
+    idx += 1;
+    if idx >= tokens.len() {
+        return None;
+    }
+    if tokens.len() >= idx + 2 && is_short_task_id(tokens[idx]) {
+        idx += 1;
+    }
+    let title = tokens[idx..].join(" ");
+    if title.is_empty() {
+        None
+    } else {
+        Some(ParsedBacklogItem {
+            priority,
+            title,
+        })
+    }
+}
+
+fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<ParsedBacklogItem> {
+    let mut p0 = Vec::new();
+    let mut p1 = Vec::new();
+    let mut p2 = Vec::new();
+
+    for raw in in_progress.iter().chain(queued.iter()) {
+        if let Some(item) = parse_backlog_item(raw) {
+            match item.priority {
+                ParsedBacklogPriority::P0 => p0.push(item),
+                ParsedBacklogPriority::P1 => p1.push(item),
+                ParsedBacklogPriority::P2 => p2.push(item),
+            }
+        }
+    }
+
+    let mut ordered = Vec::new();
+    ordered.extend(p0);
+    ordered.extend(p1);
+    ordered.extend(p2);
+    ordered
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -259,6 +801,11 @@ fn draw_dashboard_frame(
     lease_timeout_seconds: u64,
     startup_headline: StartupHeadlineView,
 ) {
+    let app_state = AppState::from_dashboard_feed(
+        workers,
+        backlog,
+        StartupHeadline::from_view(startup_headline),
+    );
     let human_problems = workers
         .iter()
         .filter_map(|row| {
@@ -289,14 +836,19 @@ fn draw_dashboard_frame(
         .direction(Direction::Vertical)
         .constraints(layout_constraints)
         .split(frame.area());
+    let body_height = chunks[1].height;
+    let now_rows: u16 = 7;
+    let remaining = body_height.saturating_sub(now_rows);
+    let backlog_rows = if remaining > 8 { remaining - 8 } else { 1 };
+    let workers_rows = remaining.saturating_sub(backlog_rows).max(1);
     let body = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(now_rows),
+            Constraint::Length(workers_rows),
+            Constraint::Length(backlog_rows),
+        ])
         .split(chunks[1]);
-    let body_columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(body[1]);
 
     let summary = Paragraph::new(Line::from(vec![
         Span::styled(
@@ -342,7 +894,7 @@ fn draw_dashboard_frame(
     );
     frame.render_widget(summary, chunks[0]);
 
-    let metrics = WorkerMetrics::from_workers(workers);
+    let metrics = WorkerMetrics::from_app_state(&app_state.workers);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
@@ -406,26 +958,49 @@ fn draw_dashboard_frame(
     let workers_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body_columns[0]);
+        .split(body[1]);
     let viewport_height = workers_panel[1]
         .height
         .min(frame.area().height.saturating_sub(12).max(1));
     let worker_row_capacity = (viewport_height as usize / WORKER_LIST_ROW_HEIGHT).max(1);
-    let max_worker_offset = workers.len().saturating_sub(worker_row_capacity);
+    let max_worker_offset = app_state.workers.len().saturating_sub(worker_row_capacity);
+    WORKERS_VIEWPORT_CAPACITY.with(|cell| {
+        *cell.borrow_mut() = worker_row_capacity;
+    });
+    WORKERS_TOTAL_COUNT.with(|cell| {
+        *cell.borrow_mut() = app_state.workers.len();
+    });
+    let selected_worker = WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        let mut selected = cell.borrow_mut();
+        if app_state.workers.is_empty() {
+            *selected = 0;
+        } else {
+            *selected = (*selected).min(app_state.workers.len() - 1);
+        }
+        *selected
+    });
     let worker_offset = WORKERS_VIEWPORT_OFFSET.with(|cell| {
         let mut offset = cell.borrow_mut();
+        if selected_worker < *offset {
+            *offset = selected_worker;
+        } else if selected_worker >= offset.saturating_add(worker_row_capacity) {
+            *offset = selected_worker + 1 - worker_row_capacity;
+        }
         if *offset > max_worker_offset {
             *offset = max_worker_offset;
         }
         *offset
     });
-    let worker_end = (worker_offset + worker_row_capacity).min(workers.len());
+    let worker_end = (worker_offset + worker_row_capacity).min(app_state.workers.len());
 
-    let worker_items = workers
+    let command_line_width = workers_panel[1].width.saturating_sub(8) as usize;
+    let worker_items = app_state
+        .workers
         .iter()
+        .enumerate()
         .skip(worker_offset)
         .take(worker_row_capacity)
-        .map(|row| {
+        .map(|(idx, row)| {
             let state_style = match row.state.as_str() {
                 "complete" => Style::default().fg(Color::Green),
                 "failed" => Style::default().fg(Color::Red),
@@ -437,16 +1012,27 @@ fn draw_dashboard_frame(
                 }
                 _ => Style::default().fg(Color::Gray),
             };
-            ListItem::new(vec![
+            let selected = idx == selected_worker;
+            let marker = if selected { ">" } else { " " };
+            let worker_style = if selected {
+                Style::default()
+                    .fg(Color::Rgb(126, 231, 135))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            };
+            let detail_hint = if row.commands_expanded {
+                COMMAND_DETAIL_TOGGLE_HINT_OPEN
+            } else {
+                COMMAND_DETAIL_TOGGLE_HINT_CLOSED
+            };
+            let mut lines = vec![
                 Line::from(vec![
-                    Span::styled(
-                        format!("{:<3}", row.worker_id),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
                     Span::raw(": "),
-                    Span::raw(row.task_title.clone()),
+                    Span::raw(row.task.clone()),
                 ]),
                 Line::from(vec![
                     Span::raw("    "),
@@ -459,18 +1045,47 @@ fn draw_dashboard_frame(
                     Span::styled("Flow: ", Style::default().fg(Color::Blue)),
                     Span::raw(humanize_breadcrumb(&row.breadcrumb)),
                 ]),
-            ])
+            ];
+            lines.push(Line::from(vec![
+                Span::styled("    ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    detail_hint,
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                ),
+            ]));
+            if row.commands_expanded {
+                lines.extend(
+                    row.command_details.iter().map(|entry| {
+                        Line::from(vec![
+                            Span::styled(
+                                format!(
+                                    "    {}",
+                                    command_row_with_timestamp(
+                                        &entry.timestamp,
+                                        &entry.command,
+                                        command_line_width
+                                    )
+                                ),
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                        ])
+                    }),
+                );
+            }
+            ListItem::new(lines)
         })
         .collect::<Vec<_>>();
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            if workers.len() > worker_row_capacity {
+            if app_state.workers.len() > worker_row_capacity {
                 format!(
                     "Workers ({:02}-{:02}/{:02})",
                     worker_offset + 1,
                     worker_end,
-                    workers.len()
+                    app_state.workers.len()
                 )
             } else {
                 "Workers".to_string()
@@ -482,62 +1097,54 @@ fn draw_dashboard_frame(
         workers_panel[0],
     );
     frame.render_widget(
-        List::new(worker_items).block(
-            Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
-        ),
+        List::new(worker_items),
         workers_panel[1],
     );
 
-    let mut backlog_items = Vec::new();
-    backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
-        "In Progress",
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )])));
-    if backlog.in_progress.is_empty() {
-        backlog_items.push(ListItem::new("- none"));
+    let ordered_backlog = app_state.backlog;
+    let content_capacity = body[2].height.saturating_sub(2) as usize;
+    let max_visible = if content_capacity == 0 {
+        0
+    } else if ordered_backlog.len() > content_capacity {
+        content_capacity.saturating_sub(1)
     } else {
-        backlog_items.extend(
-            backlog
-                .in_progress
-                .iter()
-                .map(|line| ListItem::new(format!("- {line}"))),
-        );
+        ordered_backlog.len()
+    };
+    let mut list_items = Vec::new();
+    for item in ordered_backlog.iter().take(max_visible) {
+        let badge = match item.priority {
+            BacklogPriority::P0 => "P0",
+            BacklogPriority::P1 => "P1",
+            BacklogPriority::P2 => "P2",
+        };
+        list_items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("{badge: <2}"), item.priority.span_style()),
+            Span::raw(" "),
+            Span::raw(item.title.clone()),
+        ])));
     }
-    backlog_items.push(ListItem::new(""));
-    backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
-        "Queued",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )])));
-    if backlog.queued.is_empty() {
-        backlog_items.push(ListItem::new("- none"));
-    } else {
-        backlog_items.extend(
-            backlog
-                .queued
-                .iter()
-                .map(|line| ListItem::new(format!("- {line}"))),
-        );
+    if ordered_backlog.len() > max_visible && content_capacity > 0 {
+        let hidden = ordered_backlog.len().saturating_sub(max_visible);
+        list_items.push(ListItem::new(format!("... and {hidden} more")));
     }
-    let backlog_panel = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body_columns[1]);
+    if list_items.is_empty() {
+        list_items.push(ListItem::new("No backlog items"));
+    }
+
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "Backlog",
+            "BACKLOG (PRIORITY ORDER)",
             Style::default()
                 .fg(Color::Rgb(245, 196, 95))
                 .add_modifier(Modifier::BOLD),
         )])),
-        backlog_panel[0],
+        body[2],
     );
-    frame.render_widget(List::new(backlog_items), backlog_panel[1]);
+    let backlog_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(body[2]);
+    frame.render_widget(List::new(list_items), backlog_panel[1]);
 
     if has_human_problems {
         frame.render_widget(
@@ -571,6 +1178,20 @@ fn draw_dashboard_frame(
 }
 
 fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifacts: &[String]) {
+    let app_state = AppState::from_triage_feed(
+        activity,
+        artifacts,
+        StartupHeadline {
+            spinner_frame: 0,
+            verb: "Triage".to_string(),
+            startup_active: false,
+            ellipsis_phase: 0,
+        },
+    );
+    draw_triage_frame_from_state(frame, &app_state);
+}
+
+fn draw_triage_frame_from_state(frame: &mut ratatui::Frame<'_>, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -605,12 +1226,13 @@ fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifa
     );
     frame.render_widget(summary, chunks[0]);
 
-    let activity_items = if activity.is_empty() {
+    let activity_items = if state.triage_activity.is_empty() {
         vec![ListItem::new("- waiting for triage updates")]
     } else {
-        activity
+        state
+            .triage_activity
             .iter()
-            .map(|line| ListItem::new(format!("- {line}")))
+            .map(|entry| ListItem::new(format!("- {} {}", entry.timestamp, entry.message)))
             .collect::<Vec<_>>()
     };
     frame.render_widget(
@@ -622,12 +1244,19 @@ fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifa
         body[0],
     );
 
-    let artifact_items = if artifacts.is_empty() {
+    let artifact_items = if state.triage_artifacts.is_empty() {
         vec![ListItem::new("- no triage artifacts yet")]
     } else {
-        artifacts
+        state
+            .triage_artifacts
             .iter()
-            .map(|line| ListItem::new(format!("- {line}")))
+            .map(|entry| {
+                if entry.value.is_empty() {
+                    ListItem::new(format!("- {}", entry.label))
+                } else {
+                    ListItem::new(format!("- {}: {}", entry.label, entry.value))
+                }
+            })
             .collect::<Vec<_>>()
     };
     frame.render_widget(
@@ -695,6 +1324,9 @@ thread_local! {
     static LIVE_TUI_SIZE: RefCell<Option<(u16, u16)>> = const { RefCell::new(None) };
     static LIVE_STARTUP_HEADLINE: RefCell<Option<LiveStartupHeadlineState>> = const { RefCell::new(None) };
     static WORKERS_VIEWPORT_OFFSET: RefCell<usize> = const { RefCell::new(0) };
+    static WORKERS_VIEWPORT_SELECTED: RefCell<usize> = const { RefCell::new(0) };
+    static WORKERS_VIEWPORT_CAPACITY: RefCell<usize> = const { RefCell::new(1) };
+    static WORKERS_TOTAL_COUNT: RefCell<usize> = const { RefCell::new(0) };
 }
 
 fn now_unix_millis() -> u128 {
@@ -722,25 +1354,72 @@ fn live_startup_headline() -> StartupHeadlineView {
 }
 
 pub fn scroll_workers_down() -> bool {
-    WORKERS_VIEWPORT_OFFSET.with(|cell| {
-        let mut offset = cell.borrow_mut();
-        let old = *offset;
-        *offset = offset.saturating_add(1);
-        *offset != old
-    })
+    let total = WORKERS_TOTAL_COUNT.with(|cell| *cell.borrow());
+    if total == 0 {
+        return false;
+    }
+    let capacity = WORKERS_VIEWPORT_CAPACITY.with(|cell| (*cell.borrow()).max(1));
+    let moved = WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        let mut selected = cell.borrow_mut();
+        let old = *selected;
+        *selected = (*selected).min(total - 1).saturating_add(1).min(total - 1);
+        *selected != old
+    });
+    if moved {
+        let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
+        WORKERS_VIEWPORT_OFFSET.with(|cell| {
+            let mut offset = cell.borrow_mut();
+            let max_offset = total.saturating_sub(capacity);
+            if selected >= offset.saturating_add(capacity) {
+                *offset = selected + 1 - capacity;
+            }
+            if *offset > max_offset {
+                *offset = max_offset;
+            }
+        });
+    }
+    moved
 }
 
 pub fn scroll_workers_up() -> bool {
-    WORKERS_VIEWPORT_OFFSET.with(|cell| {
-        let mut offset = cell.borrow_mut();
-        let old = *offset;
-        *offset = offset.saturating_sub(1);
-        *offset != old
-    })
+    let moved = WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        let mut selected = cell.borrow_mut();
+        let old = *selected;
+        *selected = selected.saturating_sub(1);
+        *selected != old
+    });
+    if moved {
+        let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
+        WORKERS_VIEWPORT_OFFSET.with(|cell| {
+            let mut offset = cell.borrow_mut();
+            if selected < *offset {
+                *offset = selected;
+            }
+        });
+    }
+    moved
+}
+
+pub fn toggle_selected_worker_command_detail(workers: &mut [WorkerRow]) -> bool {
+    let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
+    if selected >= workers.len() {
+        return false;
+    }
+    workers[selected].commands_expanded = !workers[selected].commands_expanded;
+    true
 }
 
 pub fn reset_workers_scroll() {
     WORKERS_VIEWPORT_OFFSET.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
+    WORKERS_VIEWPORT_SELECTED.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
+    WORKERS_VIEWPORT_CAPACITY.with(|cell| {
+        *cell.borrow_mut() = 1;
+    });
+    WORKERS_TOTAL_COUNT.with(|cell| {
         *cell.borrow_mut() = 0;
     });
 }
@@ -1150,8 +1829,8 @@ mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
         render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
-        scroll_workers_up, BacklogView, ProblemClass, QueueStats, StartupHeadlineView,
-        WorkerMetrics, WorkerRow,
+        scroll_workers_up, toggle_selected_worker_command_detail, BacklogView, ProblemClass,
+        QueueStats, StartupHeadlineView, WorkerMetrics, WorkerRow,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -1165,6 +1844,8 @@ mod tests {
             session_age_secs: 33,
             lease_held: true,
             session_missing: missing,
+            commands_expanded: false,
+            command_details: Vec::new(),
         }
     }
 
@@ -1205,23 +1886,60 @@ mod tests {
                 queued: vec!["P2 def456 tune logs".to_string()],
             },
             80,
-            20,
+            40,
         );
-        assert!(frame.contains("Queue"));
+        assert!(frame.contains("GARDENER"));
         assert!(frame.contains("Now"));
         assert!(frame.contains("Scanning"));
         assert!(frame.contains("parallel workers"));
         assert!(frame.contains("Workers"));
         assert!(!frame.contains("Problems"));
-        assert!(frame.contains("Backlog"));
-        assert!(frame.contains("In Progress"));
-        assert!(frame.contains("Queued"));
         assert!(frame.contains("State:"));
         assert!(frame.contains("Action:"));
+        assert!(frame.contains("P0"));
+        assert!(frame.contains("P2"));
         assert!(!frame.contains("status="));
         assert!(!frame.contains("action="));
 
         // handle_key removed — real dispatch uses hotkeys::action_for_key
+    }
+
+    #[test]
+    fn backlog_rendering_is_priority_ordered() {
+        let frame = render_dashboard(
+            &[worker(10, false)],
+            &QueueStats {
+                ready: 1,
+                active: 1,
+                failed: 0,
+                p0: 1,
+                p1: 2,
+                p2: 2,
+            },
+            &BacklogView {
+                in_progress: vec![
+                    "INP P1 alpha task".to_string(),
+                    "INP P0 bravo task".to_string(),
+                    "INP P2 charlie task".to_string(),
+                ],
+                queued: vec![],
+            },
+            80,
+            40,
+        );
+        let backlog_section_start = frame.find("BACKLOG (PRIORITY ORDER)").expect("backlog heading");
+        let backlog_section = &frame[backlog_section_start..];
+        let p0 = backlog_section.find("P0").expect("p0 row");
+        let p1 = backlog_section.find("P1").expect("p1 row");
+        let p2 = backlog_section.find("P2").expect("p2 row");
+        assert!(
+            p0 < p1,
+            "P0 rows should render before P1 rows in Backlog panel"
+        );
+        assert!(
+            p1 < p2,
+            "P1 rows should render before P2 rows in Backlog panel"
+        );
     }
 
     #[test]
@@ -1310,6 +2028,110 @@ mod tests {
     }
 
     #[test]
+    fn command_detail_rendering_is_per_worker_and_toggable() {
+        let frame = render_dashboard(
+            &[
+                WorkerRow {
+                    worker_id: "w1".to_string(),
+                    state: "doing".to_string(),
+                    task_title: "task one".to_string(),
+                    tool_line: "tool".to_string(),
+                    breadcrumb: "understand>doing".to_string(),
+                    last_heartbeat_secs: 0,
+                    session_age_secs: 0,
+                    lease_held: true,
+                    session_missing: false,
+                    commands_expanded: false,
+                    command_details: vec![("12:34:56".to_string(), "echo first".to_string())],
+                },
+                WorkerRow {
+                    worker_id: "w2".to_string(),
+                    state: "reviewing".to_string(),
+                    task_title: "task two".to_string(),
+                    tool_line: "tool".to_string(),
+                    breadcrumb: "reviewing".to_string(),
+                    last_heartbeat_secs: 0,
+                    session_age_secs: 0,
+                    lease_held: true,
+                    session_missing: false,
+                    commands_expanded: true,
+                    command_details: vec![("23:45:01".to_string(), "echo second".to_string())],
+                },
+            ],
+            &QueueStats {
+                ready: 0,
+                active: 2,
+                failed: 0,
+                p0: 0,
+                p1: 2,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            120,
+            24,
+        );
+        assert!(frame.contains("▸ Optional command detail"));
+        assert!(frame.contains("▾ Optional command detail"));
+        assert!(!frame.contains("12:34:56  echo first"));
+        assert!(frame.contains("23:45:01  echo second"));
+    }
+
+    #[test]
+    fn toggle_selected_worker_command_detail_targets_selected_worker() {
+        reset_workers_scroll();
+        let mut workers = vec![
+            WorkerRow {
+                worker_id: "w1".to_string(),
+                state: "doing".to_string(),
+                task_title: "task one".to_string(),
+                tool_line: "tool".to_string(),
+                breadcrumb: "understand>doing".to_string(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: true,
+                session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
+            },
+            WorkerRow {
+                worker_id: "w2".to_string(),
+                state: "doing".to_string(),
+                task_title: "task two".to_string(),
+                tool_line: "tool".to_string(),
+                breadcrumb: "understand>doing".to_string(),
+                last_heartbeat_secs: 0,
+                session_age_secs: 0,
+                lease_held: true,
+                session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
+            },
+        ];
+        let _ = render_dashboard(
+            &workers,
+            &QueueStats {
+                ready: 0,
+                active: 0,
+                failed: 0,
+                p0: 0,
+                p1: 2,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            80,
+            24,
+        );
+        assert!(toggle_selected_worker_command_detail(&mut workers));
+        assert!(workers[0].commands_expanded);
+        assert!(!workers[1].commands_expanded);
+        let w1_before = workers[1].commands_expanded;
+        let _ = scroll_workers_down();
+        assert!(toggle_selected_worker_command_detail(&mut workers));
+        assert_eq!(workers[0].commands_expanded, true);
+        assert_ne!(workers[1].commands_expanded, w1_before);
+    }
+
+    #[test]
     fn worker_metrics_are_derived_from_states() {
         let workers = vec![
             WorkerRow {
@@ -1322,6 +2144,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             },
             WorkerRow {
                 worker_id: "w2".to_string(),
@@ -1333,6 +2157,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             },
             WorkerRow {
                 worker_id: "w3".to_string(),
@@ -1344,6 +2170,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             },
         ];
         let metrics = WorkerMetrics::from_workers(&workers);
@@ -1376,6 +2204,8 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: true,
                 session_missing: false,
+                commands_expanded: false,
+                command_details: Vec::new(),
             })
             .collect::<Vec<_>>();
         let stats = QueueStats {
@@ -1389,20 +2219,21 @@ mod tests {
         let backlog = BacklogView::default();
 
         let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(initial.contains("w1 "));
+        assert!(initial.contains("> Lawn Mower"));
         assert!(!initial.contains("w9 "));
 
         for _ in 0..10 {
             let _ = scroll_workers_down();
         }
         let scrolled = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(!scrolled.contains("w1 "));
-        assert!(scrolled.contains("w9 "));
+        assert!(!scrolled.contains("Lawn Mower"));
+        assert!(!scroll_workers_down());
 
         for _ in 0..10 {
             let _ = scroll_workers_up();
         }
         let reset = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(reset.contains("w1 "));
+        assert!(reset.contains("> Lawn Mower"));
+        assert!(!scroll_workers_up());
     }
 }

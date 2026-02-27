@@ -240,6 +240,7 @@ pub fn run_worker_pool_fsm(
             } else {
                 workers[idx].state = "failed".to_string();
                 workers[idx].tool_line = format!("failed {}", task.task_id);
+                workers[idx].lease_held = false;
                 append_run_log(
                     "error",
                     "worker.task.failed",
@@ -254,6 +255,9 @@ pub fn run_worker_pool_fsm(
                     wait_for_quit(terminal)?;
                     return Ok(completed);
                 }
+                // No fatal reason — release the lease so this task is available
+                // for retry and the backlog count stays accurate.
+                let _ = store.release_lease(&task.task_id, &worker_id)?;
             }
             render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
         }

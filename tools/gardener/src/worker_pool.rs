@@ -28,6 +28,7 @@ pub fn run_worker_pool_fsm(
         .map(|idx| WorkerRow {
             worker_id: format!("worker-{}", idx + 1),
             state: "idle".to_string(),
+            task_title: "idle".to_string(),
             tool_line: "waiting for claim".to_string(),
             breadcrumb: "idle".to_string(),
             last_heartbeat_secs: 0,
@@ -53,6 +54,7 @@ pub fn run_worker_pool_fsm(
             )?;
             let Some(task) = claimed else {
                 workers[idx].state = "idle".to_string();
+                workers[idx].task_title = "idle".to_string();
                 workers[idx].tool_line = "waiting for claim".to_string();
                 workers[idx].lease_held = false;
                 continue;
@@ -61,7 +63,8 @@ pub fn run_worker_pool_fsm(
             let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
 
             workers[idx].state = "doing".to_string();
-            workers[idx].tool_line = task.title.clone();
+            workers[idx].task_title = task.title.clone();
+            workers[idx].tool_line = "claimed".to_string();
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
             render(terminal, &workers, &dashboard_snapshot(store)?)?;
@@ -73,7 +76,7 @@ pub fn run_worker_pool_fsm(
             )?;
             for event in summary.logs {
                 workers[idx].state = event.state.as_str().to_string();
-                workers[idx].tool_line = format!("prompt={}", event.prompt_version);
+                workers[idx].tool_line = format!("prompt {}", event.prompt_version);
                 workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
                 render(terminal, &workers, &dashboard_snapshot(store)?)?;
             }
@@ -121,7 +124,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
             crate::backlog_store::TaskStatus::Leased | crate::backlog_store::TaskStatus::InProgress => {
                 stats.active += 1;
                 backlog.in_progress.push(format!(
-                    "{} {} {}",
+                    "INP {} {} {}",
                     task.priority.as_str(),
                     short_task_id(&task.task_id),
                     task.title
@@ -132,7 +135,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
         }
         if matches!(task.status, crate::backlog_store::TaskStatus::Ready) {
             backlog.queued.push(format!(
-                "{} {} {}",
+                "Q {} {} {}",
                 task.priority.as_str(),
                 short_task_id(&task.task_id),
                 task.title

@@ -1,7 +1,8 @@
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::repo_intelligence::{
-    build_profile, current_head_sha, read_profile, write_profile, RepoIntelligenceProfile,
+    build_profile, commits_since_profile_head, current_head_sha, read_profile, write_profile,
+    RepoIntelligenceProfile,
 };
 use crate::runtime::ProductionRuntime;
 use crate::triage_agent_detection::{detect_agent, is_non_interactive, DetectedAgent, EnvMap};
@@ -46,8 +47,17 @@ pub fn triage_needed(
     if existing.meta.head_sha == head {
         return Ok(TriageDecision::NotNeeded);
     }
-
-    Ok(TriageDecision::Needed)
+    let commits_since = commits_since_profile_head(
+        runtime.process_runner.as_ref(),
+        &scope.working_dir,
+        &existing.meta.head_sha,
+    )
+    .unwrap_or(0);
+    if commits_since > cfg.triage.stale_after_commits {
+        Ok(TriageDecision::Needed)
+    } else {
+        Ok(TriageDecision::NotNeeded)
+    }
 }
 
 pub fn run_triage(
@@ -71,12 +81,14 @@ pub fn run_triage(
         _ => AgentKind::Codex,
     });
 
-    runtime
-        .terminal
-        .write_line("━━━ Agent Detection ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
-    runtime
-        .terminal
-        .write_line(&format!("Detected agent: {:?}", detected.detected))?;
+    if !runtime.terminal.stdin_is_tty() {
+        runtime
+            .terminal
+            .write_line("━━━ Agent Detection ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+        runtime
+            .terminal
+            .write_line(&format!("Detected agent: {:?}", detected.detected))?;
+    }
 
     let discovery = run_discovery(
         runtime.process_runner.as_ref(),

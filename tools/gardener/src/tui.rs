@@ -15,6 +15,7 @@ use crate::errors::GardenerError;
 pub struct WorkerRow {
     pub worker_id: String,
     pub state: String,
+    pub task_title: String,
     pub tool_line: String,
     pub breadcrumb: String,
     pub last_heartbeat_secs: u64,
@@ -90,10 +91,6 @@ pub fn render_dashboard(
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
                 .split(chunks[1]);
-            let backlog_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-                .split(body[1]);
 
             let summary = Paragraph::new(Line::from(vec![
                 Span::styled("Ready ", Style::default().fg(Color::Cyan)),
@@ -132,19 +129,27 @@ pub fn render_dashboard(
                         }
                         _ => Style::default().fg(Color::Gray),
                     };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!("{:<8}", row.worker_id),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                        Span::styled(format!("{:<10}", row.state), state_style),
-                        Span::raw("  "),
-                        Span::styled("tool=", Style::default().fg(Color::Blue)),
-                        Span::raw(format!("{:<28}", row.tool_line)),
-                        Span::raw("  "),
-                        Span::styled("path=", Style::default().fg(Color::Blue)),
-                        Span::raw(row.breadcrumb.clone()),
-                    ]))
+                    ListItem::new(vec![
+                        Line::from(vec![
+                            Span::styled(
+                                format!("{:<3}", row.worker_id),
+                                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw(": "),
+                            Span::raw(row.task_title.clone()),
+                        ]),
+                        Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled("status=", Style::default().fg(Color::Blue)),
+                            Span::styled(format!("{:<10}", row.state), state_style),
+                            Span::raw("  "),
+                            Span::styled("action=", Style::default().fg(Color::Blue)),
+                            Span::raw(format!("{:<24}", row.tool_line)),
+                            Span::raw("  "),
+                            Span::styled("path=", Style::default().fg(Color::Blue)),
+                            Span::raw(row.breadcrumb.clone()),
+                        ]),
+                    ])
                 })
                 .collect::<Vec<_>>();
 
@@ -153,34 +158,34 @@ pub fn render_dashboard(
                 body[0],
             );
 
-            let active_items = if backlog.in_progress.is_empty() {
-                vec![ListItem::new("none")]
+            let mut backlog_items = Vec::new();
+            backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
+                "In Progress",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )])));
+            if backlog.in_progress.is_empty() {
+                backlog_items.push(ListItem::new("- none"));
             } else {
-                backlog
-                    .in_progress
-                    .iter()
-                    .map(|line| ListItem::new(line.clone()))
-                    .collect::<Vec<_>>()
-            };
-            frame.render_widget(
-                List::new(active_items)
-                    .block(Block::default().borders(Borders::ALL).title("Backlog In Progress")),
-                backlog_chunks[0],
-            );
-
-            let queued_items = if backlog.queued.is_empty() {
-                vec![ListItem::new("none")]
+                backlog_items.extend(backlog.in_progress.iter().map(|line| {
+                    ListItem::new(format!("- {line}"))
+                }));
+            }
+            backlog_items.push(ListItem::new(""));
+            backlog_items.push(ListItem::new(Line::from(vec![Span::styled(
+                "Queued",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )])));
+            if backlog.queued.is_empty() {
+                backlog_items.push(ListItem::new("- none"));
             } else {
-                backlog
-                    .queued
-                    .iter()
-                    .map(|line| ListItem::new(line.clone()))
-                    .collect::<Vec<_>>()
-            };
+                backlog_items.extend(backlog.queued.iter().map(|line| {
+                    ListItem::new(format!("- {line}"))
+                }));
+            }
             frame.render_widget(
-                List::new(queued_items)
-                    .block(Block::default().borders(Borders::ALL).title("Backlog Queue")),
-                backlog_chunks[1],
+                List::new(backlog_items)
+                    .block(Block::default().borders(Borders::ALL).title("Backlog")),
+                body[1],
             );
 
             let mut problems = workers
@@ -403,6 +408,7 @@ mod tests {
         WorkerRow {
             worker_id: "w1".to_string(),
             state: "doing".to_string(),
+            task_title: "task: demo".to_string(),
             tool_line: "rg --files".to_string(),
             breadcrumb: "understand>doing".to_string(),
             last_heartbeat_secs: heartbeat,
@@ -442,8 +448,9 @@ mod tests {
         assert!(frame.contains("Queue"));
         assert!(frame.contains("Workers"));
         assert!(frame.contains("Problems"));
-        assert!(frame.contains("Backlog In Progress"));
-        assert!(frame.contains("Backlog Queue"));
+        assert!(frame.contains("Backlog"));
+        assert!(frame.contains("In Progress"));
+        assert!(frame.contains("Queued"));
 
         assert_eq!(handle_key('q'), "quit");
         assert_eq!(handle_key('r'), "retry");

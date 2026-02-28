@@ -256,7 +256,7 @@ impl AppState {
                     message: if row.breadcrumb.is_empty() {
                         row.tool_line.clone()
                     } else {
-                        format!("{} ({})", row.tool_line, humanize_breadcrumb(&row.breadcrumb))
+                        format!("{} ({})", row.tool_line, format_breadcrumb(&row.breadcrumb))
                     },
                 }],
                 command_details: row
@@ -401,20 +401,6 @@ fn wizard_step_indicator(current_step: usize) -> Line<'static> {
         ));
     }
     Line::from(spans)
-}
-
-#[allow(dead_code)]
-fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
-    let mut command = command.to_string();
-    let prefix = format!("{timestamp}  ");
-    if max_width <= prefix.len() {
-        return prefix;
-    }
-    let available = max_width.saturating_sub(prefix.len());
-    if command.len() > available {
-        command = truncate_right(&command, available);
-    }
-    format!("{prefix}{command}")
 }
 
 fn truncate_right(input: &str, max_width: usize) -> String {
@@ -681,33 +667,6 @@ struct LiveStartupHeadlineState {
     verb_idx: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProblemClass {
-    Healthy,
-    Stalled,
-    Zombie,
-}
-
-pub fn classify_problem(
-    worker: &WorkerRow,
-    heartbeat_interval_seconds: u64,
-    lease_timeout_seconds: u64,
-) -> ProblemClass {
-    if worker.session_missing && worker.lease_held {
-        return ProblemClass::Zombie;
-    }
-
-    if worker.last_heartbeat_secs > lease_timeout_seconds {
-        return ProblemClass::Zombie;
-    }
-
-    if worker.last_heartbeat_secs > heartbeat_interval_seconds.saturating_mul(2) {
-        return ProblemClass::Stalled;
-    }
-
-    ProblemClass::Healthy
-}
-
 pub fn render_dashboard(
     workers: &[WorkerRow],
     stats: &QueueStats,
@@ -795,8 +754,8 @@ fn draw_dashboard_frame(
     workers: &[WorkerRow],
     stats: &QueueStats,
     backlog: &BacklogView,
-    heartbeat_interval_seconds: u64,
-    lease_timeout_seconds: u64,
+    _heartbeat_interval_seconds: u64,
+    _lease_timeout_seconds: u64,
     startup_headline: StartupHeadlineView,
 ) {
     let mut app_state = AppState::from_dashboard_feed(
@@ -814,34 +773,11 @@ fn draw_dashboard_frame(
     } else {
         WORKER_LIST_ROW_HEIGHT
     };
-    let human_problems = workers
-        .iter()
-        .filter_map(|row| {
-            let class = classify_problem(row, heartbeat_interval_seconds, lease_timeout_seconds);
-            if !requires_human_attention(class) {
-                return None;
-            }
-            Some(describe_problem_for_human(row, class))
-        })
-        .collect::<Vec<_>>();
-    let has_human_problems = !human_problems.is_empty()
-        && app_state.terminal_height >= 20
-        && app_state.terminal_width >= 80;
-
-    let layout_constraints = if has_human_problems {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(11),
-            Constraint::Length(5),
-            Constraint::Length(2),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(16),
-            Constraint::Length(2),
-        ]
-    };
+    let layout_constraints = vec![
+        Constraint::Length(3),
+        Constraint::Min(16),
+        Constraint::Length(2),
+    ];
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(layout_constraints)
@@ -1194,23 +1130,6 @@ fn draw_dashboard_frame(
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(body[2]);
     frame.render_widget(List::new(list_items), backlog_panel[1]);
-
-    if has_human_problems {
-        frame.render_widget(
-            Paragraph::new(human_problems.join("\n")).block(
-                Block::default()
-                    .title(Line::from(vec![Span::styled(
-                        "Problems Requiring Human",
-                        Style::default()
-                            .fg(Color::Rgb(255, 125, 125))
-                            .add_modifier(Modifier::BOLD),
-                    )]))
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
-            ),
-            chunks[2],
-        );
-    }
 
     let controls_legend =
         if workers.len() == 1 && workers[0].worker_id == "boot" && workers[0].state == "init" {
@@ -1658,22 +1577,7 @@ where
     })
 }
 
-fn requires_human_attention(class: ProblemClass) -> bool {
-    matches!(class, ProblemClass::Zombie)
-}
-
-fn describe_problem_for_human(row: &WorkerRow, class: ProblemClass) -> String {
-    match class {
-        ProblemClass::Zombie => format!(
-            "{} needs intervention: worker lease/session is inconsistent (last action: {}).",
-            row.worker_id,
-            humanize_action(&row.tool_line)
-        ),
-        ProblemClass::Stalled | ProblemClass::Healthy => String::new(),
-    }
-}
-
-fn humanize_state(state: &str) -> String {
+fn format_state_label(state: &str) -> String {
     match state {
         "init" => "Startup".to_string(),
         "backlog_sync" => "Backlog Sync".to_string(),
@@ -1687,39 +1591,8 @@ fn humanize_state(state: &str) -> String {
         "failed" => "Failed".to_string(),
         "working" => "Working".to_string(),
         "idle" => "Idle".to_string(),
-        _ => title_case_words(state),
+        _ => to_title_case_words(state),
     }
-}
-
-fn humanize_action(action: &str) -> String {
-    if action.eq_ignore_ascii_case("waiting for claim") {
-        return "Waiting for work".to_string();
-    }
-    if action.eq_ignore_ascii_case("claimed") {
-        return "Task claimed".to_string();
-    }
-    if action.eq_ignore_ascii_case("orchestrator") {
-        return "Coordinator".to_string();
-    }
-    if let Some(rest) = action.strip_prefix("failed: ") {
-        let rest = if rest.is_empty() {
-            "unknown issue".to_string()
-        } else {
-            rest.to_string()
-        };
-        return format!("Failed: {}", truncate_right(&rest, 12));
-    }
-    if action.starts_with("failed ") || action.starts_with("completed ") || action.starts_with("completed:") {
-        return if action.starts_with("failed ") || action.starts_with("failed") {
-            "Task failed".to_string()
-        } else {
-            "Task complete".to_string()
-        };
-    }
-    if let Some(prompt) = action.strip_prefix("prompt ") {
-        return format!("Prompt {}", prompt);
-    }
-    title_case_words(action)
 }
 
 fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
@@ -1732,7 +1605,7 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
     }
     if current == "unknown" {
         return vec![Span::styled(
-            humanize_state(state),
+            format_state_label(state),
             Style::default().fg(Color::DarkGray),
         )];
     }
@@ -1772,7 +1645,7 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
             if index > 0 {
                 spans.push(Span::raw(" → "));
             }
-            spans.push(Span::styled(humanize_state(step), style));
+            spans.push(Span::styled(format_state_label(step), style));
             spans
         })
         .collect()
@@ -1837,61 +1710,13 @@ fn normalize_worker_state(state: &str) -> &str {
     }
 }
 
-#[allow(dead_code)]
-fn worker_flow_summary(state: &str, tool_line: &str, breadcrumb: &str) -> String {
-    if state == "failed" {
-        if let Some(reason) = tool_line.strip_prefix("failed: ") {
-            let details = if reason.is_empty() {
-                "unknown issue".to_string()
-            } else {
-                truncate_right(reason, 52)
-            };
-            return format!("Task failed ({})", details);
-        }
-        if let Some(task) = tool_line.strip_prefix("failed ") {
-            return format!("Task failed on {}", task);
-        }
-        return "Task failed".to_string();
-    }
-
-    if state == "complete" {
-        return "Task complete".to_string();
-    }
-
-    if state == "reviewing" {
-        return "Reviewing patch and results".to_string();
-    }
-
-    if state == "merging" {
-        if let Some(prompt) = tool_line.strip_prefix("prompt ") {
-            return format!("Merging changes (prompt {})", prompt);
-        }
-        return "Merging changes".to_string();
-    }
-
-    let base = if breadcrumb.is_empty() {
-        humanize_state(state)
-    } else {
-        humanize_breadcrumb(breadcrumb)
-    };
-    if base.is_empty() {
-        humanize_state(state)
-    } else if let Some(prompt) = tool_line.strip_prefix("prompt ") {
-        format!("{base} (prompt {prompt})")
-    } else if base.len() > 56 {
-        truncate_right(&base, 56)
-    } else {
-        base
-    }
-}
-
-fn humanize_breadcrumb(path: &str) -> String {
+fn format_breadcrumb(path: &str) -> String {
     let parts = path
         .split('>')
         .map(str::trim)
         .filter(|step| !step.is_empty())
         .filter(|step| !step.eq_ignore_ascii_case("state"))
-        .map(humanize_breadcrumb_step)
+        .map(format_breadcrumb_step)
         .collect::<Vec<_>>()
         .join(" > ");
     if !parts.is_empty() {
@@ -1900,11 +1725,11 @@ fn humanize_breadcrumb(path: &str) -> String {
     if path.is_empty() {
         String::new()
     } else {
-        title_case_words(path)
+        to_title_case_words(path)
     }
 }
 
-fn humanize_breadcrumb_step(step: &str) -> String {
+fn format_breadcrumb_step(step: &str) -> String {
     match step {
         "claim" => "Claiming".to_string(),
         "understand" => "Understanding".to_string(),
@@ -1916,11 +1741,11 @@ fn humanize_breadcrumb_step(step: &str) -> String {
         "working" => "Working".to_string(),
         "backlog_sync" => "Backlog Sync".to_string(),
         "boot" => "Boot".to_string(),
-        _ => title_case_words(step),
+        _ => to_title_case_words(step),
     }
 }
 
-fn title_case_words(raw: &str) -> String {
+fn to_title_case_words(raw: &str) -> String {
     let mut out = String::new();
     let mut in_word = false;
     let mut capitalize = true;
@@ -2169,11 +1994,10 @@ fn teardown_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
-        render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
-        scroll_workers_up, AppState, ProblemClass, StageState,
-        BacklogView,
-        QueueStats, StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow, WorkerState,
+        format_breadcrumb, format_state_label, render_dashboard, render_dashboard_at_tick,
+        render_triage, reset_workers_scroll, scroll_workers_down, scroll_workers_up, AppState,
+        StageState, BacklogView, QueueStats, StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow,
+        WorkerState,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -2189,26 +2013,6 @@ mod tests {
             session_missing: missing,
             command_details: Vec::new(),
         }
-    }
-
-    #[test]
-    fn problem_classification_thresholds_are_deterministic() {
-        assert_eq!(
-            classify_problem(&worker(10, false), 15, 900),
-            ProblemClass::Healthy
-        );
-        assert_eq!(
-            classify_problem(&worker(31, false), 15, 900),
-            ProblemClass::Stalled
-        );
-        assert_eq!(
-            classify_problem(&worker(901, false), 15, 900),
-            ProblemClass::Zombie
-        );
-        assert_eq!(
-            classify_problem(&worker(1, true), 15, 900),
-            ProblemClass::Zombie
-        );
     }
 
     #[test]
@@ -2243,8 +2047,6 @@ mod tests {
         assert!(frame.contains("P2"));
         assert!(!frame.contains("status="));
         assert!(!frame.contains("action="));
-
-        // handle_key removed — real dispatch uses hotkeys::action_for_key
     }
 
     #[test]
@@ -2330,7 +2132,7 @@ mod tests {
     }
 
     #[test]
-    fn shows_problems_only_when_human_intervention_is_needed() {
+    fn does_not_render_human_problem_panel() {
         let frame = render_dashboard(
             &[worker(901, false)],
             &QueueStats {
@@ -2346,27 +2148,59 @@ mod tests {
             80,
             20,
         );
-        assert!(frame.contains("Problems Requiring Human"));
-        assert!(frame.contains("needs intervention"));
+        assert!(!frame.contains("Problems Requiring Human"));
+        assert!(!frame.contains("needs intervention"));
     }
 
     #[test]
-    fn humanized_labels_are_readable() {
-        assert_eq!(humanize_state("backlog_sync"), "Backlog Sync");
-        assert_eq!(humanize_action("orchestrator"), "Coordinator");
-        assert_eq!(
-            humanize_breadcrumb("boot>backlog_sync"),
-            "Boot > Backlog Sync"
+    fn dashboard_worker_labels_are_readable() {
+        let frame = render_dashboard(
+            &[
+                WorkerRow {
+                    worker_id: "w1".to_string(),
+                    state: "backlog_sync".to_string(),
+                    task_title: "task one".to_string(),
+                    tool_line: "tool".to_string(),
+                    breadcrumb: "boot>backlog_sync".to_string(),
+                    last_heartbeat_secs: 5,
+                    session_age_secs: 1,
+                    lease_held: true,
+                    session_missing: false,
+                    command_details: Vec::new(),
+                },
+                WorkerRow {
+                    worker_id: "w2".to_string(),
+                    state: "merging".to_string(),
+                    task_title: "task two".to_string(),
+                    tool_line: "prompt 12".to_string(),
+                    breadcrumb: "state>merging".to_string(),
+                    last_heartbeat_secs: 5,
+                    session_age_secs: 1,
+                    lease_held: true,
+                    session_missing: false,
+                    command_details: Vec::new(),
+                },
+            ],
+            &QueueStats {
+                ready: 0,
+                active: 2,
+                failed: 0,
+                unresolved: 0,
+                p0: 0,
+                p1: 2,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            120,
+            30,
         );
-        assert_eq!(humanize_breadcrumb("state>merging"), "Merging");
-        assert_eq!(
-            super::worker_flow_summary("merging", "prompt 42", "state>merging"),
-            "Merging changes (prompt 42)"
-        );
-        assert_eq!(
-            super::worker_flow_summary("failed", "failed: conflict applying patch", ""),
-            "Task failed (conflict applying patch)"
-        );
+        assert_eq!(format_breadcrumb("boot>backlog_sync"), "Boot > Backlog Sync");
+        assert_eq!(format_breadcrumb("state>merging"), "Merging");
+        assert_eq!(format_state_label("backlog_sync"), "Backlog Sync");
+        assert_eq!(format_state_label("merging"), "Merging");
+        assert!(frame.contains("task one"));
+        assert!(frame.contains("task two"));
+        assert!(frame.contains("Flow:"));
     }
 
     #[test]

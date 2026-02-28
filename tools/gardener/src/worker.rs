@@ -195,7 +195,7 @@ fn execute_task_live(
             failure_reason,
         });
     }
-    let understand = parse_understand_output(&understand_result.payload, task_summary);
+    let understand = parse_understand_output(&understand_result.payload, worker_id, task_summary);
     append_run_log(
         "debug",
         "worker.task.classified",
@@ -549,7 +549,14 @@ fn execute_task_simulated(
         fsm.transition(WorkerState::Doing)?;
     }
 
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        &identity.worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let _doing_output: DoingOutput = parse_typed_payload(
@@ -579,7 +586,14 @@ fn execute_task_simulated(
     }
 
     fsm.transition(WorkerState::Gitting)?;
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let gitting_output: GittingOutput = parse_typed_payload(
@@ -591,7 +605,14 @@ fn execute_task_simulated(
     verify_gitting_output(&gitting_output)?;
 
     fsm.transition(WorkerState::Reviewing)?;
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let reviewing_output = ReviewingOutput {
@@ -622,7 +643,14 @@ fn execute_task_simulated(
         fsm.transition(WorkerState::Merging)?;
     }
 
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let merge_output: MergingOutput = parse_typed_payload(
@@ -697,7 +725,14 @@ fn run_agent_turn(
     state: WorkerState,
     task_summary: &str,
 ) -> Result<TurnResult, GardenerError> {
-    let prepared = prepare_prompt(cfg, registry, learning_loop, state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        registry,
+        learning_loop,
+        state,
+        &identity.worker_id,
+        task_summary,
+    )?;
     let backend = effective_agent_for_state(cfg, state).ok_or_else(|| {
         GardenerError::InvalidConfig(format!("no backend configured for {state:?}"))
     })?;
@@ -778,12 +813,14 @@ fn prepare_prompt(
     registry: &PromptRegistry,
     learning_loop: &LearningLoop,
     state: WorkerState,
+    worker_id: &str,
     task_summary: &str,
 ) -> Result<PreparedPrompt, GardenerError> {
     append_run_log(
         "debug",
         "worker.prompt.prepare",
         json!({
+            "worker_id": worker_id,
             "state": state.as_str(),
             "knowledge_entries": learning_loop.entries().len()
         }),
@@ -874,6 +911,7 @@ fn prepare_prompt(
         "debug",
         "worker.prompt.ready",
         json!({
+            "worker_id": worker_id,
             "state": state.as_str(),
             "prompt_version": prompt_version,
             "context_manifest_hash": context_manifest_hash,
@@ -887,7 +925,11 @@ fn prepare_prompt(
     })
 }
 
-fn parse_understand_output(payload: &serde_json::Value, task_summary: &str) -> UnderstandOutput {
+fn parse_understand_output(
+    payload: &serde_json::Value,
+    worker_id: &str,
+    task_summary: &str,
+) -> UnderstandOutput {
     if let Ok(parsed) = serde_json::from_value::<UnderstandOutput>(payload.clone()) {
         return parsed;
     }
@@ -896,6 +938,7 @@ fn parse_understand_output(payload: &serde_json::Value, task_summary: &str) -> U
         "warn",
         "worker.understand.payload_invalid",
         json!({
+            "worker_id": worker_id,
             "task_summary": task_summary,
             "fallback_task_type": format!("{fallback:?}"),
             "payload": payload,
@@ -1181,6 +1224,7 @@ mod tests {
     use super::{
         execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
         verify_merge_output, worktree_branch_for, worktree_path_for, worktree_slug_for_task,
+        worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::fsm::{GittingOutput, MergingOutput};
@@ -1313,10 +1357,10 @@ mod tests {
         assert_ne!(first, second);
         let first_suffix = first.rsplitn(2, '-').next().unwrap_or_default();
         assert_eq!(first_suffix, worktree_slug_suffix("manual:tui:GARD-01"));
-        assert_eq!(first_suffix.len(), 8);
+        assert_eq!(first_suffix.len(), 16);
         assert_eq!(second.rsplitn(2, '-').next().unwrap_or_default(), worktree_slug_suffix("manual:tui:GARD-11"));
         assert!(
-            first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 8
+            first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 16
         );
         let branch = worktree_branch_for("worker-1", "manual:tui:GARD-01");
         assert_eq!(branch.len(), "gardener/worker-1-".len() + first.len());

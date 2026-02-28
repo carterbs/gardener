@@ -152,7 +152,13 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
-            if self.branch_exists(branch)? {
+            let branch_exists = self.branch_exists(branch)?;
+            let branch_collision = branch_exists
+                || out
+                    .stderr
+                    .to_lowercase()
+                    .contains("fatal: a branch named") && out.stderr.to_lowercase().contains("already exists");
+            if branch_collision {
                 append_run_log(
                     "warn",
                     "worktree.create.branch_already_exists",
@@ -230,16 +236,30 @@ impl<'a> WorktreeClient<'a> {
     }
 
     fn branch_exists(&self, branch: &str) -> Result<bool, GardenerError> {
+        if self.reference_exists(&format!("refs/heads/{branch}"))? {
+            return Ok(true);
+        }
+        if self.reference_exists(&format!("refs/remotes/origin/{branch}"))? {
+            return Ok(true);
+        }
+        if self.reference_exists(&format!("refs/remotes/upstream/{branch}"))? {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn reference_exists(&self, reference: &str) -> Result<bool, GardenerError> {
         let check = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec![
-                "branch".to_string(),
-                "--list".to_string(),
-                branch.to_string(),
+                "show-ref".to_string(),
+                "--verify".to_string(),
+                "--quiet".to_string(),
+                reference.to_string(),
             ],
             cwd: Some(self.cwd.clone()),
         })?;
-        Ok(check.exit_code == 0 && !check.stdout.trim().is_empty())
+        Ok(check.exit_code == 0)
     }
 
     pub fn remove_recreate_if_stale_empty(
@@ -465,6 +485,48 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
         assert_eq!(spawned[1].args[0], "worktree");
         assert_eq!(spawned[1].args[1], "add");
         assert_eq!(spawned[1].args[3], "-b");
+        assert_eq!(spawned[3].args[0], "worktree");
+        assert_eq!(spawned[3].args[1], "add");
+        assert_eq!(spawned[3].args[3], "task-1");
+    }
+
+    #[test]
+    fn create_or_resume_reuses_existing_branch_when_branch_exists_reference_check_succeeds() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 255,
+            stdout: String::new(),
+            stderr: "fatal: unable to write new index file".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, "/repo")
+            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
+            .expect("reused branch via reference check");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 4);
+        assert_eq!(spawned[1].args[0], "worktree");
+        assert_eq!(spawned[1].args[1], "add");
+        assert_eq!(spawned[1].args[3], "-b");
+        assert_eq!(spawned[2].args[0], "show-ref");
+        assert_eq!(spawned[2].args[1], "--verify");
+        assert_eq!(spawned[2].args[2], "--quiet");
+        assert_eq!(spawned[2].args[3], "refs/heads/task-1");
         assert_eq!(spawned[3].args[0], "worktree");
         assert_eq!(spawned[3].args[1], "add");
         assert_eq!(spawned[3].args[3], "task-1");

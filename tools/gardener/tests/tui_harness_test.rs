@@ -17,6 +17,8 @@ fn fake_terminal_captures_tui_frames_and_interactions() {
             session_age_secs: 30,
             lease_held: true,
             session_missing: false,
+            command_details: Vec::new(),
+            commands_expanded: false,
         }],
         &QueueStats {
             ready: 2,

@@ -542,7 +542,7 @@ fn execute_task_live(
         });
     }
     let merge_output = parse_merge_output(&merging_result.payload);
-    verify_merge_output(&merge_output)?;
+    verify_merge_output(identity.worker_id.as_str(), &merge_output)?;
 
     fsm.transition(WorkerState::Complete)?;
 
@@ -653,7 +653,7 @@ fn execute_task_simulated(
         ),
         WorkerState::Gitting,
     )?;
-    verify_gitting_output(&gitting_output)?;
+    verify_gitting_output(worker_id, &gitting_output)?;
 
     fsm.transition(WorkerState::Reviewing)?;
     let prepared = prepare_prompt(
@@ -712,7 +712,7 @@ fn execute_task_simulated(
         ),
         WorkerState::Merging,
     )?;
-    verify_merge_output(&merge_output)?;
+    verify_merge_output(worker_id, &merge_output)?;
     learning_loop.ingest_postmerge(&merge_output, vec!["validation passed".to_string()]);
 
     fsm.transition(WorkerState::Complete)?;
@@ -1130,16 +1130,42 @@ fn review_artifact_path(scope: &RuntimeScope, task_id: &str) -> PathBuf {
         .join(format!("{}.json", worktree_slug_for_task(task_id)))
 }
 
-fn verify_gitting_output(output: &GittingOutput) -> Result<(), GardenerError> {
+fn verify_gitting_output(worker_id: &str, output: &GittingOutput) -> Result<(), GardenerError> {
+    append_run_log(
+        "debug",
+        "worker.gitting.output.verify.started",
+        json!({
+            "worker_id": worker_id,
+            "branch": output.branch.clone(),
+            "pr_number": output.pr_number,
+        }),
+    );
     if output.branch.trim().is_empty() || output.pr_number == 0 || output.pr_url.trim().is_empty() {
         return Err(GardenerError::InvalidConfig(
             "gitting verification failed: missing branch/pr metadata".to_string(),
-    ));
-}
+        ));
+    }
+    append_run_log(
+        "debug",
+        "worker.gitting.output.verify.ok",
+        json!({
+            "worker_id": worker_id,
+            "branch": output.branch,
+            "pr_url": output.pr_url,
+        }),
+    );
     Ok(())
 }
 
-fn verify_merge_output(output: &MergingOutput) -> Result<(), GardenerError> {
+fn verify_merge_output(worker_id: &str, output: &MergingOutput) -> Result<(), GardenerError> {
+    append_run_log(
+        "debug",
+        "worker.merging.output.verify.started",
+        json!({
+            "worker_id": worker_id,
+            "merged": output.merged,
+        }),
+    );
     if output.merged
         && output
             .merge_sha
@@ -1152,6 +1178,15 @@ fn verify_merge_output(output: &MergingOutput) -> Result<(), GardenerError> {
             "merging verification failed: merge_sha required when merged=true".to_string(),
         ));
     }
+    append_run_log(
+        "debug",
+        "worker.merging.output.verify.ok",
+        json!({
+            "worker_id": worker_id,
+            "merged": output.merged,
+            "merge_sha_present": output.merge_sha.is_some(),
+        }),
+    );
     Ok(())
 }
 
@@ -1345,7 +1380,7 @@ mod tests {
 
     #[test]
     fn git_verification_invariants_are_enforced() {
-        let err = verify_gitting_output(&GittingOutput {
+        let err = verify_gitting_output("worker-1", &GittingOutput {
             branch: String::new(),
             pr_number: 1,
             pr_url: "x".to_string(),
@@ -1353,7 +1388,7 @@ mod tests {
         .expect_err("must fail");
         assert!(format!("{err}").contains("gitting verification failed"));
 
-        let err = verify_merge_output(&MergingOutput {
+        let err = verify_merge_output("worker-1", &MergingOutput {
             merged: true,
             merge_sha: None,
         })

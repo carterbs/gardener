@@ -1,4 +1,6 @@
+use crate::logging::append_run_log;
 use std::path::Path;
+use serde_json::json;
 
 use crate::backlog_store::{BacklogStore, BacklogTask};
 use crate::errors::GardenerError;
@@ -8,6 +10,14 @@ pub fn export_markdown_snapshot(
     output: impl AsRef<Path>,
 ) -> Result<String, GardenerError> {
     let tasks = store.list_tasks()?;
+    append_run_log(
+        "debug",
+        "backlog_snapshot.export.started",
+        json!({
+            "path": output.as_ref().display().to_string(),
+            "task_count": tasks.len(),
+        }),
+    );
     let rendered = render_markdown(&tasks);
     std::fs::write(output, rendered.as_bytes()).map_err(|e| GardenerError::Io(e.to_string()))?;
     Ok(rendered)

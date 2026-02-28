@@ -709,6 +709,14 @@ pub fn resolve_validation_command(
 }
 
 fn validate_config(cfg: &AppConfig) -> Result<(), GardenerError> {
+    append_run_log(
+        "debug",
+        "config.validate.started",
+        json!({
+            "parallelism": cfg.orchestrator.parallelism,
+            "states": cfg.states.len(),
+        }),
+    );
     if cfg.orchestrator.parallelism == 0 {
         return Err(GardenerError::InvalidConfig(
             "orchestrator.parallelism must be greater than zero".to_string(),

@@ -246,9 +246,6 @@ impl<'a> WorktreeClient<'a> {
                 return;
             }
         };
-        if !source.is_dir() {
-            return;
-        }
         let target = match self.resolve_hook_path(worktree_path) {
             Ok(path) => path,
             Err(error) => {
@@ -277,6 +274,11 @@ impl<'a> WorktreeClient<'a> {
     }
 
     fn resolve_hook_path(&self, repo_root: &Path) -> Result<PathBuf, GardenerError> {
+        append_run_log(
+            "debug",
+            "worktree.hooks.path_resolve_started",
+            json!({ "repo_root": repo_root.display().to_string() }),
+        );
         let out = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec![
@@ -316,6 +318,11 @@ impl<'a> WorktreeClient<'a> {
     }
 
     fn branch_exists(&self, branch: &str) -> Result<bool, GardenerError> {
+        append_run_log(
+            "debug",
+            "worktree.branch_exists.started",
+            json!({ "branch": branch }),
+        );
         if self.reference_exists(&format!("refs/heads/{branch}"))? {
             return Ok(true);
         }
@@ -329,6 +336,11 @@ impl<'a> WorktreeClient<'a> {
     }
 
     fn reference_exists(&self, reference: &str) -> Result<bool, GardenerError> {
+        append_run_log(
+            "debug",
+            "worktree.reference_exists.started",
+            json!({ "reference": reference }),
+        );
         let check = self.runner.run(ProcessRequest {
             program: "git".to_string(),
             args: vec![

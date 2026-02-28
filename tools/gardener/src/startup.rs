@@ -247,7 +247,11 @@ where
         .unwrap_or(&scope.working_dir)
         .join(".cache/gardener/backlog.sqlite");
     let mut seeded_tasks_upserted = 0usize;
-    let existing_active_backlog_count = BacklogStore::open(&db_path)?.count_active_tasks()?;
+    let existing_active_backlog_count = if run_seeding && !cfg.execution.test_mode {
+        BacklogStore::open(&db_path)?.count_active_tasks()?
+    } else {
+        0
+    };
     if should_seed_backlog(
         run_seeding,
         cfg.execution.test_mode,
@@ -453,6 +457,14 @@ fn run_seed_with_heartbeat<F>(
 where
     F: FnMut(&str) -> Result<(), GardenerError>,
 {
+    append_run_log(
+        "debug",
+        "startup.backlog_seed.heartbeat.started",
+        json!({
+            "repo_root": scope.repo_root.as_ref().map(|p| p.display().to_string()),
+            "profile_set": !cfg.seeding.model.is_empty(),
+        }),
+    );
     enum SeedProgressMessage {
         AgentUpdate(String),
         Done(Result<Vec<crate::seed_runner::SeedTask>, GardenerError>),

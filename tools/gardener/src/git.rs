@@ -309,6 +309,15 @@ impl<'a> GitClient<'a> {
             .into_iter()
             .map(|s| s.as_ref().to_string())
             .collect::<Vec<_>>();
+        append_run_log(
+            "debug",
+            "git.run.requested",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "program": parts.first().cloned().unwrap_or_default(),
+                "arg_count": parts.len().saturating_sub(1),
+            }),
+        );
         let program = parts.first().cloned().unwrap_or_default();
         let argv = parts.iter().skip(1).cloned().collect::<Vec<_>>();
         self.runner.run(ProcessRequest {

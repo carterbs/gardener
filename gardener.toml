@@ -5,11 +5,11 @@ working_dir = "."
 parallelism = 1
 
 [validation]
-command = "cargo test -p gardener --all-targets"
+command = "./scripts/run-validate.sh"
 
 [startup]
 validate_on_boot = false
-validation_command = "cargo test -p gardener --all-targets"
+validation_command = "./scripts/run-validate.sh"
 
 [agent]
 default = "codex"

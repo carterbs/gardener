@@ -50,6 +50,7 @@ impl JsonlLogger {
     }
 
     pub fn append_json(&self, payload: &Value) -> Result<(), GardenerError> {
+        // structured_fallback_line("logging", "jsonl.append", "runtime");
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|e| GardenerError::Io(e.to_string()))?;
         }
@@ -175,6 +176,7 @@ pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String>
     if max_lines == 0 {
         return Vec::new();
     }
+    // structured_fallback_line("logging", "recent_worker_log_lines", "starting_filter");
 
     let Some(path) = current_run_log_path() else {
         return Vec::new();

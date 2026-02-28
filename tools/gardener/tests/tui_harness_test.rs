@@ -43,7 +43,7 @@ fn fake_terminal_captures_tui_frames_and_interactions() {
 
     let frames = terminal.drawn_frames();
     assert_eq!(frames.len(), 1);
-    assert!(frames[0].contains("worker-1"));
+    assert!(frames[0].contains("Lawn Mower"));
 }
 
 #[test]

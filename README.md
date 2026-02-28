@@ -60,7 +60,7 @@ cargo llvm-cov -p gardener --all-targets --summary-only
 
 ## Git Hooks
 
-Enable the local pre-commit hook to run `cargo build` before each commit:
+Enable the local pre-commit hook to run Gardener validation before each commit:
 
 ```bash
 git config core.hooksPath .githooks
@@ -71,6 +71,15 @@ or run the repo helper script:
 ```bash
 ./scripts/setup-git-hooks.sh
 ```
+
+Pre-commit now executes:
+
+```text
+scripts/brad-gardener --config gardener.toml --validate --validation-command "scripts/check-skills-sync.sh"
+```
+
+That means each commit runs the configured custom linter set defined in
+`scripts/check-skills-sync.sh` before commit.
 
 ## Vision
 

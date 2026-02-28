@@ -117,6 +117,16 @@ pub struct StartupSnapshot {
 }
 
 pub fn run() -> Result<i32, GardenerError> {
+    append_run_log(
+        "debug",
+        "runtime.run.requested",
+        json!({
+            "invoked_at": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or_default(),
+        }),
+    );
     let args = std::env::args_os().collect::<Vec<_>>();
     let env = std::env::vars_os().collect::<Vec<_>>();
     let cwd = std::env::current_dir().map_err(|e| GardenerError::Io(e.to_string()))?;
@@ -275,16 +285,16 @@ pub fn run_with_runtime(
         }
 
         if cli.backlog_only {
+            runtime.terminal.write_line("phase3 backlog-only")?;
             let mut cfg_for_startup = cfg.clone();
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
-            runtime.terminal.write_line("phase3 backlog-only")?;
             return Ok(0);
         }
 
         if cli.quality_grades_only {
+            runtime.terminal.write_line("phase3 quality-grades-only")?;
             let mut cfg_for_startup = cfg.clone();
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
-            runtime.terminal.write_line("phase3 quality-grades-only")?;
             return Ok(0);
         }
 

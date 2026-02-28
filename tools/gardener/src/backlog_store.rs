@@ -222,6 +222,15 @@ impl BacklogStore {
     }
 
     pub fn upsert_task(&self, task: NewTask) -> StoreResult<BacklogTask> {
+        append_run_log(
+            "debug",
+            "backlog.task.upsert_client_started",
+            json!({
+                "scope_key": task.scope_key,
+                "priority": task.priority.as_str(),
+                "source": task.source,
+            }),
+        );
         let now = system_time_unix();
         append_run_log(
             "debug",
@@ -501,6 +510,11 @@ impl BacklogStore {
     }
 
     pub fn count_tasks_by_priority(&self) -> StoreResult<(usize, usize, usize)> {
+        append_run_log(
+            "debug",
+            "backlog.tasks.count_by_priority.started",
+            json!({}),
+        );
         self.read_pool.with_conn(|conn| {
             let mut statement = conn
                 .prepare(
@@ -524,6 +538,11 @@ impl BacklogStore {
     }
 
     pub fn count_active_tasks(&self) -> StoreResult<usize> {
+        append_run_log(
+            "debug",
+            "backlog.tasks.count_active.started",
+            json!({}),
+        );
         self.read_pool.with_conn(|conn| {
             let mut statement = conn
                 .prepare("SELECT COUNT(*) FROM backlog_tasks WHERE status <> 'complete'")
@@ -629,6 +648,14 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
 }
 
 fn upsert_task(conn: &Connection, task: &NewTask, now: i64) -> StoreResult<()> {
+    append_run_log(
+        "debug",
+        "backlog_store.upsert_task.started",
+        json!({
+            "task_id": compute_task_id_from_new_task(task),
+            "scope_key": task.scope_key,
+        }),
+    );
     let task_id = compute_task_id_from_new_task(task);
     conn.execute(
         "INSERT INTO backlog_tasks (
@@ -705,6 +732,14 @@ fn claim_next_in_tx(
     lease_expires_at: i64,
     now: i64,
 ) -> StoreResult<Option<BacklogTask>> {
+    append_run_log(
+        "debug",
+        "backlog_store.claim_next_in_tx.started",
+        json!({
+            "lease_owner": lease_owner,
+            "lease_expires_at": lease_expires_at
+        }),
+    );
     let mut candidate = tx
         .prepare(
             "SELECT task_id
@@ -756,6 +791,14 @@ fn mark_in_progress(
     lease_owner: &str,
     now: i64,
 ) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.mark_in_progress.started",
+        json!({
+            "task_id": task_id,
+            "lease_owner": lease_owner,
+        }),
+    );
     let changed = conn
         .execute(
             "UPDATE backlog_tasks
@@ -773,6 +816,14 @@ fn mark_complete(
     lease_owner: &str,
     now: i64,
 ) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.mark_complete.started",
+        json!({
+            "task_id": task_id,
+            "lease_owner": lease_owner,
+        }),
+    );
     let changed = conn
         .execute(
             "UPDATE backlog_tasks
@@ -790,6 +841,14 @@ fn release_lease(
     lease_owner: &str,
     now: i64,
 ) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.release_lease.started",
+        json!({
+            "task_id": task_id,
+            "lease_owner": lease_owner,
+        }),
+    );
     let changed = conn
         .execute(
             "UPDATE backlog_tasks
@@ -802,6 +861,11 @@ fn release_lease(
 }
 
 fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
+    append_run_log(
+        "debug",
+        "backlog_store.recover_stale.started",
+        json!({ "now": now }),
+    );
     let changed = conn
         .execute(
             "UPDATE backlog_tasks
@@ -818,6 +882,13 @@ fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
 }
 
 fn fetch_task(conn: &Connection, task_id: &str) -> StoreResult<Option<BacklogTask>> {
+    append_run_log(
+        "debug",
+        "backlog_store.fetch_task.started",
+        json!({
+            "task_id": task_id,
+        }),
+    );
     conn.query_row(
         "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated,
                 lease_owner, lease_expires_at, source, related_pr, related_branch,

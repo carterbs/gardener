@@ -4,8 +4,8 @@ use gardener::types::WorkerState;
 
 #[test]
 fn commit_only_gitting_prompt_requires_pre_commit_recovery_steps() {
-    let template = PromptRegistry::v1()
-        .with_gitting_mode(&GitOutputMode::CommitOnly)
+    let registry = PromptRegistry::v1().with_gitting_mode(&GitOutputMode::CommitOnly);
+    let template = registry
         .template_for(WorkerState::Gitting)
         .expect("template must exist");
 

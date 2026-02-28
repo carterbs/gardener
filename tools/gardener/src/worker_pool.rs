@@ -47,7 +47,8 @@ pub fn run_worker_pool_fsm(
     let mut report_visible = false;
     let hb = cfg.scheduler.heartbeat_interval_seconds;
     let lt = cfg.scheduler.lease_timeout_seconds;
-    let parallelism = cfg.orchestrator.parallelism.max(1) as usize;
+    let configured_parallelism = cfg.orchestrator.parallelism.max(1) as usize;
+    let parallelism = configured_parallelism.min(target.max(1));
     let mut workers = (0..parallelism)
         .map(|idx| WorkerRow {
             worker_id: format!("worker-{}", idx + 1),
@@ -303,7 +304,11 @@ pub fn run_worker_pool_fsm(
         })?;
 
         if let Some((worker_id, task_id, reason)) = shutdown_error {
-            terminal.draw_shutdown_screen("Error", &worker_failure_prompt(&worker_id, &task_id, &reason))?;
+            if terminal.stdin_is_tty() {
+                terminal.draw_shutdown_screen("Error", &worker_failure_prompt(&worker_id, &task_id, &reason))?;
+            } else {
+                terminal.write_line(&format!("Error: worker {worker_id} task {task_id}: {reason}"))?;
+            }
             wait_for_quit(terminal)?;
             return Ok(completed);
         }
@@ -332,12 +337,24 @@ pub fn run_worker_pool_fsm(
     } else {
         format!("Completed {completed} task(s). Backlog is empty.")
     };
-    terminal.draw_shutdown_screen(&shutdown_title, &shutdown_message)?;
+    if terminal.stdin_is_tty() {
+        terminal.draw_shutdown_screen(&shutdown_title, &shutdown_message)?;
+    } else {
+        terminal.write_line(&format!("{shutdown_title}: {shutdown_message}"))?;
+    }
     wait_for_quit(terminal)?;
     Ok(completed)
 }
 
 fn wait_for_quit(terminal: &dyn Terminal) -> Result<(), GardenerError> {
+    append_run_log(
+        "debug",
+        "worker_pool.wait_for_quit.started",
+        json!({
+            "worker_id": WORKER_POOL_ID,
+            "has_tty": terminal.stdin_is_tty(),
+        }),
+    );
     if !terminal.stdin_is_tty() {
         return Ok(());
     }
@@ -455,6 +472,7 @@ fn handle_hotkeys(
                 redraw_dashboard = true;
             }
             Some(AppHotkeyAction::ToggleCommandDetail) => {
+                // hotkey:c
                 redraw_dashboard = toggle_selected_worker_command_detail(workers);
             }
             Some(AppHotkeyAction::ViewReport) => *report_visible = true,
@@ -508,6 +526,13 @@ struct DashboardSnapshot {
 }
 
 fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, GardenerError> {
+    append_run_log(
+        "debug",
+        "worker_pool.dashboard_snapshot.started",
+        json!({
+            "worker_id": WORKER_POOL_ID
+        }),
+    );
     let tasks = store.list_tasks()?;
     let mut stats = QueueStats {
         ready: 0,

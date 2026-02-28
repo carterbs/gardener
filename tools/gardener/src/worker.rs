@@ -118,7 +118,8 @@ fn execute_task_live(
     );
     let registry = PromptRegistry::v1()
         .with_gitting_mode(&cfg.execution.git_output_mode)
-        .with_merging_mode(&cfg.execution.git_output_mode);
+        .with_merging_mode(&cfg.execution.git_output_mode)
+        .with_retry_rebase(attempt_count);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
     let learning_loop = LearningLoop::default();
@@ -133,7 +134,7 @@ fn execute_task_live(
     if attempt_count > 1 {
         append_run_log(
             "info",
-            "worker.task.rebase_before_retry",
+            "worker.task.retry_rebase_deferred_to_agent",
             json!({
                 "worker_id": worker_id,
                 "task_id": task_id,
@@ -141,26 +142,6 @@ fn execute_task_live(
                 "branch": branch
             }),
         );
-        let git = GitClient::new(process_runner, &worktree_path);
-        if let Err(e) = git.rebase_onto_main("main") {
-            append_run_log(
-                "warn",
-                "worker.task.rebase_failed",
-                json!({
-                    "worker_id": worker_id,
-                    "task_id": task_id,
-                    "error": e.to_string()
-                }),
-            );
-            return Ok(WorkerRunSummary {
-                worker_id: identity.worker_id,
-                session_id: identity.session.session_id,
-                final_state: WorkerState::Failed,
-                logs,
-                teardown: None,
-                failure_reason: Some(format!("rebase before retry failed: {e}")),
-            });
-        }
     }
 
     let understand_result = run_agent_turn(
@@ -174,6 +155,7 @@ fn execute_task_live(
         &identity,
         WorkerState::Understand,
         task_summary,
+        attempt_count,
     )?;
     logs.push(understand_result.log_event);
     if understand_result.terminal == AgentTerminal::Failure {
@@ -222,6 +204,7 @@ fn execute_task_live(
             &identity,
             WorkerState::Planning,
             task_summary,
+            attempt_count,
         )?;
         logs.push(planning_result.log_event);
         if planning_result.terminal == AgentTerminal::Failure {
@@ -257,6 +240,7 @@ fn execute_task_live(
         &identity,
         WorkerState::Doing,
         task_summary,
+        attempt_count,
     )?;
     logs.push(doing_result.log_event);
     if doing_result.terminal == AgentTerminal::Failure {
@@ -310,6 +294,7 @@ fn execute_task_live(
         &identity,
         WorkerState::Gitting,
         task_summary,
+        attempt_count,
     )?;
     logs.push(gitting_result.log_event);
     if gitting_result.terminal == AgentTerminal::Failure {
@@ -366,6 +351,7 @@ fn execute_task_live(
         &identity,
         WorkerState::Reviewing,
         task_summary,
+        attempt_count,
     )?;
     logs.push(reviewing_result.log_event);
     if reviewing_result.terminal == AgentTerminal::Failure {
@@ -471,6 +457,7 @@ fn execute_task_live(
         &identity,
         WorkerState::Merging,
         task_summary,
+        attempt_count,
     )?;
     logs.push(merging_result.log_event);
     if merging_result.terminal == AgentTerminal::Failure {
@@ -556,6 +543,7 @@ fn execute_task_simulated(
         fsm.state,
         &identity.worker_id,
         task_summary,
+        1,
     )?;
     logs.push(prepared.log_event(fsm.state));
 
@@ -593,6 +581,7 @@ fn execute_task_simulated(
         fsm.state,
         worker_id,
         task_summary,
+        1,
     )?;
     logs.push(prepared.log_event(fsm.state));
 
@@ -612,6 +601,7 @@ fn execute_task_simulated(
         fsm.state,
         worker_id,
         task_summary,
+        1,
     )?;
     logs.push(prepared.log_event(fsm.state));
 
@@ -650,6 +640,7 @@ fn execute_task_simulated(
         fsm.state,
         worker_id,
         task_summary,
+        1,
     )?;
     logs.push(prepared.log_event(fsm.state));
 
@@ -724,6 +715,7 @@ fn run_agent_turn(
     identity: &WorkerIdentity,
     state: WorkerState,
     task_summary: &str,
+    attempt_count: i64,
 ) -> Result<TurnResult, GardenerError> {
     let prepared = prepare_prompt(
         cfg,
@@ -732,6 +724,7 @@ fn run_agent_turn(
         state,
         &identity.worker_id,
         task_summary,
+        attempt_count,
     )?;
     let backend = effective_agent_for_state(cfg, state).ok_or_else(|| {
         GardenerError::InvalidConfig(format!("no backend configured for {state:?}"))
@@ -815,6 +808,7 @@ fn prepare_prompt(
     state: WorkerState,
     worker_id: &str,
     task_summary: &str,
+    attempt_count: i64,
 ) -> Result<PreparedPrompt, GardenerError> {
     append_run_log(
         "debug",
@@ -868,13 +862,13 @@ fn prepare_prompt(
                 70,
                 &if state == WorkerState::Gitting {
                     format!(
-                        "state={state:?};backend={:?};git_output_mode={}",
+                        "state={state:?};backend={:?};git_output_mode={};attempt_count={attempt_count}",
                         effective_agent_for_state(cfg, state),
                         cfg.execution.git_output_mode.as_str()
                     )
                 } else {
                     format!(
-                        "state={state:?};backend={:?}",
+                        "state={state:?};backend={:?};attempt_count={attempt_count}",
                         effective_agent_for_state(cfg, state)
                     )
                 },

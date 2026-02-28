@@ -47,6 +47,14 @@ impl PromptRegistry {
         self
     }
 
+    pub fn with_retry_rebase(mut self, attempt_count: i64) -> Self {
+        if attempt_count > 1 {
+            self.templates
+                .insert(WorkerState::Doing, doing_template_retry_rebase());
+        }
+        self
+    }
+
     pub fn template_for(&self, state: WorkerState) -> Result<&PromptTemplate, GardenerError> {
         self.templates.get(&state).ok_or_else(|| {
             GardenerError::InvalidConfig(format!("missing prompt template for state {state:?}"))
@@ -79,6 +87,26 @@ fn doing_template() -> PromptTemplate {
         version: "v1-doing",
         body: r#"Intent: implement changes and verify behavior within current task scope.
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
+Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
+commit_message must be a concise conventional-commit style message describing what was implemented.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+fn doing_template_retry_rebase() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-doing-retry-rebase",
+        body: r#"Intent: rebase onto latest main, resolve any conflicts, then implement changes and verify behavior within current task scope.
+
+Step 1 — Rebase onto main:
+  Run: git fetch origin main && git rebase origin/main
+  If conflicts occur: resolve them using your knowledge of the task context and existing commits, then git add the resolved files and git rebase --continue. Repeat until the rebase completes.
+  If the rebase succeeds cleanly, proceed to step 2.
+
+Step 2 — Implement:
+  Implement changes and verify behavior within current task scope.
+  Guardrails: max 100 turns, keep patch minimal, include changed files list.
+
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
@@ -157,6 +185,25 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 mod tests {
     use super::PromptRegistry;
     use crate::types::WorkerState;
+
+    #[test]
+    fn with_retry_rebase_swaps_doing_template_on_retry() {
+        let registry = PromptRegistry::v1().with_retry_rebase(2);
+        let tpl = registry
+            .template_for(WorkerState::Doing)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-doing-retry-rebase");
+        assert!(tpl.body.contains("git fetch origin main && git rebase origin/main"));
+    }
+
+    #[test]
+    fn with_retry_rebase_noop_on_first_attempt() {
+        let registry = PromptRegistry::v1().with_retry_rebase(1);
+        let tpl = registry
+            .template_for(WorkerState::Doing)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-doing");
+    }
 
     #[test]
     fn registry_contains_v1_worker_templates() {

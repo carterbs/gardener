@@ -58,6 +58,20 @@ cargo test -p gardener --all-targets
 cargo llvm-cov -p gardener --all-targets --summary-only
 ```
 
+## Git Hooks
+
+Enable the local pre-commit hook to run `cargo build` before each commit:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+or run the repo helper script:
+
+```bash
+./scripts/setup-git-hooks.sh
+```
+
 ## Vision
 
 See:

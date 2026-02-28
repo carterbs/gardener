@@ -74,6 +74,7 @@ impl<'a> WorktreeClient<'a> {
                         "branch": branch
                     }),
                 );
+                let _ = self.sync_git_hooks(path);
                 return Ok(());
             }
 
@@ -189,6 +190,7 @@ impl<'a> WorktreeClient<'a> {
                             "branch": branch
                         }),
                     );
+                    let _ = self.sync_git_hooks(path);
                     return Ok(());
                 }
                 append_run_log(
@@ -225,7 +227,85 @@ impl<'a> WorktreeClient<'a> {
                 "branch": branch
             }),
         );
+        let _ = self.sync_git_hooks(path);
         Ok(())
+    }
+
+    fn sync_git_hooks(&self, worktree_path: &Path) {
+        let source = match self.resolve_hook_path(&self.cwd) {
+            Ok(path) => path,
+            Err(error) => {
+                append_run_log(
+                    "debug",
+                    "worktree.hooks.path_missing",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "error": error.to_string()
+                    }),
+                );
+                return;
+            }
+        };
+        if !source.is_dir() {
+            return;
+        }
+        let target = match self.resolve_hook_path(worktree_path) {
+            Ok(path) => path,
+            Err(error) => {
+                append_run_log(
+                    "debug",
+                    "worktree.hooks.path_missing",
+                    json!({
+                        "cwd": worktree_path.display().to_string(),
+                        "error": error.to_string()
+                    }),
+                );
+                return;
+            }
+        };
+        if let Err(error) = sync_directory(&source, &target) {
+            append_run_log(
+                "debug",
+                "worktree.hooks.sync_failed",
+                json!({
+                    "source": source.display().to_string(),
+                    "target": target.display().to_string(),
+                    "error": error.to_string()
+                }),
+            );
+        }
+    }
+
+    fn resolve_hook_path(&self, repo_root: &Path) -> Result<PathBuf, GardenerError> {
+        let out = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec![
+                "-C".to_string(),
+                repo_root.display().to_string(),
+                "rev-parse".to_string(),
+                "--git-path".to_string(),
+                "hooks".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            return Err(GardenerError::Process(format!(
+                "failed to resolve hooks path: {}",
+                out.stderr
+            )));
+        }
+        let value = out.stdout.trim();
+        if value.is_empty() {
+            return Err(GardenerError::Process(
+                "failed to resolve hooks path: empty output".to_string(),
+            ));
+        }
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            Ok(path)
+        } else {
+            Ok(repo_root.join(path))
+        }
     }
 
     fn is_empty_directory(path: &Path) -> bool {
@@ -428,8 +508,43 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
     Ok(entries)
 }
 
+fn sync_directory(source: &Path, target: &Path) -> Result<(), GardenerError> {
+    let source = fs::canonicalize(source).map_err(|error| GardenerError::Io(error.to_string()))?;
+    fs::create_dir_all(target).map_err(|error| GardenerError::Io(error.to_string()))?;
+
+    let mut copied = 0usize;
+    for entry in fs::read_dir(&source).map_err(|error| GardenerError::Io(error.to_string()))? {
+        let entry = entry.map_err(|error| GardenerError::Io(error.to_string()))?;
+        let source_path = entry.path();
+        if source_path.is_dir() {
+            continue;
+        }
+        let Some(file_name) = source_path.file_name() else {
+            continue;
+        };
+        let destination_path = target.join(file_name);
+        fs::copy(&source_path, &destination_path)
+            .map_err(|error| GardenerError::Process(error.to_string()))?;
+        copied += 1;
+    }
+
+    if copied > 0 {
+        append_run_log(
+            "debug",
+            "worktree.hooks.synced",
+            json!({
+                "source": source.display().to_string(),
+                "target": target.display().to_string(),
+                "copied": copied,
+            }),
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
-    mod tests {
+mod tests {
     use super::WorktreeClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use std::fs;
@@ -444,11 +559,21 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
             stdout: "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.worktrees/task-1\nbranch refs/heads/task-1\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("idempotent resume");
-        assert_eq!(runner.spawned().len(), 1);
+        assert_eq!(runner.spawned().len(), 3);
     }
 
     #[test]
@@ -475,13 +600,23 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
             stdout: String::new(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("reused branch");
 
         let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 4);
+        assert_eq!(spawned.len(), 6);
         assert_eq!(spawned[1].args[0], "worktree");
         assert_eq!(spawned[1].args[1], "add");
         assert_eq!(spawned[1].args[3], "-b");
@@ -513,13 +648,23 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
             stdout: String::new(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("reused branch via reference check");
 
         let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 4);
+        assert_eq!(spawned.len(), 6);
         assert_eq!(spawned[1].args[0], "worktree");
         assert_eq!(spawned[1].args[1], "add");
         assert_eq!(spawned[1].args[3], "-b");
@@ -549,13 +694,68 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
             stdout: String::new(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, tmp.path())
             .create_or_resume(&path, "task-1")
             .expect("recreated after cleaning");
 
         assert!(!path.exists());
-        assert_eq!(runner.spawned().len(), 2);
+        assert_eq!(runner.spawned().len(), 4);
+    }
+
+    #[test]
+    fn create_or_resume_copies_repo_hooks_to_worktree() {
+        let tmp = tempdir().expect("tempdir");
+        let source_hooks = tmp.path().join(".githooks");
+        fs::create_dir_all(&source_hooks).expect("create source hooks directory");
+        let source_hook = source_hooks.join("pre-commit");
+        fs::write(&source_hook, "#!/usr/bin/env bash\necho source\n").expect("write source hook");
+        let path = tmp.path().join(".worktrees/task-1");
+        fs::create_dir_all(&path).expect("create worktree path");
+
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, tmp.path())
+            .create_or_resume(&path, "task-1")
+            .expect("hooks copied");
+
+        let copied_hook = path.join(".githooks").join("pre-commit");
+        assert!(copied_hook.exists());
+        assert_eq!(
+            fs::read_to_string(copied_hook).expect("read copied hook"),
+            "#!/usr/bin/env bash\necho source\n"
+        );
+        assert_eq!(runner.spawned().len(), 4);
     }
 
     #[test]

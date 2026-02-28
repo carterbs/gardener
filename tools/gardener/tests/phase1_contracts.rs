@@ -15,8 +15,7 @@ use gardener::types::{AgentKind, NonInteractiveReason, WorkerState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
-
-const TEST_REPO_ROOT: &str = "/tmp/gardener-phase1-contracts";
+use tempfile::TempDir;
 
 fn default_profile_path(git_root: Option<&str>) -> PathBuf {
     let repo_root = PathBuf::from(git_root.unwrap_or("/repo"));
@@ -154,13 +153,12 @@ fn binary_help_and_prune_smoke() {
 
 #[test]
 fn run_with_runtime_paths_and_errors() {
-    // Clean stale SQLite from prior runs to avoid claiming leftover tasks
-    let _ =
-        std::fs::remove_file(PathBuf::from(TEST_REPO_ROOT).join(".cache/gardener/backlog.sqlite"));
+    let dir = TempDir::new().expect("tempdir");
+    let repo_root = dir.path().to_str().expect("utf8").to_string();
     let runtime = runtime_with_config(
         "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n",
         true,
-        Some(TEST_REPO_ROOT),
+        Some(&repo_root),
     );
     let prune = vec![
         "gardener".into(),
@@ -229,7 +227,9 @@ fn run_with_runtime_paths_and_errors() {
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 
     let triage = vec!["gardener".into(), "--triage-only".into()];
-    let non_tty_runtime = runtime_with_config("", false, Some(TEST_REPO_ROOT));
+    let dir2 = TempDir::new().expect("tempdir");
+    let repo_root2 = dir2.path().to_str().expect("utf8").to_string();
+    let non_tty_runtime = runtime_with_config("", false, Some(&repo_root2));
     let err =
         gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).unwrap_err();
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
@@ -295,7 +295,9 @@ fn run_with_runtime_propagates_write_and_config_errors() {
         );
     }
 
-    let ok_runtime = runtime_with_config("", true, Some(TEST_REPO_ROOT));
+    let ok_dir = TempDir::new().expect("tempdir");
+    let ok_repo_root = ok_dir.path().to_str().expect("utf8").to_string();
+    let ok_runtime = runtime_with_config("", true, Some(&ok_repo_root));
     let missing_cfg = vec![
         "gardener".into(),
         "--prune-only".into(),

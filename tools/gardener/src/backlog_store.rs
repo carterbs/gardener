@@ -999,31 +999,20 @@ pub fn system_time_unix() -> i64 {
 mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use rusqlite::Connection;
+    use tempfile::TempDir;
 
     use super::{db_err, task_kind_from_db, BacklogStore, NewTask, TaskStatus};
     use crate::priority::Priority;
     use crate::task_identity::{compute_task_id, TaskIdentity, TaskKind};
 
-    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn temp_store() -> BacklogStore {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let db_dir = std::env::temp_dir().join(format!(
-            "gardener-backlog-{}-{nonce}-{counter}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&db_dir).expect("mkdir");
-        let db = db_dir.join("backlog.sqlite");
-        BacklogStore::open(&db).expect("open store")
+    fn temp_store() -> (BacklogStore, TempDir) {
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("backlog.sqlite");
+        (BacklogStore::open(&db).expect("open store"), dir)
     }
 
     fn task(title: &str, priority: Priority) -> NewTask {
@@ -1042,7 +1031,7 @@ mod tests {
 
     #[test]
     fn upsert_dedupes_and_upgrades_priority() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
 
         let first = store
             .upsert_task(task("Normalize scheduler order", Priority::P2))
@@ -1061,7 +1050,7 @@ mod tests {
 
     #[test]
     fn lower_priority_reinsert_does_not_downgrade() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let _ = store
             .upsert_task(task("Fix lease collision", Priority::P0))
             .expect("insert");
@@ -1073,7 +1062,7 @@ mod tests {
 
     #[test]
     fn claim_is_priority_ordered_fifo_by_last_updated() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let _ = store
             .upsert_task(task("task-1", Priority::P1))
             .expect("insert 1");
@@ -1106,7 +1095,7 @@ mod tests {
 
     #[test]
     fn claim_prioritizes_retries_within_same_priority() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let first = store
             .upsert_task(task("retry-me-first", Priority::P1))
             .expect("seed retry");
@@ -1137,7 +1126,8 @@ mod tests {
 
     #[test]
     fn concurrent_claims_never_return_same_task() {
-        let store = Arc::new(temp_store());
+        let (store, _dir) = temp_store();
+        let store = Arc::new(store);
         for idx in 0..25 {
             let _ = store
                 .upsert_task(task(&format!("task-{idx}"), Priority::P1))
@@ -1169,7 +1159,7 @@ mod tests {
 
     #[test]
     fn stale_recovery_requeues_in_progress_and_expired_leases() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let row = store
             .upsert_task(task("recover-me", Priority::P1))
             .expect("seed");
@@ -1196,7 +1186,7 @@ mod tests {
 
     #[test]
     fn mark_complete_requires_owner_match() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let row = store
             .upsert_task(task("complete-me", Priority::P1))
             .expect("seed");
@@ -1227,7 +1217,7 @@ mod tests {
             related_branch: None,
         });
 
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let row = store.upsert_task(input).expect("insert");
         assert_eq!(row.task_id, expected);
     }
@@ -1242,7 +1232,7 @@ mod tests {
         assert_eq!(TaskStatus::from_db("failed"), Some(TaskStatus::Failed));
         assert_eq!(TaskStatus::from_db("unknown"), None);
 
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         assert!(store.db_path().ends_with("backlog.sqlite"));
         assert_eq!(task_kind_from_db("bugfix"), Some(TaskKind::Bugfix));
         assert_eq!(
@@ -1342,7 +1332,7 @@ mod tests {
 
     #[test]
     fn count_tasks_by_priority_excludes_complete() {
-        let store = temp_store();
+        let (store, _dir) = temp_store();
         let ready_p1 = store
             .upsert_task(task("ready p1", Priority::P1))
             .expect("insert ready p1");

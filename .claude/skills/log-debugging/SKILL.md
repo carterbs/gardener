@@ -1,6 +1,6 @@
 ---
 name: log-debugging
-description: Debug Gardener runtime failures by joining git worktree/branch/commit context with OTEL JSONL logs. Use for: reading and filtering malformed or high-volume `otel-logs.jsonl`, isolating failed runs by `run.id`/worker, tracing failure events, and mapping runtime context from log entries back to git run/worktree state.
+description: 'Debug Gardener runtime failures by joining git worktree/branch/commit context with OTEL JSONL logs. Use for: reading and filtering malformed or high-volume `otel-logs.jsonl`, isolating failed runs by `run.id`/worker, tracing failure events, and mapping runtime context from log entries back to git run/worktree state.'
 ---
 
 # Gardener Log Debugging
@@ -35,32 +35,34 @@ Use this in a clean terminal where `jq` is available.
 ## Common jq field patterns
 
 - Extract canonical `run.id` and `run.working_dir` from a row:
-  - `def run_attrs: .logRecord.attributes[] | .key as $k | select($k=="run.id" or $k=="run.working_dir");`
+  - `def run_attr($key): (.logRecord.attributes[]? | select(.key == $key) | .value.stringValue // "");`
+  - `def run_attrs: {run_id: run_attr("run.id"), working_dir: run_attr("run.working_dir")};`
+  - `def payload_obj: (if (.payload | type) == "object" then .payload else {} end);`
 - Show only failed turn-finishing records:
-  - `jq -R 'fromjson? // empty | select(.payload.terminal == "failure") | {time: .logRecord.timeUnixNano, run_id: (.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue), worker: .payload.worker_id, terminal: .payload.terminal, event: .event_type, msg: (.logRecord.body | .stringValue // "")}' ~/.gardener/otel-logs.jsonl`
+  - `jq -R 'fromjson? // empty | def run_attr($key): (.logRecord.attributes[]? | select(.key == $key) | .value.stringValue // ""); def payload_obj: (if (.payload | type) == "object" then .payload else {} end); select((payload_obj.terminal? // "") == "failure") | {time: .logRecord.timeUnixNano, run_id: run_attr("run.id"), worker: (payload_obj.worker_id? // ""), terminal: (payload_obj.terminal? // ""), cmd: (payload_obj.command? // ""), event: .event_type, msg: (.logRecord.body.stringValue // .logRecord.body // "")}' ~/.gardener/otel-logs.jsonl`
 - Filter by event type:
   - `... | select(.event_type == "agent.turn.finished")`
   - `... | select(.event_type == "backlog.task.failed")`
   - `... | select(.event_type | startswith("adapter.codex") or startswith("adapter.claude"))`
 - Filter by worker:
-  - `... | select(.payload.worker_id == "worker-1")`
+  - `... | select((.payload | .worker_id? // "") == "worker-1")`
 - Filter by raw event payload (`assistant`/`user`/etc.):
-  - `... | select(.payload.raw_type == "assistant")`
+  - `... | select((.payload | .raw_type? // "") == "assistant")`
 - Filter by command:
-  - `... | select(.payload.command? // "" | contains("npm run gardener:run"))`
+  - `... | select((.payload | .command? // "") | contains("npm run gardener:run"))`
 - Show a concise one-line timeline for a specific run:
   - `RUN=fe4f5d6...`
-  - `jq -R --arg RUN "$RUN" 'fromjson? // empty | select((.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue) == $RUN) | {t:.logRecord.timeUnixNano, event:.event_type, terminal:.payload.terminal, worker:.payload.worker_id, cmd:.payload.command, msg:(.logRecord.body.stringValue // .logRecord.body)}' ~/.gardener/otel-logs.jsonl`
+  - `jq -R --arg RUN "$RUN" 'fromjson? // empty | def run_attr($key): (.logRecord.attributes[]? | select(.key == $key) | .value.stringValue // ""); def payload_obj: (if (.payload | type) == "object" then .payload else {} end); select((.logRecord.attributes[]? | select(.key=="run.id") | .value.stringValue) == $RUN) | {t:.logRecord.timeUnixNano, event:.event_type, terminal:(.payload | .terminal? // ""), worker:(.payload | .worker_id? // ""), cmd:(payload_obj.command? // ""), msg:(.logRecord.body.stringValue // .logRecord.body)}' ~/.gardener/otel-logs.jsonl`
 
 ## Failure-to-logs workflow
 
 1. Identify a failure in CI/local run output.
 2. Use timestamp to locate nearby log entries:
-   - `TZ=UTC jq -R 'fromjson? // empty | select(.logRecord.timeUnixNano | tonumber > 1772255489600000000)' ~/.gardener/otel-logs.jsonl | head -n 200`
+  - `TZ=UTC jq -R 'fromjson? // empty | select(.logRecord.timeUnixNano | tonumber > 1772255489600000000)' ~/.gardener/otel-logs.jsonl | head -n 200`
 3. Find the first likely failure line:
-   - `... | select(.payload.terminal == "failure")`
+  - `... | select((if (.payload | type) == "object" then .payload else {} end | .terminal? // "") == "failure")`
 4. Pull its `run.id` and `run.working_dir`:
-   - `... | select(.payload.terminal == "failure") | {run_id, event_type, working_dir: (.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue), worker:.payload.worker_id}`
+  - `... | select((if (.payload | type) == "object" then .payload else {} end | .terminal? // "") == "failure") | {run_id: (.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue), event_type, working_dir: (.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue), worker: (if (.payload | type) == "object" then .payload else {} end | .worker_id? // "")}`
 5. Reconstruct sequence for that run id and narrow root cause by stepping backward to the last `agent.turn.started` / `adapter.*.turn_start`.
 
 ## Git-to-logs workflow
@@ -71,7 +73,7 @@ Use this in a clean terminal where `jq` is available.
   - `git -C "$workdir" status --short`
 - Find matching logs for that worktree:
   - `RUN_DIR="/Users/bradcarter/Documents/Dev/gardener/.worktrees/worker-1..."`
-  - `jq -R --arg RUN_DIR "$RUN_DIR" 'fromjson? // empty | select((.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue) == $RUN_DIR) | {t:.logRecord.timeUnixNano, event:.event_type, run_id:(.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue), worker:.payload.worker_id, terminal:.payload.terminal}' ~/.gardener/otel-logs.jsonl`
+  - `jq -R --arg RUN_DIR "$RUN_DIR" 'fromjson? // empty | select((.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue) == $RUN_DIR) | {t:.logRecord.timeUnixNano, event:.event_type, run_id:(.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue), worker:(if (.payload | type) == "object" then .payload else {} end | .worker_id? // ""), terminal:(if (.payload | type) == "object" then .payload else {} end | .terminal? // "")}' ~/.gardener/otel-logs.jsonl`
 - From a known `run.id`, jump to git commit context if `run.working_dir` appears:
   - `RUN=...`
   - `gitroot=$(jq -R --arg RUN "$RUN" 'fromjson? // empty | select((.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue) == $RUN) | first((.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue))' ~/.gardener/otel-logs.jsonl)`
@@ -95,8 +97,9 @@ Use this in a clean terminal where `jq` is available.
 RUN=...;
 jq -R --arg RUN "$RUN" '
   fromjson? // empty
-  | select((.logRecord.attributes[] | select(.key=="run.id") | .value.stringValue) == $RUN)
-  | "\(.logRecord.timeUnixNano) \(.event_type) worker=\(.payload.worker_id // "") terminal=\(.payload.terminal // "") run_dir=\((.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue // "") ) cmd=\((.payload.command // "") )"
+  | def run_attr($key): (.logRecord.attributes[]? | select(.key == $key) | .value.stringValue // "");
+    def payload_obj: (if (.payload | type) == "object" then .payload else {} end);
+  | select((.logRecord.attributes[]? | select(.key=="run.id") | .value.stringValue) == $RUN)
+  | "\(.logRecord.timeUnixNano) \(.event_type) worker=\(payload_obj.worker_id // "") terminal=\(payload_obj.terminal // "") run_dir=\((.logRecord.attributes[] | select(.key=="run.working_dir") | .value.stringValue // "") ) cmd=\((payload_obj.command // "") )"
 ' ~/.gardener/otel-logs.jsonl
 ```
-

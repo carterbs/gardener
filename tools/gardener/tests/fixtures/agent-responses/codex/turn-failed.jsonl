@@ -1,0 +1,3 @@
+{"type":"thread.started","thread_id":"thread_02"}
+{"type":"turn.started","turn_id":"turn_02"}
+{"type":"turn.failed","reason":"sandbox_violation","message":"Command not permitted"}

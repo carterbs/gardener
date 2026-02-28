@@ -1,0 +1,2 @@
+{"type":"message_start","message":{"id":"msg_02","model":"claude-opus-4-6","role":"assistant"}}
+{"type":"result","subtype":"error","result":{"error":"context_length_exceeded"}}

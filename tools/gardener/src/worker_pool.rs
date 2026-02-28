@@ -12,7 +12,7 @@ use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
     reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
-    WorkerRow,
+    toggle_selected_worker_command_detail, WorkerRow,
 };
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
@@ -72,7 +72,7 @@ pub fn run_worker_pool_fsm(
             scope,
             cfg,
             store,
-            &workers,
+            &mut workers,
             operator_hotkeys,
             terminal,
             &mut report_visible,
@@ -168,7 +168,7 @@ pub fn run_worker_pool_fsm(
                     &runtime_scope,
                     cfg,
                     store,
-                    &workers,
+                    workers,
                     operator_hotkeys,
                     terminal,
                     &mut report_visible,
@@ -346,7 +346,7 @@ fn handle_hotkeys(
     scope: &RuntimeScope,
     cfg: &AppConfig,
     store: &BacklogStore,
-    workers: &[WorkerRow],
+    workers: &mut [WorkerRow],
     operator_hotkeys: bool,
     terminal: &dyn Terminal,
     report_visible: &mut bool,
@@ -367,6 +367,10 @@ fn handle_hotkeys(
                 );
                 request_interrupt();
                 return Ok(true);
+            }
+            Some(AppHotkeyAction::ToggleCommandDetail) => {
+                // hotkey:c
+                redraw_dashboard = toggle_selected_worker_command_detail(workers);
             }
             Some(AppHotkeyAction::ScrollDown) => {
                 redraw_dashboard = scroll_workers_down();
@@ -650,6 +654,10 @@ mod tests {
     #[test]
     fn hotkey_actions_match_default_and_operator_contracts() {
         assert_eq!(hotkey_action('q', false), Some(HotkeyAction::Quit)); // hotkey:q
+        assert_eq!(
+            hotkey_action('c', false),
+            Some(HotkeyAction::ToggleCommandDetail)
+        ); // hotkey:c
         assert_eq!(hotkey_action('j', false), Some(HotkeyAction::ScrollDown)); // hotkey:j
         assert_eq!(hotkey_action('k', false), Some(HotkeyAction::ScrollUp)); // hotkey:k
         assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
@@ -873,7 +881,11 @@ mod tests {
         let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
             .expect("run fsm");
         let writes = terminal.written_lines();
-        assert!(writes.iter().any(|line| line.contains("worker-1")));
-        assert!(!writes.iter().any(|line| line.contains("worker-2")));
+        assert!(writes
+            .iter()
+            .any(|line| line.contains("worker-1") && line.contains("claimed")));
+        assert!(!writes
+            .iter()
+            .any(|line| line.contains("worker-2") && line.contains("claimed")));
     }
 }

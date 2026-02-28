@@ -16,6 +16,11 @@ const EXCLUDED_FILES: &[&str] = &[
     "prompts.rs",
     "protocol.rs",
     "quality_domain_catalog.rs",
+    // replay module: recording/replay infrastructure (writes session file, not otel log)
+    "replay/mod.rs",
+    "replay/recorder.rs",
+    "replay/recording.rs",
+    "replay/replayer.rs",
     "runtime/mod.rs",
     "task_identity.rs",
     "tui.rs",

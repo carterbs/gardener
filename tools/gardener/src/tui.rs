@@ -1045,20 +1045,23 @@ fn draw_dashboard_frame(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)
             };
-            let flow_line = Line::from(worker_flow_chain_spans(&row.state));
+            let flow_line = worker_flow_chain_spans(&row.state);
             let command_stream = worker_command_stream(&row.command_details);
             let command_stream = truncate_right(&command_stream, command_stream_max_width);
+            let mut flow_spans = Vec::new();
+            flow_spans.push(Span::raw("    "));
+            flow_spans.push(Span::styled(
+                "Flow: ",
+                Style::default().fg(Color::Blue),
+            ));
+            flow_spans.extend(flow_line);
             let lines = vec![
                 Line::from(vec![
                     Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
                     Span::raw(": "),
                     Span::raw(row.task.clone()),
                 ]),
-                Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled("Flow: ", Style::default().fg(Color::Blue)),
-                    flow_line,
-                ]),
+                Line::from(flow_spans),
                 Line::from(vec![
                     Span::raw("    "),
                     Span::styled("Commands: ", Style::default().fg(Color::Blue)),
@@ -1719,7 +1722,7 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn worker_command_stream(commands: &[(String, String)]) -> String {
+fn worker_command_stream(commands: &[CommandEntry]) -> String {
     let recent = commands
         .iter()
         .rev()
@@ -1732,7 +1735,7 @@ fn worker_command_stream(commands: &[(String, String)]) -> String {
     recent
         .into_iter()
         .rev()
-        .map(|(timestamp, command)| format!("{timestamp}  {command}"))
+        .map(|entry| format!("{}  {}", entry.timestamp, entry.command))
         .collect::<Vec<_>>()
         .join("  |  ")
 }

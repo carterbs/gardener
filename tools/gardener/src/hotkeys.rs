@@ -17,7 +17,7 @@ pub enum HotkeyAction {
     Back,
 }
 
-pub const DASHBOARD_BINDINGS: [HotkeyBinding; 6] = [
+pub const DASHBOARD_BINDINGS: [HotkeyBinding; 5] = [
     HotkeyBinding {
         key: 'q',
         action: "quit",

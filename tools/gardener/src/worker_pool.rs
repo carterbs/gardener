@@ -645,12 +645,13 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{hotkey_action, run_worker_pool_fsm};
+    use crate::errors::GardenerError;
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
     use crate::priority::Priority;
     use crate::runtime::{
-        FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
+        FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime, Terminal,
     };
     use crate::task_identity::TaskKind;
     use crate::types::RuntimeScope;
@@ -686,6 +687,53 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create parent");
         }
         std::fs::write(path, contents).expect("write file");
+    }
+
+    #[derive(Clone)]
+    struct SizedFakeTerminal {
+        terminal: FakeTerminal,
+        width: u16,
+        height: u16,
+    }
+
+    impl SizedFakeTerminal {
+        fn new(terminal: FakeTerminal, width: u16, height: u16) -> Self {
+            Self {
+                terminal,
+                width,
+                height,
+            }
+        }
+
+        fn drawn_frames(&self) -> Vec<String> {
+            self.terminal.drawn_frames()
+        }
+
+        fn enqueue_keys(&self, keys: impl IntoIterator<Item = char>) {
+            self.terminal.enqueue_keys(keys);
+        }
+    }
+
+    impl Terminal for SizedFakeTerminal {
+        fn stdin_is_tty(&self) -> bool {
+            self.terminal.stdin_is_tty()
+        }
+
+        fn write_line(&self, line: &str) -> Result<(), GardenerError> {
+            self.terminal.write_line(line)
+        }
+
+        fn draw(&self, frame: &str) -> Result<(), GardenerError> {
+            self.terminal.draw(frame)
+        }
+
+        fn draw_dimensions(&self) -> (u16, u16) {
+            (self.width, self.height)
+        }
+
+        fn poll_key(&self, timeout_ms: u64) -> Result<Option<char>, GardenerError> {
+            self.terminal.poll_key(timeout_ms)
+        }
     }
 
     #[test]
@@ -725,6 +773,93 @@ mod tests {
         for binding in REPORT_BINDINGS {
             assert!(action_for_key(binding.key).is_some());
         }
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_switches_between_dashboard_and_report_frames() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "snapshot task");
+
+        let quality_path = dir.path().join(".gardener/quality.md");
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = quality_path.display().to_string();
+
+        write_file(&quality_path, "overall: A+");
+
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['v', 'b']);
+
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        assert_eq!(completed, 1);
+
+        let frames = terminal.drawn_frames();
+        let dashboard_frames = frames
+            .iter()
+            .filter(|frame| frame.contains("GARDENER live queue"))
+            .count();
+        let report_frames = frames
+            .iter()
+            .filter(|frame| frame.contains("Quality report view"))
+            .count();
+        assert!(
+            dashboard_frames >= 2,
+            "expected at least 2 dashboard renders (initial and after back): {dashboard_frames}"
+        );
+        assert!(
+            report_frames >= 1,
+            "expected at least one report render: {report_frames}"
+        );
+        assert!(!terminal.report_draws().is_empty());
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_toggles_command_detail_via_hotkey() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "toggle command detail task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+
+        let terminal = SizedFakeTerminal::new(FakeTerminal::new(true), 160, 40);
+        terminal.enqueue_keys(['c']);
+
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        assert_eq!(completed, 1);
+
+        let frames = terminal.drawn_frames();
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("▾ Optional command detail")),
+            "expected selected worker command details to expand in rendered frames"
+        );
     }
 
     #[test]

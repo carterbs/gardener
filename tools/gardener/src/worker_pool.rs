@@ -4,7 +4,7 @@ use crate::errors::GardenerError;
 use crate::hotkeys::{
     action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
 };
-use crate::logging::{append_run_log, structured_fallback_line};
+use crate::logging::{append_run_log, recent_worker_log_lines, structured_fallback_line};
 use crate::priority::Priority;
 use crate::runtime::Terminal;
 use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
@@ -54,6 +54,8 @@ pub fn run_worker_pool_fsm(
             session_age_secs: 0,
             lease_held: false,
             session_missing: false,
+            command_details: Vec::new(),
+            commands_expanded: false,
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;
@@ -197,7 +199,10 @@ pub fn run_worker_pool_fsm(
                             "error": msg
                         }),
                     );
-                    terminal.draw_shutdown_screen("Error", &msg)?;
+                    terminal.draw_shutdown_screen(
+                        "Error",
+                        &worker_failure_prompt(&worker_id, &task.task_id, &msg),
+                    )?;
                     wait_for_quit(terminal)?;
                     return Ok(completed);
                 }
@@ -251,7 +256,10 @@ pub fn run_worker_pool_fsm(
                     }),
                 );
                 if let Some(reason) = &summary.failure_reason {
-                    terminal.draw_shutdown_screen("Worker Error", reason)?;
+                    terminal.draw_shutdown_screen(
+                        "Worker Error",
+                        &worker_failure_prompt(&worker_id, &task.task_id, reason),
+                    )?;
                     wait_for_quit(terminal)?;
                     return Ok(completed);
                 }
@@ -532,6 +540,18 @@ fn render(
 
 fn short_task_id(task_id: &str) -> &str {
     task_id.get(0..6).unwrap_or(task_id)
+}
+
+fn worker_failure_prompt(worker_id: &str, task_id: &str, reason: &str) -> String {
+    let recent_lines = recent_worker_log_lines(worker_id, 15);
+    let recent_log_summary = if recent_lines.is_empty() {
+        "No recent worker log lines were available.".to_string()
+    } else {
+        recent_lines.join("\n")
+    };
+    format!(
+        "Worker failure on task {task_id}\n\nError:\n{reason}\n\nLast 15 logs for {worker_id}:\n{recent_log_summary}\n\nPrompt to pass to an agent:\nInvestigate this failure, identify the exact root cause, and provide a remediation step-by-step.\nUse the context above, especially the jsonl worker logs, as the primary evidence."
+    )
 }
 
 fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::PathBuf {

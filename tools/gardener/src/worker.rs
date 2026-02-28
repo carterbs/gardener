@@ -20,7 +20,6 @@ use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,7 +28,6 @@ pub struct WorkerLogEvent {
     pub state: WorkerState,
     pub prompt_version: String,
     pub context_manifest_hash: String,
-    pub command: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,7 +116,9 @@ fn execute_task_live(
             "task_summary": task_summary
         }),
     );
-    let registry = PromptRegistry::v1().with_gitting_mode(&cfg.execution.git_output_mode);
+    let registry = PromptRegistry::v1()
+        .with_gitting_mode(&cfg.execution.git_output_mode)
+        .with_merging_mode(&cfg.execution.git_output_mode);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
     let learning_loop = LearningLoop::default();
@@ -175,7 +175,7 @@ fn execute_task_live(
         WorkerState::Understand,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &understand_result);
+    logs.push(understand_result.log_event);
     if understand_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&understand_result.payload);
         append_run_log(
@@ -223,7 +223,7 @@ fn execute_task_live(
             WorkerState::Planning,
             task_summary,
         )?;
-        append_turn_log_events(&mut logs, &planning_result);
+        logs.push(planning_result.log_event);
         if planning_result.terminal == AgentTerminal::Failure {
             let failure_reason = extract_failure_reason(&planning_result.payload);
             append_run_log(
@@ -258,7 +258,7 @@ fn execute_task_live(
         WorkerState::Doing,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &doing_result);
+    logs.push(doing_result.log_event);
     if doing_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&doing_result.payload);
         append_run_log(
@@ -311,7 +311,7 @@ fn execute_task_live(
         WorkerState::Gitting,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &gitting_result);
+    logs.push(gitting_result.log_event);
     if gitting_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&gitting_result.payload);
         append_run_log(
@@ -367,7 +367,7 @@ fn execute_task_live(
         WorkerState::Reviewing,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &reviewing_result);
+    logs.push(reviewing_result.log_event);
     if reviewing_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&reviewing_result.payload);
         append_run_log(
@@ -472,7 +472,7 @@ fn execute_task_live(
         WorkerState::Merging,
         task_summary,
     )?;
-    append_turn_log_events(&mut logs, &merging_result);
+    logs.push(merging_result.log_event);
     if merging_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&merging_result.payload);
         append_run_log(
@@ -675,7 +675,6 @@ impl PreparedPrompt {
             state,
             prompt_version: self.prompt_version.clone(),
             context_manifest_hash: self.context_manifest_hash.clone(),
-            command: None,
         }
     }
 }
@@ -683,29 +682,7 @@ impl PreparedPrompt {
 struct TurnResult {
     terminal: AgentTerminal,
     payload: serde_json::Value,
-    commands: Vec<String>,
     log_event: WorkerLogEvent,
-}
-
-fn append_turn_log_events(logs: &mut Vec<WorkerLogEvent>, turn: &TurnResult) {
-    let base_event = turn.log_event.clone();
-    logs.push(base_event.clone());
-    for command in &turn.commands {
-        logs.push(WorkerLogEvent {
-            command: Some(command.clone()),
-            ..base_event.clone()
-        });
-    }
-}
-
-fn extract_action_command(payload: &Value) -> Option<String> {
-    payload
-        .pointer("/item/input/command")
-        .or_else(|| payload.pointer("/item/command"))
-        .or_else(|| payload.pointer("/command"))
-        .or_else(|| payload.pointer("/input/command"))
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
 }
 
 fn run_agent_turn(
@@ -792,11 +769,6 @@ fn run_agent_turn(
     Ok(TurnResult {
         terminal: step.terminal,
         payload: step.payload,
-        commands: step
-            .events
-            .iter()
-            .filter_map(|event| extract_action_command(&event.payload))
-            .collect(),
         log_event: prepared.log_event(state),
     })
 }
@@ -1056,10 +1028,7 @@ fn review_artifact_path(scope: &RuntimeScope, task_id: &str) -> PathBuf {
     scope
         .working_dir
         .join(".cache/gardener/reviews")
-        .join(format!(
-            "{}.json",
-            sanitize_for_branch(task_id).to_ascii_lowercase()
-        ))
+        .join(format!("{}.json", worktree_slug_for_task(task_id)))
 }
 
 fn verify_gitting_output(output: &GittingOutput) -> Result<(), GardenerError> {
@@ -1107,13 +1076,13 @@ fn teardown_after_completion(
 }
 
 fn worktree_branch_for(worker_id: &str, task_id: &str) -> String {
-    format!("gardener/{worker_id}-{}", sanitize_for_branch(task_id))
+    format!("gardener/{worker_id}-{}", worktree_slug_for_task(task_id))
 }
 
 fn worktree_path_for(repo_root: &Path, worker_id: &str, task_id: &str) -> PathBuf {
     repo_root
         .join(".worktrees")
-        .join(format!("{worker_id}-{}", sanitize_for_branch(task_id)))
+        .join(format!("{worker_id}-{}", worktree_slug_for_task(task_id)))
 }
 
 /// Returns a git-safe slug derived from the task ID.
@@ -1132,6 +1101,26 @@ fn sanitize_for_branch(task_id: &str) -> String {
         .join("-");
     collapsed.chars().take(24).collect()
 }
+
+fn worktree_slug_for_task(task_id: &str) -> String {
+    let base = sanitize_for_branch(task_id);
+    let base = if base.is_empty() { "task".to_string() } else { base };
+    let prefix = base.chars().take(WORKTREE_TASK_SLUG_PREFIX_CHARS).collect::<String>();
+    let suffix = worktree_slug_suffix(task_id);
+    format!("{prefix}-{suffix}")
+}
+
+fn worktree_slug_suffix(task_id: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    for &byte in task_id.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{:08x}", hash)
+}
+
+const WORKTREE_TASK_SLUG_PREFIX_CHARS: usize = 14;
 
 fn ctx_item(
     section: &str,
@@ -1191,7 +1180,7 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 mod tests {
     use super::{
         execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
-        verify_merge_output, worktree_branch_for, worktree_path_for,
+        verify_merge_output, worktree_branch_for, worktree_path_for, worktree_slug_for_task,
     };
     use crate::config::AppConfig;
     use crate::fsm::{GittingOutput, MergingOutput};
@@ -1300,7 +1289,10 @@ mod tests {
             !branch.contains(':'),
             "branch name must not contain colon: {branch}"
         );
-        assert_eq!(branch, "gardener/worker-1-manual-tui-GARD-03");
+        assert_eq!(
+            branch,
+            format!("gardener/worker-1-{}", worktree_slug_for_task("manual:tui:GARD-03"))
+        );
 
         let path = worktree_path_for(
             std::path::Path::new("/repo"),
@@ -1315,6 +1307,22 @@ mod tests {
     }
 
     #[test]
+    fn worktree_slug_for_task_is_stable_and_collision_resistant() {
+        let first = worktree_slug_for_task("manual:tui:GARD-01");
+        let second = worktree_slug_for_task("manual:tui:GARD-11");
+        assert_ne!(first, second);
+        let first_suffix = first.rsplitn(2, '-').next().unwrap_or_default();
+        assert_eq!(first_suffix, worktree_slug_suffix("manual:tui:GARD-01"));
+        assert_eq!(first_suffix.len(), 8);
+        assert_eq!(second.rsplitn(2, '-').next().unwrap_or_default(), worktree_slug_suffix("manual:tui:GARD-11"));
+        assert!(
+            first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 8
+        );
+        let branch = worktree_branch_for("worker-1", "manual:tui:GARD-01");
+        assert_eq!(branch.len(), "gardener/worker-1-".len() + first.len());
+    }
+
+    #[test]
     fn review_artifact_path_is_task_scoped_and_git_safe() {
         let scope = RuntimeScope {
             process_cwd: PathBuf::from("/repo"),
@@ -1324,7 +1332,10 @@ mod tests {
         let path = review_artifact_path(&scope, "manual:tui:GARD-01");
         assert_eq!(
             path.display().to_string(),
-            "/repo/.cache/gardener/reviews/manual-tui-gard-01.json"
+            format!(
+                "/repo/.cache/gardener/reviews/{}.json",
+                worktree_slug_for_task("manual:tui:GARD-01")
+            )
         );
     }
 }

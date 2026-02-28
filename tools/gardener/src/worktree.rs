@@ -63,7 +63,10 @@ impl<'a> WorktreeClient<'a> {
 
     pub fn create_or_resume(&self, path: &Path, branch: &str) -> Result<(), GardenerError> {
         let existing = self.list()?;
-        if let Some(existing_entry) = existing.iter().find(|entry| entry.path == path) {
+        if let Some(existing_entry) = existing
+            .iter()
+            .find(|entry| Self::paths_match(&existing_entry.path, path))
+        {
             if existing_entry.branch.as_deref() == Some(branch) {
                 append_run_log(
                     "debug",
@@ -229,6 +232,16 @@ impl<'a> WorktreeClient<'a> {
         );
         self.sync_git_hooks(path);
         Ok(())
+    }
+
+    fn paths_match(left: &Path, right: &Path) -> bool {
+        let left = Self::normalize_path(left);
+        let right = Self::normalize_path(right);
+        left == right
+    }
+
+    fn normalize_path(path: &Path) -> PathBuf {
+        fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     fn sync_git_hooks(&self, worktree_path: &Path) {

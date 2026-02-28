@@ -88,8 +88,6 @@ pub fn run_worker_pool_fsm(
             worker
         })
         .collect::<Vec<_>>();
-    let mut last_activity_pulse = vec![Instant::now(); workers.len()];
-    let pulse_interval = Duration::from_secs(1);
     let mut last_worker_command_line = current_log_line_count();
     let command_poll_chunk = 32;
     let mut completed = 0usize;
@@ -145,7 +143,6 @@ pub fn run_worker_pool_fsm(
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
             append_worker_command(&mut workers[idx], "claimed");
-            last_activity_pulse[idx] = Instant::now();
             render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
             claimed.push((idx, task));
         }
@@ -323,19 +320,12 @@ pub fn run_worker_pool_fsm(
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        let now = Instant::now();
-                        let updated = append_worker_activity_beats(
-                            &mut workers,
-                            &mut last_activity_pulse,
-                            now,
-                            pulse_interval,
-                        );
                         let updated_commands = append_worker_tool_commands(
                             &mut workers,
                             &mut last_worker_command_line,
                             command_poll_chunk,
                         );
-                        if updated || updated_commands || last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
+                        if updated_commands || last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
                             render(
                                 terminal,
                                 &workers,
@@ -572,39 +562,6 @@ fn append_worker_command(worker: &mut WorkerRow, command: &str) {
         let overflow = worker.command_details.len() - WORKER_COMMAND_HISTORY_LIMIT;
         worker.command_details.drain(0..overflow);
     }
-}
-
-fn append_worker_activity_beats(
-    workers: &mut [WorkerRow],
-    last_activity_pulse: &mut [Instant],
-    now: Instant,
-    pulse_interval: Duration,
-) -> bool {
-    let mut updated = false;
-    for (idx, worker) in workers.iter_mut().enumerate() {
-        if !worker.lease_held {
-            continue;
-        }
-        if worker.state == "complete" || worker.state == "failed" || worker.state == "idle" {
-            continue;
-        }
-        if now.duration_since(last_activity_pulse[idx]) < pulse_interval {
-            continue;
-        }
-        let state = match worker.state.as_str() {
-            "understand" => "understand",
-            "planning" => "planning",
-            "doing" => "doing",
-            "gitting" => "gitting",
-            "reviewing" => "reviewing",
-            "merging" => "merging",
-            _ => "working",
-        };
-        append_worker_command(worker, &format!("still {state}"));
-        last_activity_pulse[idx] = now;
-        updated = true;
-    }
-    updated
 }
 
 fn now_hhmmss() -> String {

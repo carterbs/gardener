@@ -352,6 +352,52 @@ fn extract_fn_name(signature: &str) -> String {
         .to_string()
 }
 
+#[test]
+fn linter_e2e_binary_spawn_requires_log_isolation() {
+    let tests_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut test_files = Vec::new();
+    collect_rust_files(&tests_root, &mut test_files);
+    test_files.sort();
+
+    let mut violations = Vec::new();
+
+    for file in &test_files {
+        let source = fs::read_to_string(file).expect("read test file");
+        if !source.contains("CARGO_BIN_EXE_gardener") {
+            continue;
+        }
+        if !source.contains("GARDENER_LOG_PATH") {
+            let relative = file
+                .strip_prefix(&tests_root)
+                .expect("strip prefix")
+                .display()
+                .to_string();
+            violations.push(relative);
+        }
+    }
+
+    if !violations.is_empty() {
+        let mut message = String::new();
+        message.push_str("e2e test isolation linter failed\n\n");
+        message.push_str(
+            "The following test files spawn the gardener binary (CARGO_BIN_EXE_gardener)\n",
+        );
+        message.push_str(
+            "but do not set GARDENER_LOG_PATH, so the child process writes to the\n",
+        );
+        message.push_str(
+            "live ~/.gardener/otel-logs.jsonl and pollutes production observability data.\n\n",
+        );
+        message.push_str("Fix: pass .env(\"GARDENER_LOG_PATH\", dir.path().join(\"otel-logs.jsonl\"))\n");
+        message.push_str("alongside GARDENER_DB_PATH in every fixture that spawns the binary.\n\n");
+        message.push_str("Violations:\n");
+        for v in &violations {
+            message.push_str(&format!("  - {v}\n"));
+        }
+        panic!("{message}");
+    }
+}
+
 fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).expect("read directory");
     for entry in entries {

@@ -97,7 +97,8 @@ stale_if_head_commit_differs = true
         .arg("--quit-after")
         .arg("500")
         .env("GARDENER_FORCE_TTY", "1")
-        .env("GARDENER_DB_PATH", &db_path);
+        .env("GARDENER_DB_PATH", &db_path)
+        .env("GARDENER_LOG_PATH", dir.path().join("otel-logs.jsonl"));
     (report_path, dir, store, cmd)
 }
 
@@ -242,6 +243,7 @@ max_turns = 12
         .arg("1")
         .env("GARDENER_FORCE_TTY", "1")
         .env("GARDENER_DB_PATH", &db_path)
+        .env("GARDENER_LOG_PATH", dir.path().join("otel-logs.jsonl"))
         .env(
             "PATH",
             format!(

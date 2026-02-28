@@ -11,7 +11,7 @@ use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
-    reset_workers_scroll, scroll_workers_down, scroll_workers_up, toggle_selected_worker_command_detail,
+    reset_workers_scroll, scroll_workers_down, scroll_workers_up,
     BacklogView, QueueStats, WorkerRow,
 };
 use crate::types::RuntimeScope;
@@ -21,6 +21,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const WORKER_POOL_ID: &str = "worker_pool";
+const WORKER_COMMAND_HISTORY_LIMIT: usize = 32;
 
 type WorkerResultMessage = (
     usize,
@@ -78,7 +79,10 @@ pub fn run_worker_pool_fsm(
             lease_held: false,
             session_missing: false,
             command_details: Vec::new(),
-            commands_expanded: false,
+        })
+        .map(|mut worker| {
+            append_worker_command(&mut worker, "waiting for claim");
+            worker
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;
@@ -109,8 +113,11 @@ pub fn run_worker_pool_fsm(
             let Some(task) = claimed_task else {
                 workers[idx].state = "idle".to_string();
                 workers[idx].task_title = "idle".to_string();
-                workers[idx].tool_line = "waiting for claim".to_string();
                 workers[idx].lease_held = false;
+                if workers[idx].tool_line != "waiting for claim" {
+                    append_worker_command(&mut workers[idx], "waiting for claim");
+                }
+                workers[idx].tool_line = "waiting for claim".to_string();
                 continue;
             };
             claimed_any = true;
@@ -130,6 +137,7 @@ pub fn run_worker_pool_fsm(
             workers[idx].tool_line = "claimed".to_string();
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
+            append_worker_command(&mut workers[idx], "claimed");
             render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
             claimed.push((idx, task));
         }
@@ -217,8 +225,11 @@ pub fn run_worker_pool_fsm(
                             };
                             for event in summary.logs {
                                 workers[idx].state = event.state.as_str().to_string();
-                                workers[idx].tool_line = format!("prompt {}", event.prompt_version);
-                                workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                                let prompt = format!("prompt {}", event.prompt_version);
+                                workers[idx].tool_line = prompt.clone();
+                                append_worker_command(&mut workers[idx], &prompt);
+                                workers[idx].breadcrumb =
+                                    format!("state>{}", event.state.as_str());
                                 append_run_log(
                                     "debug",
                                     "worker.turn.state",
@@ -242,7 +253,9 @@ pub fn run_worker_pool_fsm(
                                 let _ = store.mark_complete(&task_id, &worker_id)?;
                                 completed = completed.saturating_add(1);
                                 workers[idx].state = "complete".to_string();
-                                workers[idx].tool_line = format!("completed {}", task_id);
+                                let completed_message = format!("completed {}", task_id);
+                                workers[idx].tool_line = completed_message.clone();
+                                append_worker_command(&mut workers[idx], &completed_message);
                                 workers[idx].breadcrumb = "complete".to_string();
                                 workers[idx].lease_held = false;
                                 append_run_log(
@@ -256,7 +269,7 @@ pub fn run_worker_pool_fsm(
                                 );
                             } else {
                                 workers[idx].state = "failed".to_string();
-                                workers[idx].tool_line = if let Some(reason) = summary.failure_reason.clone() {
+                                let failed_message = if let Some(reason) = summary.failure_reason.clone() {
                                     if reason.is_empty() {
                                         format!("failed {}", task_id)
                                     } else {
@@ -273,6 +286,8 @@ pub fn run_worker_pool_fsm(
                                 } else {
                                     format!("failed {}", task_id)
                                 };
+                                workers[idx].tool_line = failed_message.clone();
+                                append_worker_command(&mut workers[idx], &failed_message);
                                 workers[idx].breadcrumb = "failed".to_string();
                                 workers[idx].lease_held = false;
                                 append_run_log(
@@ -285,11 +300,7 @@ pub fn run_worker_pool_fsm(
                                     }),
                                 );
                                 if let Some(reason) = &summary.failure_reason {
-                                    shutdown_error = Some((
-                                        worker_id,
-                                        task_id,
-                                        reason.clone(),
-                                    ));
+                                    shutdown_error = Some((worker_id, task_id, reason.clone()));
                                     request_interrupt();
                                 } else {
                                     // No fatal reason — release the lease so this task is available
@@ -492,10 +503,6 @@ fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
                 );
                 redraw_dashboard = true;
             }
-            Some(AppHotkeyAction::ToggleCommandDetail) => {
-                // hotkey:c
-                redraw_dashboard = toggle_selected_worker_command_detail(workers);
-            }
             Some(AppHotkeyAction::ViewReport) => *report_visible = true,
             Some(AppHotkeyAction::RegenerateReport) => {
                 let _ = refresh_quality_report(runtime, cfg, scope, true)?;
@@ -534,6 +541,28 @@ fn now_unix_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+fn append_worker_command(worker: &mut WorkerRow, command: &str) {
+    worker
+        .command_details
+        .push((now_hhmmss(), command.to_string()));
+    if worker.command_details.len() > WORKER_COMMAND_HISTORY_LIMIT {
+        let overflow = worker.command_details.len() - WORKER_COMMAND_HISTORY_LIMIT;
+        worker.command_details.drain(0..overflow);
+    }
+}
+
+fn now_hhmmss() -> String {
+    let timestamp = now_unix_millis().rem_euclid(86_400_000);
+    let secs = (timestamp / 1000) as u64;
+    let in_day = secs % 86_400;
+    format!(
+        "{:02}:{:02}:{:02}",
+        in_day / 3600,
+        (in_day % 3600) / 60,
+        in_day % 60
+    )
 }
 
 fn hotkey_action(key: char, operator_hotkeys: bool) -> Option<AppHotkeyAction> {
@@ -711,53 +740,6 @@ mod tests {
         std::fs::write(path, contents).expect("write file");
     }
 
-    #[derive(Clone)]
-    struct SizedFakeTerminal {
-        terminal: FakeTerminal,
-        width: u16,
-        height: u16,
-    }
-
-    impl SizedFakeTerminal {
-        fn new(terminal: FakeTerminal, width: u16, height: u16) -> Self {
-            Self {
-                terminal,
-                width,
-                height,
-            }
-        }
-
-        fn drawn_frames(&self) -> Vec<String> {
-            self.terminal.drawn_frames()
-        }
-
-        fn enqueue_keys(&self, keys: impl IntoIterator<Item = char>) {
-            self.terminal.enqueue_keys(keys);
-        }
-    }
-
-    impl Terminal for SizedFakeTerminal {
-        fn stdin_is_tty(&self) -> bool {
-            self.terminal.stdin_is_tty()
-        }
-
-        fn write_line(&self, line: &str) -> Result<(), GardenerError> {
-            self.terminal.write_line(line)
-        }
-
-        fn draw(&self, frame: &str) -> Result<(), GardenerError> {
-            self.terminal.draw(frame)
-        }
-
-        fn draw_dimensions(&self) -> (u16, u16) {
-            (self.width, self.height)
-        }
-
-        fn poll_key(&self, timeout_ms: u64) -> Result<Option<char>, GardenerError> {
-            self.terminal.poll_key(timeout_ms)
-        }
-    }
-
     #[test]
     fn report_hotkey_actions_cover_report_bindings() {
         for binding in REPORT_BINDINGS {
@@ -771,6 +753,7 @@ mod tests {
         assert_eq!(hotkey_action('q', false), Some(HotkeyAction::Quit)); // hotkey:q
         assert_eq!(hotkey_action('j', false), Some(HotkeyAction::ScrollDown)); // hotkey:j
         assert_eq!(hotkey_action('k', false), Some(HotkeyAction::ScrollUp)); // hotkey:k
+        assert_eq!(hotkey_action('c', false), None); // hotkey:c removed
         assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
         assert_eq!(
             hotkey_action('g', false),
@@ -780,6 +763,7 @@ mod tests {
         assert_eq!(hotkey_action('r', false), None);
         assert_eq!(hotkey_action('l', false), None);
         assert_eq!(hotkey_action('p', false), None);
+        assert_eq!(hotkey_action('c', true), None); // hotkey:c removed
 
         assert_eq!(hotkey_action('r', true), Some(HotkeyAction::Retry)); // hotkey:r
         assert_eq!(hotkey_action('l', true), Some(HotkeyAction::ReleaseLease)); // hotkey:l
@@ -849,41 +833,6 @@ mod tests {
     }
 
     #[test]
-    fn run_worker_pool_fsm_toggles_command_detail_via_hotkey() {
-        let dir = TempDir::new().expect("tempdir");
-        let scope = test_scope(&dir);
-
-        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
-        let store = BacklogStore::open(&db_path).expect("open store");
-        seed_task(&store, "toggle command detail task");
-
-        let mut cfg = AppConfig::default();
-        cfg.execution.test_mode = true;
-        cfg.orchestrator.parallelism = 1;
-
-        let terminal = SizedFakeTerminal::new(FakeTerminal::new(true), 160, 40);
-        terminal.enqueue_keys(['c']);
-
-        let runtime = ProductionRuntime {
-            clock: Arc::new(FakeClock::default()),
-            file_system: Arc::new(ProductionFileSystem),
-            process_runner: Arc::new(FakeProcessRunner::default()),
-            terminal: Arc::new(terminal.clone()),
-        };
-
-        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
-            .expect("run fsm");
-        assert_eq!(completed, 1);
-
-        let frames = terminal.drawn_frames();
-        assert!(
-            frames
-                .iter()
-                .any(|frame| frame.contains("▾ Optional command detail")),
-            "expected selected worker command details to expand in rendered frames"
-        );
-    }
-
     #[test]
     fn run_worker_pool_fsm_handles_v_and_b_with_report_draws() {
         let dir = TempDir::new().expect("tempdir");

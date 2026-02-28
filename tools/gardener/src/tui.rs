@@ -17,9 +17,16 @@ use std::cell::RefCell;
 use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const WORKER_LIST_ROW_HEIGHT: usize = 2;
-const COMMAND_DETAIL_TOGGLE_HINT_OPEN: &str = "▾ Optional command detail";
-const COMMAND_DETAIL_TOGGLE_HINT_CLOSED: &str = "▸ Optional command detail";
+const WORKER_LIST_ROW_HEIGHT: usize = 3;
+const RECENT_COMMAND_STREAM_LIMIT: usize = 4;
+const WORKER_FLOW_STATES: [&str; 6] = [
+    "understand",
+    "doing",
+    "gitting",
+    "reviewing",
+    "merging",
+    "complete",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
@@ -32,7 +39,6 @@ pub struct WorkerRow {
     pub session_age_secs: u64,
     pub lease_held: bool,
     pub session_missing: bool,
-    pub commands_expanded: bool,
     pub command_details: Vec<(String, String)>,
 }
 
@@ -181,7 +187,6 @@ pub struct WorkerCard {
     pub breadcrumb: String,
     pub activity: Vec<ActivityEntry>,
     pub command_details: Vec<CommandEntry>,
-    pub commands_expanded: bool,
     pub state_bucket: WorkerState,
     pub last_heartbeat_secs: u64,
     pub lease_held: bool,
@@ -258,7 +263,6 @@ impl AppState {
                         command: command.clone(),
                     })
                     .collect(),
-                commands_expanded: row.commands_expanded,
                 state_bucket: WorkerState::from_str(&row.state),
                 last_heartbeat_secs: row.last_heartbeat_secs,
                 lease_held: row.lease_held,
@@ -1019,7 +1023,10 @@ fn draw_dashboard_frame(
     });
     let worker_end = (worker_offset + worker_row_capacity).min(app_state.workers.len());
 
-    let command_line_width = workers_panel[1].width.saturating_sub(8) as usize;
+    let command_stream_max_width =
+        workers_panel[1]
+            .width
+            .saturating_sub(8 + "Commands: ".len() as u16) as usize;
     let worker_items = app_state
         .workers
         .iter()
@@ -1027,17 +1034,6 @@ fn draw_dashboard_frame(
         .skip(worker_offset)
         .take(worker_row_capacity)
         .map(|(idx, row)| {
-            let state_style = match row.state.as_str() {
-                "complete" => Style::default().fg(Color::Green),
-                "failed" => Style::default().fg(Color::Red),
-                "doing" | "gitting" | "reviewing" | "merging" | "planning" => {
-                    Style::default().fg(Color::Yellow)
-                }
-                "init" | "backlog_sync" | "working" | "understand" => {
-                    Style::default().fg(Color::Cyan)
-                }
-                _ => Style::default().fg(Color::Gray),
-            };
             let selected = idx == selected_worker;
             let marker = if selected { ">" } else { " " };
             let worker_style = if selected {
@@ -1049,12 +1045,10 @@ fn draw_dashboard_frame(
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD)
             };
-            let detail_hint = if row.commands_expanded {
-                COMMAND_DETAIL_TOGGLE_HINT_OPEN
-            } else {
-                COMMAND_DETAIL_TOGGLE_HINT_CLOSED
-            };
-            let mut lines = vec![
+            let flow_line = Line::from(worker_flow_chain_spans(&row.state));
+            let command_stream = worker_command_stream(&row.command_details);
+            let command_stream = truncate_right(&command_stream, command_stream_max_width);
+            let lines = vec![
                 Line::from(vec![
                     Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
                     Span::raw(": "),
@@ -1062,45 +1056,20 @@ fn draw_dashboard_frame(
                 ]),
                 Line::from(vec![
                     Span::raw("    "),
-                    Span::styled("State: ", Style::default().fg(Color::Blue)),
-                    Span::styled(format!("{:<13}", humanize_state(&row.state)), state_style),
-                    Span::raw("  "),
-                    Span::styled("Action: ", Style::default().fg(Color::Blue)),
-                    Span::raw(format!(
-                        "{:<22}",
-                        truncate_right(&humanize_action(&row.tool_line), 22)
-                    )),
-                    Span::raw("  "),
                     Span::styled("Flow: ", Style::default().fg(Color::Blue)),
-                    Span::raw(worker_flow_summary(&row.state, &row.tool_line, &row.breadcrumb)),
-                    Span::raw("  "),
+                    flow_line,
+                ]),
+                Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled("Commands: ", Style::default().fg(Color::Blue)),
                     Span::styled(
-                        detail_hint,
-                        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                        command_stream,
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::DIM),
                     ),
                 ]),
             ];
-            if row.commands_expanded {
-                lines.extend(
-                    row.command_details.iter().map(|entry| {
-                        Line::from(vec![
-                            Span::styled(
-                                format!(
-                                    "    {}",
-                                    command_row_with_timestamp(
-                                        &entry.timestamp,
-                                        &entry.command,
-                                        command_line_width
-                                    )
-                                ),
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::DIM),
-                            ),
-                        ])
-                    }),
-                );
-            }
             ListItem::new(lines)
         })
         .collect::<Vec<_>>();
@@ -1439,15 +1408,6 @@ pub fn scroll_workers_up() -> bool {
     moved
 }
 
-pub fn toggle_selected_worker_command_detail(workers: &mut [WorkerRow]) -> bool {
-    let selected = WORKERS_VIEWPORT_SELECTED.with(|cell| *cell.borrow());
-    if selected >= workers.len() {
-        return false;
-    }
-    workers[selected].commands_expanded = !workers[selected].commands_expanded;
-    true
-}
-
 pub fn reset_workers_scroll() {
     WORKERS_VIEWPORT_OFFSET.with(|cell| {
         *cell.borrow_mut() = 0;
@@ -1701,6 +1661,88 @@ fn humanize_action(action: &str) -> String {
         return format!("Prompt {}", prompt);
     }
     title_case_words(action)
+}
+
+fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
+    let current = normalize_worker_state(state);
+    if current == "idle" {
+        return vec![Span::styled(
+            "Idle",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+        )];
+    }
+    if current == "unknown" {
+        return vec![Span::styled(
+            humanize_state(state),
+            Style::default().fg(Color::DarkGray),
+        )];
+    }
+
+    let mut chain: Vec<&'static str> = WORKER_FLOW_STATES.to_vec();
+    if current == "failed" {
+        chain.push("failed");
+    }
+    let current_index = chain.iter().position(|step| *step == current);
+
+    chain
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, step)| {
+            let is_current = current_index == Some(index);
+            let is_after_current = if let Some(current) = current_index {
+                index > current
+            } else {
+                false
+            };
+            let style = if is_current {
+                if step == "failed" {
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                }
+            } else if is_after_current {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let mut spans = Vec::with_capacity(2);
+            if index > 0 {
+                spans.push(Span::raw(" → "));
+            }
+            spans.push(Span::styled(humanize_state(step), style));
+            spans
+        })
+        .collect()
+}
+
+fn worker_command_stream(commands: &[(String, String)]) -> String {
+    let recent = commands
+        .iter()
+        .rev()
+        .take(RECENT_COMMAND_STREAM_LIMIT)
+        .collect::<Vec<_>>();
+    if recent.is_empty() {
+        return "no recent commands".to_string();
+    }
+
+    recent
+        .into_iter()
+        .rev()
+        .map(|(timestamp, command)| format!("{timestamp}  {command}"))
+        .collect::<Vec<_>>()
+        .join("  |  ")
+}
+
+fn normalize_worker_state<'a>(state: &'a str) -> &'a str {
+    match state {
+        "init" | "boot" | "planning" | "backlog_sync" | "working" | "seeding" => "understand",
+        "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "idle" => state,
+        _ => "unknown",
+    }
 }
 
 fn worker_flow_summary(state: &str, tool_line: &str, breadcrumb: &str) -> String {
@@ -2036,7 +2078,7 @@ mod tests {
     use super::{
         classify_problem, humanize_action, humanize_breadcrumb, humanize_state, render_dashboard,
         render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
-        scroll_workers_up, toggle_selected_worker_command_detail, AppState, ProblemClass, StageState,
+        scroll_workers_up, AppState, ProblemClass, StageState,
         BacklogView,
         QueueStats, StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow, WorkerState,
     };
@@ -2052,7 +2094,6 @@ mod tests {
             session_age_secs: 33,
             lease_held: true,
             session_missing: missing,
-            commands_expanded: false,
             command_details: Vec::new(),
         }
     }
@@ -2102,8 +2143,8 @@ mod tests {
         assert!(frame.contains("parallel workers"));
         assert!(frame.contains("Workers"));
         assert!(!frame.contains("Problems"));
-        assert!(frame.contains("State:"));
-        assert!(frame.contains("Action:"));
+        assert!(frame.contains("Flow:"));
+        assert!(!frame.contains("Action:"));
         assert!(frame.contains("P0"));
         assert!(frame.contains("P2"));
         assert!(!frame.contains("status="));
@@ -2267,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn command_detail_rendering_is_per_worker_and_toggable() {
+    fn command_stream_is_rendered_per_worker() {
         let frame = render_dashboard(
             &[
                 WorkerRow {
@@ -2280,7 +2321,6 @@ mod tests {
                     session_age_secs: 0,
                     lease_held: true,
                     session_missing: false,
-                    commands_expanded: false,
                     command_details: vec![("12:34:56".to_string(), "echo first".to_string())],
                 },
                 WorkerRow {
@@ -2293,7 +2333,6 @@ mod tests {
                     session_age_secs: 0,
                     lease_held: true,
                     session_missing: false,
-                    commands_expanded: true,
                     command_details: vec![("23:45:01".to_string(), "echo second".to_string())],
                 },
             ],
@@ -2309,65 +2348,9 @@ mod tests {
             120,
             24,
         );
-        assert!(frame.contains("▸ Optional command detail"));
-        assert!(frame.contains("▾ Optional command detail"));
-        assert!(!frame.contains("12:34:56  echo first"));
+        assert!(frame.contains("Flow:"));
+        assert!(frame.contains("12:34:56  echo first"));
         assert!(frame.contains("23:45:01  echo second"));
-    }
-
-    #[test]
-    fn toggle_selected_worker_command_detail_targets_selected_worker() {
-        reset_workers_scroll();
-        let mut workers = vec![
-            WorkerRow {
-                worker_id: "w1".to_string(),
-                state: "doing".to_string(),
-                task_title: "task one".to_string(),
-                tool_line: "tool".to_string(),
-                breadcrumb: "understand>doing".to_string(),
-                last_heartbeat_secs: 0,
-                session_age_secs: 0,
-                lease_held: true,
-                session_missing: false,
-                commands_expanded: false,
-                command_details: Vec::new(),
-            },
-            WorkerRow {
-                worker_id: "w2".to_string(),
-                state: "doing".to_string(),
-                task_title: "task two".to_string(),
-                tool_line: "tool".to_string(),
-                breadcrumb: "understand>doing".to_string(),
-                last_heartbeat_secs: 0,
-                session_age_secs: 0,
-                lease_held: true,
-                session_missing: false,
-                commands_expanded: false,
-                command_details: Vec::new(),
-            },
-        ];
-        let _ = render_dashboard(
-            &workers,
-            &QueueStats {
-                ready: 0,
-                active: 0,
-                failed: 0,
-                p0: 0,
-                p1: 2,
-                p2: 0,
-            },
-            &BacklogView::default(),
-            80,
-            24,
-        );
-        assert!(toggle_selected_worker_command_detail(&mut workers));
-        assert!(workers[0].commands_expanded);
-        assert!(!workers[1].commands_expanded);
-        let w1_before = workers[1].commands_expanded;
-        let _ = scroll_workers_down();
-        assert!(toggle_selected_worker_command_detail(&mut workers));
-        assert!(workers[0].commands_expanded);
-        assert_ne!(workers[1].commands_expanded, w1_before);
     }
 
     #[test]
@@ -2381,7 +2364,6 @@ mod tests {
                 breadcrumb: String::new(),
                 activity: Vec::new(),
                 command_details: Vec::new(),
-                commands_expanded: false,
                 state_bucket: WorkerState::Doing,
                 last_heartbeat_secs: 0,
                 lease_held: false,
@@ -2395,7 +2377,6 @@ mod tests {
                 breadcrumb: String::new(),
                 activity: Vec::new(),
                 command_details: Vec::new(),
-                commands_expanded: false,
                 state_bucket: WorkerState::Reviewing,
                 last_heartbeat_secs: 0,
                 lease_held: false,
@@ -2409,7 +2390,6 @@ mod tests {
                 breadcrumb: String::new(),
                 activity: Vec::new(),
                 command_details: Vec::new(),
-                commands_expanded: false,
                 state_bucket: WorkerState::Idle,
                 last_heartbeat_secs: 0,
                 lease_held: false,
@@ -2446,7 +2426,6 @@ mod tests {
                 session_age_secs: 0,
                 lease_held: true,
                 session_missing: false,
-                commands_expanded: false,
                 command_details: Vec::new(),
             })
             .collect::<Vec<_>>();

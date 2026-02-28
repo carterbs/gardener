@@ -509,7 +509,6 @@ fn draw_boot_stage(
         lease_held: false,
         session_missing: false,
         command_details: Vec::new(),
-        commands_expanded: false,
     }];
     let stats = QueueStats {
         ready: 0,

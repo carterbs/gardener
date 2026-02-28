@@ -53,7 +53,7 @@ use logging::{
     append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
     structured_fallback_line,
 };
-use runtime::{clear_interrupt, ProductionRuntime};
+use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{run_startup_audits, run_startup_audits_with_progress};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
@@ -84,6 +84,8 @@ pub struct Cli {
     pub quality_grades_only: bool,
     #[arg(long)]
     pub validation_command: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub validate: bool,
     #[arg(long, value_enum)]
     pub agent: Option<CliAgent>,
     #[arg(long, default_value_t = false)]
@@ -159,6 +161,7 @@ pub fn run_with_runtime(
             "cli.parsed",
             json!({
                 "config_override": cli.config.as_ref().map(|p| p.display().to_string()),
+                "validate": cli.validate,
                 "task_override": cli.task,
                 "target": cli.target,
                 "triage_only": cli.triage_only,
@@ -222,6 +225,32 @@ pub fn run_with_runtime(
 
         let validation = resolve_validation_command(&cfg, cli.validation_command.as_deref());
         let startup = StartupSnapshot { scope, validation };
+
+        if cli.validate {
+            append_run_log(
+                "info",
+                "cli.validate.started",
+                json!({ "command": startup.validation.command }),
+            );
+            let out = runtime.process_runner.run(ProcessRequest {
+                program: "sh".to_string(),
+                args: vec!["-lc".to_string(), startup.validation.command.clone()],
+                cwd: Some(startup.scope.working_dir.clone()),
+            })?;
+            append_run_log(
+                "info",
+                "cli.validate.completed",
+                json!({
+                    "command": startup.validation.command,
+                    "exit_code": out.exit_code,
+                }),
+            );
+            if out.exit_code != 0 {
+                return Ok(out.exit_code);
+            }
+            runtime.terminal.write_line("validation command passed")?;
+            return Ok(0);
+        }
 
         if cli.triage_only || cli.retriage {
             let _profile = ensure_profile_for_run(
@@ -385,6 +414,24 @@ pub fn run_with_runtime(
                 .unwrap_or(&startup.scope.working_dir)
                 .join(".cache/gardener/backlog.sqlite");
             let store = BacklogStore::open(db_path)?;
+            let startup_backlog = store.list_tasks()?;
+            let startup_backlog_tasks = startup_backlog
+                .into_iter()
+                .map(|task| {
+                    json!({
+                        "task_id": task.task_id,
+                        "status": task.status.as_str()
+                    })
+                })
+                .collect::<Vec<_>>();
+            append_run_log(
+                "debug",
+                "backlog.startup.snapshot",
+                json!({
+                    "count": startup_backlog_tasks.len(),
+                    "tasks": startup_backlog_tasks,
+                }),
+            );
             draw_boot_stage(
                 runtime,
                 "WORKING",

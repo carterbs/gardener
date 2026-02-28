@@ -500,6 +500,43 @@ impl BacklogStore {
         })
     }
 
+    pub fn count_tasks_by_priority(&self) -> StoreResult<(usize, usize, usize)> {
+        self.read_pool.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT
+                        COALESCE(SUM(CASE WHEN priority = 'P0' THEN 1 ELSE 0 END), 0) AS p0,
+                        COALESCE(SUM(CASE WHEN priority = 'P1' THEN 1 ELSE 0 END), 0) AS p1,
+                        COALESCE(SUM(CASE WHEN priority = 'P2' THEN 1 ELSE 0 END), 0) AS p2
+                     FROM backlog_tasks
+                    WHERE status <> 'complete'"
+                )
+                .map_err(db_err)?;
+            statement
+                .query_row([], |row| {
+                    let p0: i64 = row.get(0)?;
+                    let p1: i64 = row.get(1)?;
+                    let p2: i64 = row.get(2)?;
+                    Ok((p0 as usize, p1 as usize, p2 as usize))
+                })
+                .map_err(db_err)
+        })
+    }
+
+    pub fn count_active_tasks(&self) -> StoreResult<usize> {
+        self.read_pool.with_conn(|conn| {
+            let mut statement = conn
+                .prepare("SELECT COUNT(*) FROM backlog_tasks WHERE status <> 'complete'")
+                .map_err(db_err)?;
+            statement
+                .query_row([], |row| {
+                    let count: i64 = row.get(0)?;
+                    Ok(count as usize)
+                })
+                .map_err(db_err)
+        })
+    }
+
     pub fn get_task(&self, task_id: &str) -> StoreResult<Option<BacklogTask>> {
         self.read_pool.with_conn(|conn| fetch_task(conn, task_id))
     }
@@ -668,36 +705,49 @@ fn claim_next_in_tx(
     lease_expires_at: i64,
     now: i64,
 ) -> StoreResult<Option<BacklogTask>> {
+    let mut candidate = tx
+        .prepare(
+            "SELECT task_id
+             FROM backlog_tasks
+             WHERE status = 'ready'
+             ORDER BY
+                CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                attempt_count DESC,
+                last_updated ASC,
+                created_at ASC
+             LIMIT 1",
+        )
+        .map_err(db_err)?;
+    let Some(task_id) = candidate
+        .query_row([], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(db_err)?
+    else {
+        return Ok(None);
+    };
+
     let mut stmt = tx
         .prepare(
-            "WITH candidate AS (
-                SELECT task_id
-                FROM backlog_tasks
-                WHERE status = 'ready'
-                ORDER BY
-                    CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
-                    CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
-                    attempt_count DESC,
-                    last_updated ASC,
-                    created_at ASC
-                LIMIT 1
-            )
-            UPDATE backlog_tasks
-            SET status = 'leased',
-                lease_owner = ?1,
-                lease_expires_at = ?2,
-                last_updated = ?3,
-                attempt_count = attempt_count + 1
-            WHERE task_id = (SELECT task_id FROM candidate)
-            RETURNING task_id, kind, title, details, scope_key, priority, status, last_updated,
-                      lease_owner, lease_expires_at, source, related_pr, related_branch,
-                      attempt_count, created_at",
+            "UPDATE backlog_tasks
+             SET status = 'leased',
+                 lease_owner = ?2,
+                 lease_expires_at = ?3,
+                 last_updated = ?4,
+                 attempt_count = attempt_count + 1
+             WHERE task_id = ?1 AND status = 'ready'
+             RETURNING task_id, kind, title, details, scope_key, priority, status, last_updated,
+                       lease_owner, lease_expires_at, source, related_pr, related_branch,
+                       attempt_count, created_at",
         )
         .map_err(db_err)?;
 
-    stmt.query_row(params![lease_owner, lease_expires_at, now], row_to_task)
-        .optional()
-        .map_err(db_err)
+    stmt.query_row(
+        params![task_id, lease_owner, lease_expires_at, now],
+        row_to_task,
+    )
+    .optional()
+    .map_err(db_err)
 }
 
 fn mark_in_progress(
@@ -1027,6 +1077,7 @@ mod tests {
 
         let unique = claimed.iter().cloned().collect::<HashSet<_>>();
         assert_eq!(claimed.len(), unique.len());
+        assert_eq!(claimed.len(), 25);
     }
 
     #[test]
@@ -1197,5 +1248,38 @@ mod tests {
             converted,
             crate::errors::GardenerError::Database(_)
         ));
+    }
+
+    #[test]
+    fn count_tasks_by_priority_excludes_complete() {
+        let store = temp_store();
+        let ready_p1 = store
+            .upsert_task(task("ready p1", Priority::P1))
+            .expect("insert ready p1");
+        let _ = store
+            .upsert_task(task("ready p2", Priority::P2))
+            .expect("insert ready p2");
+        let complete = store
+            .upsert_task(task("complete p0", Priority::P0))
+            .expect("insert complete candidate");
+        let claimed = store
+            .claim_next("worker-1", 60)
+            .expect("claim complete candidate")
+            .expect("claimed task");
+        assert_eq!(claimed.task_id, complete.task_id);
+        let moved = store
+            .mark_in_progress(&complete.task_id, "worker-1")
+            .expect("mark in progress");
+        assert!(moved);
+        let completed = store
+            .mark_complete(&complete.task_id, "worker-1")
+            .expect("mark complete");
+        assert!(completed);
+
+        let _ = ready_p1;
+        let (p0, p1, p2) = store.count_tasks_by_priority().expect("count");
+        assert_eq!(p0, 0);
+        assert_eq!(p1, 1);
+        assert_eq!(p2, 1);
     }
 }

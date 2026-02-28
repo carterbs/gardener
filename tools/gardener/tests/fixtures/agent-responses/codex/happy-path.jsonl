@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"thread_01"}
+{"type":"turn.started","turn_id":"turn_01"}
+{"type":"item.started","item":{"type":"function_call","name":"bash","id":"item_01"}}
+{"type":"item.updated","item":{"type":"function_call","name":"bash","id":"item_01","output":"hello\n"}}
+{"type":"item.completed","item":{"type":"function_call","name":"bash","id":"item_01"}}
+{"type":"turn.completed","result":{"summary":"Ran bash command","output_file":"/tmp/out.json"}}

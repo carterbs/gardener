@@ -1,0 +1,7 @@
+{"type":"message_start","message":{"id":"msg_01","model":"claude-opus-4-6","role":"assistant"}}
+{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it..."}}
+{"type":"content_block_stop","index":0}
+{"type":"tool_use","id":"tool_01","name":"bash","input":{"command":"echo hello"}}
+{"type":"tool_result","tool_use_id":"tool_01","content":"hello\n"}
+{"type":"result","subtype":"success","result":{"summary":"Ran echo hello","cost_usd":0.001}}

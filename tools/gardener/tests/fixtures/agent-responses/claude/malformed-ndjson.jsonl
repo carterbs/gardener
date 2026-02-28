@@ -1,0 +1,5 @@
+{"type":"message_start","message":{"id":"msg_03"}}
+not valid json at all
+{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}
+another bad line
+{"type":"result","subtype":"success","result":{"summary":"completed despite noise"}}

@@ -247,8 +247,12 @@ where
         .unwrap_or(&scope.working_dir)
         .join(".cache/gardener/backlog.sqlite");
     let mut seeded_tasks_upserted = 0usize;
-    let existing_backlog_count = BacklogStore::open(&db_path)?.list_tasks()?.len();
-    if should_seed_backlog(run_seeding, cfg.execution.test_mode, existing_backlog_count) {
+    let existing_active_backlog_count = BacklogStore::open(&db_path)?.count_active_tasks()?;
+    if should_seed_backlog(
+        run_seeding,
+        cfg.execution.test_mode,
+        existing_active_backlog_count,
+    ) {
         append_run_log(
             "info",
             "startup.seeding.started",
@@ -256,7 +260,7 @@ where
                 "backend": format!("{:?}", cfg.seeding.backend),
                 "model": cfg.seeding.model,
                 "primary_gap": profile.agent_readiness.primary_gap,
-                "existing_backlog_count": existing_backlog_count,
+                "existing_backlog_count": existing_active_backlog_count,
             }),
         );
         progress("Preparing backlog seeding context from repo profile and quality grades")?;
@@ -385,14 +389,14 @@ where
         append_run_log(
             "info",
             "startup.seeding.skipped_existing_backlog",
-            json!({ "existing_backlog_count": existing_backlog_count }),
+            json!({ "existing_backlog_count": existing_active_backlog_count }),
         );
         progress(&format!(
-            "Skipping backlog seeding; backlog already has {existing_backlog_count} task(s)"
+            "Skipping backlog seeding; backlog already has {existing_active_backlog_count} task(s)"
         ))?;
         if !runtime.terminal.stdin_is_tty() {
             runtime.terminal.write_line(&format!(
-                "startup backlog seeding: skipped, existing_backlog_count={existing_backlog_count}"
+                "startup backlog seeding: skipped, existing_backlog_count={existing_active_backlog_count}"
             ))?;
         }
     }

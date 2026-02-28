@@ -7,6 +7,7 @@ pub struct HotkeyBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyAction {
     Quit,
+    ToggleCommandDetail,
     Retry,
     ReleaseLease,
     ParkEscalate,
@@ -17,10 +18,14 @@ pub enum HotkeyAction {
     Back,
 }
 
-pub const DASHBOARD_BINDINGS: [HotkeyBinding; 5] = [
+pub const DASHBOARD_BINDINGS: [HotkeyBinding; 6] = [
     HotkeyBinding {
         key: 'q',
         action: "quit",
+    },
+    HotkeyBinding {
+        key: 'c',
+        action: "toggle command detail",
     },
     HotkeyBinding {
         key: 'j',
@@ -89,6 +94,7 @@ pub fn action_for_key(key: char) -> Option<HotkeyAction> {
 pub fn action_for_key_with_mode(key: char, operator_hotkeys: bool) -> Option<HotkeyAction> {
     match key {
         'q' => Some(HotkeyAction::Quit),
+        'c' => Some(HotkeyAction::ToggleCommandDetail),
         'j' => Some(HotkeyAction::ScrollDown),
         'k' => Some(HotkeyAction::ScrollUp),
         'r' if operator_hotkeys => Some(HotkeyAction::Retry),

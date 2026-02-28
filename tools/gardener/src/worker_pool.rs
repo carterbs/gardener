@@ -434,28 +434,52 @@ fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(
     // Poll until the user presses any key. poll_key returns None on timeout,
     // Some(key) when a key arrives. For fake terminals with an empty queue
     // the first poll immediately returns None and we exit — this prevents
-    // test hangs while still blocking on a real TTY until input is received.
-    loop {
-        match terminal.poll_key(100)? {
-            Some(INTERRUPT_SENTINEL_KEY) | Some(COPY_SHORTCUT_KEY) if copy_target.is_some() => {
-                let target = copy_target.expect("copy target expected");
-                if let Err(error) = terminal.copy_to_clipboard(target) {
-                    append_run_log(
-                        "warn",
-                        "worker_pool.error_copy.failed",
-                        json!({
-                            "worker_id": WORKER_POOL_ID,
-                            "error": error.to_string()
-                        }),
-                    );
-                } else {
-                    append_run_log(
-                        "info",
-                        "worker_pool.error_copy.success",
-                        json!({
-                            "worker_id": WORKER_POOL_ID
-                        }),
-                    );
+        // test hangs while still blocking on a real TTY until input is received.
+        loop {
+            match terminal.poll_key(100)? {
+            Some(INTERRUPT_SENTINEL_KEY) => {
+                if let Some(target) = copy_target {
+                    if let Err(error) = terminal.copy_to_clipboard(target) {
+                        append_run_log(
+                            "warn",
+                            "worker_pool.error_copy.failed",
+                            json!({
+                                "worker_id": WORKER_POOL_ID,
+                                "error": error.to_string()
+                            }),
+                        );
+                    } else {
+                        append_run_log(
+                            "info",
+                            "worker_pool.error_copy.success",
+                            json!({
+                                "worker_id": WORKER_POOL_ID
+                            }),
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            Some(key) if is_copy_shortcut_key(key) && copy_target.is_some() => {
+                if let Some(target) = copy_target {
+                    if let Err(error) = terminal.copy_to_clipboard(target) {
+                        append_run_log(
+                            "warn",
+                            "worker_pool.error_copy.failed",
+                            json!({
+                                "worker_id": WORKER_POOL_ID,
+                                "error": error.to_string()
+                            }),
+                        );
+                    } else {
+                        append_run_log(
+                            "info",
+                            "worker_pool.error_copy.success",
+                            json!({
+                                "worker_id": WORKER_POOL_ID
+                            }),
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -675,6 +699,10 @@ fn append_worker_tool_commands(
         }
     }
     updated
+}
+
+fn is_copy_shortcut_key(key: char) -> bool {
+    key.eq_ignore_ascii_case(&COPY_SHORTCUT_KEY)
 }
 
 fn hotkey_action(key: char, operator_hotkeys: bool) -> Option<AppHotkeyAction> {
@@ -1088,6 +1116,24 @@ mod tests {
         wait_for_quit(&terminal, Some("error line from agent"))
             .expect("wait should complete after copy shortcut");
         assert_eq!(terminal.clipboard_copies(), vec!["error line from agent".to_string()]);
+    }
+
+    #[test]
+    fn wait_for_quit_copies_error_on_copy_shortcut_uppercase() {
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['C']);
+        wait_for_quit(&terminal, Some("error line from agent"))
+            .expect("wait should complete after copy shortcut");
+        assert_eq!(terminal.clipboard_copies(), vec!["error line from agent".to_string()]);
+    }
+
+    #[test]
+    fn wait_for_quit_does_not_copy_error_on_other_key() {
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['x']);
+        wait_for_quit(&terminal, Some("error line from agent"))
+            .expect("wait should complete after non-copy key");
+        assert!(terminal.clipboard_copies().is_empty());
     }
 
     #[test]

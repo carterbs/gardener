@@ -16,6 +16,7 @@ use std::time::SystemTime;
 
 const RESIZE_SENTINEL_KEY: char = '\0';
 pub const INTERRUPT_SENTINEL_KEY: char = '\x03';
+const COPY_SHORTCUT_KEY: char = 'c';
 const DEFAULT_TERMINAL_WIDTH: u16 = 120;
 const DEFAULT_TERMINAL_HEIGHT: u16 = 30;
 
@@ -177,28 +178,24 @@ fn start_key_listener_if_needed() {
             let Ok(event) = crossterm::event::read() else {
                 continue;
             };
-            match event {
-                crossterm::event::Event::Key(key) => match key.code {
-                    crossterm::event::KeyCode::Char('c')
-                        if key
-                            .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+            if let crossterm::event::Event::Key(key) = event {
+                if let crossterm::event::KeyCode::Char(c) = key.code {
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && is_copy_shortcut_key(c)
                     {
                         enqueue_key(INTERRUPT_SENTINEL_KEY);
                         request_interrupt();
-                    }
-                    crossterm::event::KeyCode::Char(c) => {
+                    } else {
                         enqueue_key(c);
                         if c == 'q' {
                             request_interrupt();
                         }
                     }
-                    _ => {}
-                },
-                crossterm::event::Event::Resize(_, _) => {
-                    enqueue_key(RESIZE_SENTINEL_KEY);
                 }
-                _ => {}
+            } else if let crossterm::event::Event::Resize(_, _) = event {
+                enqueue_key(RESIZE_SENTINEL_KEY);
             }
         }
     });
@@ -695,14 +692,17 @@ impl Terminal for ProductionTerminal {
         }
         match crossterm::event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
             crossterm::event::Event::Key(key) => match key.code {
-                crossterm::event::KeyCode::Char('c')
+                crossterm::event::KeyCode::Char(c) => {
                     if key
                         .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    Ok(Some(INTERRUPT_SENTINEL_KEY))
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && is_copy_shortcut_key(c)
+                    {
+                        Ok(Some(INTERRUPT_SENTINEL_KEY))
+                    } else {
+                        Ok(Some(c))
+                    }
                 }
-                crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
             },
             crossterm::event::Event::Resize(_, _) => Ok(Some(RESIZE_SENTINEL_KEY)),
@@ -713,6 +713,10 @@ impl Terminal for ProductionTerminal {
     fn copy_to_clipboard(&self, text: &str) -> Result<(), GardenerError> {
         copy_to_clipboard(text)
     }
+}
+
+fn is_copy_shortcut_key(key: char) -> bool {
+    key.eq_ignore_ascii_case(&COPY_SHORTCUT_KEY)
 }
 
 pub struct ProductionRuntime {

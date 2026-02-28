@@ -33,6 +33,7 @@ static RUN_LOGGER: OnceLock<Mutex<Option<JsonlLogger>>> = OnceLock::new();
 static RUN_CONTEXT: OnceLock<Mutex<Option<RunLogContext>>> = OnceLock::new();
 static RUN_LOG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static RUN_LOG_NONCE: AtomicU64 = AtomicU64::new(1);
+static RUN_LOG_ACTIVITY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn run_logger_slot() -> &'static Mutex<Option<JsonlLogger>> {
     RUN_LOGGER.get_or_init(|| Mutex::new(None))
@@ -44,6 +45,10 @@ fn run_context_slot() -> &'static Mutex<Option<RunLogContext>> {
 
 fn run_log_write_lock() -> &'static Mutex<()> {
     RUN_LOG_WRITE_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn run_log_activity_lock() -> &'static Mutex<()> {
+    RUN_LOG_ACTIVITY_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 impl JsonlLogger {
@@ -94,6 +99,16 @@ pub fn default_run_log_path(working_dir: &Path) -> PathBuf {
 }
 
 pub fn init_run_logger(path: impl AsRef<Path>, working_dir: &Path) -> String {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    init_run_logger_nolock(path, working_dir)
+}
+
+pub fn clear_run_logger() {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    clear_run_logger_nolock()
+}
+
+fn init_run_logger_nolock(path: impl AsRef<Path>, working_dir: &Path) -> String {
     let run_id = random_hex(16);
     let context = RunLogContext {
         run_id: run_id.clone(),
@@ -110,7 +125,7 @@ pub fn init_run_logger(path: impl AsRef<Path>, working_dir: &Path) -> String {
     run_id
 }
 
-pub fn clear_run_logger() {
+fn clear_run_logger_nolock() {
     let mut logger_slot = run_logger_slot().lock().expect("run logger lock");
     *logger_slot = None;
     let mut context_slot = run_context_slot().lock().expect("run context lock");
@@ -125,6 +140,11 @@ pub fn set_run_working_dir(path: &Path) {
 }
 
 pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    append_run_log_nolock(level, event_type, payload);
+}
+
+fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
     let logger = {
         let logger_slot = run_logger_slot().lock().expect("run logger lock");
         logger_slot.clone()
@@ -183,22 +203,37 @@ pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
 }
 
 pub fn current_run_log_path() -> Option<PathBuf> {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    current_run_log_path_nolock()
+}
+
+fn current_run_log_path_nolock() -> Option<PathBuf> {
     let logger_slot = run_logger_slot().lock().expect("run logger lock");
     logger_slot.as_ref().map(|logger| logger.path.clone())
 }
 
 pub fn current_run_id() -> Option<String> {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    current_run_id_nolock()
+}
+
+fn current_run_id_nolock() -> Option<String> {
     let context_slot = run_context_slot().lock().expect("run context lock");
     context_slot.as_ref().map(|context| context.run_id.clone())
 }
 
 pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String> {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    recent_worker_log_lines_nolock(worker_id, max_lines)
+}
+
+fn recent_worker_log_lines_nolock(worker_id: &str, max_lines: usize) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
     }
     // structured_fallback_line("logging", "recent_worker_log_lines", "starting_filter");
 
-    let Some(path) = current_run_log_path() else {
+    let Some(path) = current_run_log_path_nolock() else {
         return Vec::new();
     };
 
@@ -239,7 +274,13 @@ pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String>
 
 pub fn current_log_line_count() -> usize {
     let _ = structured_fallback_line("logging", "current_log_line_count", "starting");
-    let Some(path) = current_run_log_path() else {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    current_log_line_count_nolock()
+}
+
+fn current_log_line_count_nolock() -> usize {
+    let _ = structured_fallback_line("logging", "current_log_line_count_nolock", "starting");
+    let Some(path) = current_run_log_path_nolock() else {
         return 0;
     };
 
@@ -254,12 +295,20 @@ pub fn recent_worker_tool_commands(
     from_line: usize,
     max_lines: usize,
 ) -> Vec<(usize, String, String)> {
+    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    recent_worker_tool_commands_nolock(from_line, max_lines)
+}
+
+fn recent_worker_tool_commands_nolock(
+    from_line: usize,
+    max_lines: usize,
+) -> Vec<(usize, String, String)> {
     let _ = structured_fallback_line("logging", "recent_worker_tool_commands", "starting");
     if max_lines == 0 {
         return Vec::new();
     }
 
-    let Some(path) = current_run_log_path() else {
+    let Some(path) = current_run_log_path_nolock() else {
         return Vec::new();
     };
 
@@ -428,14 +477,19 @@ fn random_hex(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_run_log, clear_run_logger, current_run_id, current_run_log_path, default_run_log_path,
-        init_run_logger, structured_fallback_line, JsonlLogger,
+        clear_run_logger_nolock, current_run_id_nolock, current_run_log_path_nolock, default_run_log_path,
+        init_run_logger_nolock, append_run_log_nolock, structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
     use std::path::Path;
 
+    fn with_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        super::run_log_activity_lock().lock().expect("run log activity lock")
+    }
+
     #[test]
     fn logger_writes_jsonl() {
+        let _guard = with_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("run.jsonl");
         let logger = JsonlLogger::new(&path);
@@ -448,11 +502,12 @@ mod tests {
 
     #[test]
     fn otel_log_line_contains_log_record_shape() {
+        let _guard = with_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("otel.jsonl");
-        let run_id = init_run_logger(&path, dir.path());
-        append_run_log("info", "run.started", json!({"foo":"bar"}));
-        clear_run_logger();
+        let run_id = init_run_logger_nolock(&path, dir.path());
+        append_run_log_nolock("info", "run.started", json!({"foo":"bar"}));
+        clear_run_logger_nolock();
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("\"logRecord\""));
         assert!(text.contains("\"severityText\":\"INFO\""));
@@ -461,32 +516,34 @@ mod tests {
 
     #[test]
     fn payload_is_truncated_when_needed() {
+        let _guard = with_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("otel.jsonl");
-        let _run_id = init_run_logger(&path, dir.path());
+        let _run_id = init_run_logger_nolock(&path, dir.path());
         {
             let mut slot = super::run_logger_slot().lock().expect("run logger lock");
             let logger = slot.as_mut().expect("logger initialized");
             logger.max_payload_bytes = 20;
         }
-        append_run_log(
+        append_run_log_nolock(
             "info",
             "payload.large",
             json!({"text": "abcdefghijklmnopqrstuvwxyz"}),
         );
-        clear_run_logger();
+        clear_run_logger_nolock();
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("..."));
     }
 
     #[test]
     fn current_run_context_functions_report_initialized_run_state() {
+        let _guard = with_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("context.jsonl");
-        let run_id = init_run_logger(&path, dir.path());
-        assert_eq!(current_run_id().as_deref(), Some(run_id.as_str()));
-        assert_eq!(current_run_log_path(), Some(path));
-        clear_run_logger();
+        let run_id = init_run_logger_nolock(&path, dir.path());
+        assert_eq!(current_run_id_nolock().as_deref(), Some(run_id.as_str()));
+        assert_eq!(current_run_log_path_nolock(), Some(path));
+        clear_run_logger_nolock();
     }
 
     #[test]
@@ -511,5 +568,133 @@ mod tests {
     fn fallback_line_is_deterministic() {
         let line = structured_fallback_line("w1", "doing", "hello\nworld");
         assert_eq!(line, "worker_id=w1 state=doing message=hello\\nworld ");
+    }
+
+    #[test]
+    fn current_log_line_count_reports_number_of_lines() {
+        let _guard = with_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("count.jsonl");
+        init_run_logger_nolock(&path, dir.path());
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"event_type":"adapter.call","payload":{"worker_id":"worker-1","command":"a"}}"#,
+                "\n",
+                r#"{"event_type":"adapter.call","payload":{"worker_id":"worker-2","command":"b"}}"#,
+                "\n",
+            ),
+        )
+        .expect("seed log");
+        assert_eq!(super::current_log_line_count_nolock(), 2);
+        clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn current_log_line_count_is_zero_when_run_not_initialized() {
+        let _guard = with_test_lock();
+        clear_run_logger_nolock();
+        assert_eq!(super::current_log_line_count_nolock(), 0);
+    }
+
+    #[test]
+    fn current_log_line_count_is_zero_for_unreadable_file() {
+        let _guard = with_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("count");
+        std::fs::create_dir(&path).expect("directory path");
+        init_run_logger_nolock(&path, dir.path());
+        assert_eq!(super::current_log_line_count_nolock(), 0);
+        clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn otel_severity_mapping_is_stable() {
+        assert_eq!(super::to_otel_severity("trace"), ("TRACE", 1));
+        assert_eq!(super::to_otel_severity("debug"), ("DEBUG", 5));
+        assert_eq!(super::to_otel_severity("warn"), ("WARN", 13));
+        assert_eq!(super::to_otel_severity("error"), ("ERROR", 17));
+        assert_eq!(super::to_otel_severity("fatal"), ("FATAL", 21));
+        assert_eq!(super::to_otel_severity("notice"), ("INFO", 9));
+    }
+
+    #[test]
+    fn helper_json_and_utf8_truncate_work_for_large_payloads() {
+        let truncated = super::truncate_json(json!({"k": "x".repeat(512)}), 20);
+        if let serde_json::Value::String(value) = truncated {
+            assert!(value.ends_with("..."));
+            assert!(value.len() <= 20);
+        } else {
+            panic!("expected truncated payload to be string");
+        }
+
+        assert_eq!(super::truncate_utf8("short", 20), "short");
+        assert_eq!(super::truncate_utf8(&"x".repeat(20), 10), "x".repeat(7) + "...");
+    }
+
+    #[test]
+    fn recent_worker_log_lines_filters_and_limits_by_worker() {
+        let _guard = with_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.jsonl");
+        init_run_logger_nolock(&path, dir.path());
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"event_type":"adapter.call","payload":{"worker_id":"worker-1","command":"echo hi"}}"#, "\n",
+                r#"{"event_type":"adapter.call","payload":{"worker_id":"worker-2","command":"bad"}}"#, "\n",
+                r#"{"event_type":"adapter.call","payload":{"worker_id":"worker-1","command":"second"}}"#, "\n",
+            ),
+        )
+        .expect("seed log");
+
+        let lines = super::recent_worker_log_lines_nolock("worker-1", 1);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("adapter.call"));
+        assert!(lines[0].contains("second"));
+        clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn recent_worker_tool_commands_collects_tool_events() {
+        let _guard = with_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.jsonl");
+        init_run_logger_nolock(&path, dir.path());
+        let log_lines = [
+            r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"ToolResult","item":{"command":"rg abc"}}}"#,
+            r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"Message","command":"skip"}}"#,
+            r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-2","kind":"ToolCall","command":"ignored"}}"#,
+        ];
+        std::fs::write(
+            &path,
+            log_lines.join("\n"),
+        )
+        .expect("seed log");
+        let lines = super::recent_worker_tool_commands_nolock(0, 2);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, 0);
+        assert_eq!(lines[0].1, "worker-1");
+        assert_eq!(lines[1].0, 2);
+        assert_eq!(lines[1].1, "worker-2");
+        assert!(lines[0].2.contains("rg abc"));
+        assert!(lines[1].2.contains("ignored"));
+        clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn worker_log_predicates_track_worker_field() {
+        let payload = json!({
+            "worker_id": "worker-1"
+        });
+        assert!(super::worker_log_is_for_worker(
+            &json!({"payload": payload}),
+            "worker-1",
+        ));
+        assert!(!super::worker_log_is_for_worker(
+            &json!({"payload": {"worker_id": "worker-2"}}),
+            "worker-1",
+        ));
+        assert!(!super::worker_log_is_for_worker(&json!({}), "worker-1"));
     }
 }

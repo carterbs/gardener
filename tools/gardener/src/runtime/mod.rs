@@ -1090,3 +1090,115 @@ impl ProcessRunner for FakeProcessRunner {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        append_and_flush_lines, flush_trailing_line, Clock, FakeClock, FileSystem, FakeFileSystem,
+        FakeProcessRunner, FakeTerminal, is_copy_shortcut_key, ProcessOutput, ProcessRequest,
+        ProcessRunner,
+        Terminal,
+    };
+    use crate::errors::GardenerError;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn copy_shortcut_key_matches_c_without_case_sensitive() {
+        assert!(is_copy_shortcut_key('c'));
+        assert!(is_copy_shortcut_key('C'));
+        assert!(!is_copy_shortcut_key('x'));
+    }
+
+    #[test]
+    fn line_splitter_flushes_each_complete_line() {
+        let mut lines = Vec::new();
+        let mut buffer = Vec::new();
+        append_and_flush_lines(&mut buffer, b"alpha\nbeta\n", &mut |line| {
+            lines.push(line.to_string())
+        });
+        append_and_flush_lines(
+            &mut buffer,
+            b"gamma\n",
+            &mut |line| lines.push(line.to_string()),
+        );
+        assert_eq!(lines, vec!["alpha", "alpha\nbeta", "gamma"]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn line_splitter_flushes_trailing_partial_line() {
+        let mut lines = Vec::new();
+        let mut buffer = Vec::new();
+        append_and_flush_lines(&mut buffer, b"alpha\nbeta", &mut |line| {
+            lines.push(line.to_string());
+        });
+        flush_trailing_line(&mut buffer, &mut |line| lines.push(line.to_string()));
+        assert_eq!(lines, vec!["alpha", "beta"]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn fake_clock_tracks_sleep_deadlines() {
+        let clock = FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(5));
+        clock
+            .sleep_until(SystemTime::UNIX_EPOCH + Duration::from_secs(15))
+            .expect("sleep");
+        assert_eq!(clock.now(), SystemTime::UNIX_EPOCH + Duration::from_secs(15));
+        assert_eq!(clock.sleeps(), vec![SystemTime::UNIX_EPOCH + Duration::from_secs(15)]);
+    }
+
+    #[test]
+    fn fake_file_system_can_fail_next_operation() {
+        let fs = FakeFileSystem::default();
+        let file = PathBuf::from("/tmp/runtime-fs.txt");
+        fs.write_string(&file, "hello").expect("write");
+        assert_eq!(fs.read_to_string(&file).expect("read"), "hello");
+        assert!(fs.exists(&file));
+
+        fs.set_fail_next(GardenerError::Io("boom".to_string()));
+        let err = fs.read_to_string(&file).expect_err("should fail");
+        assert!(err.to_string().contains("boom"));
+        // subsequent call succeeds again.
+        assert_eq!(fs.read_to_string(&file).expect("read"), "hello");
+    }
+
+    #[test]
+    fn fake_terminal_records_draw_calls() {
+        let terminal = FakeTerminal::new(true);
+        terminal
+            .draw("frame")
+            .expect("draw");
+        terminal
+            .write_line("line")
+            .expect("write");
+        terminal.copy_to_clipboard("payload").expect("clipboard");
+        assert_eq!(terminal.drawn_frames(), vec!["frame".to_string()]);
+        assert_eq!(terminal.written_lines(), vec!["line".to_string()]);
+        assert_eq!(terminal.clipboard_copies(), vec!["payload".to_string()]);
+    }
+
+    #[test]
+    fn fake_process_runner_reports_spawn_wait_kill_paths() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+        }));
+        let handle = runner
+            .spawn(ProcessRequest {
+                program: "echo".to_string(),
+                args: vec!["x".to_string()],
+                cwd: None,
+            })
+            .expect("spawn");
+        assert_eq!(handle, 0);
+        let out = runner.wait(handle).expect("wait");
+        assert_eq!(out.stdout, "ok");
+        runner.kill(42).expect("kill");
+        assert_eq!(runner.spawned().len(), 1);
+        assert_eq!(runner.waits(), vec![0]);
+        assert_eq!(runner.kills(), vec![42]);
+    }
+}

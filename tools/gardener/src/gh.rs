@@ -278,4 +278,74 @@ mod tests {
             Priority::P1
         );
     }
+
+    #[test]
+    fn create_pr_reports_process_error_as_failure() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "creation failed".to_string(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh.create_pr("title", "body").expect_err("must fail");
+        assert!(format!("{err}").contains("gh pr create failed"));
+    }
+
+    #[test]
+    fn view_pr_invalid_json_reports_parse_error() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "invalid".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh.view_pr(5).expect_err("must fail");
+        assert!(format!("{err}").contains("invalid gh pr view json"));
+    }
+
+    #[test]
+    fn verify_merged_requires_pr_merged_state_or_sha() {
+        let runner = FakeProcessRunner::default();
+        // open PR metadata says open, so merge verification should fail before git checks.
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout:
+                "{\"mergedAt\":null,\"mergeCommit\":{\"oid\":\"abc\"},\"headRefName\":\"feat/x\",\"state\":\"OPEN\"}"
+                    .to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let gh = GhClient::new(&runner, "/repo");
+        let git = GitClient::new(&runner, "/repo");
+        let err = gh
+            .verify_merged_and_validated(&git, 123, MergeMode::MergeToMain, "npm run validate")
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("pr is not merged"));
+    }
+
+    #[test]
+    fn verify_merged_fails_when_merge_commit_missing() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout:
+                "{\"mergedAt\":\"2026-01-01\",\"mergeCommit\":null,\"headRefName\":\"feat/x\",\"state\":\"MERGED\"}"
+                    .to_string(),
+            stderr: String::new(),
+        }));
+        // merge commit is missing; this should return an error before running git.
+        let gh = GhClient::new(&runner, "/repo");
+        let git = GitClient::new(&runner, "/repo");
+        let err = gh
+            .verify_merged_and_validated(&git, 123, MergeMode::MergeToMain, "npm run validate")
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("merged pr missing merge commit"));
+    }
 }

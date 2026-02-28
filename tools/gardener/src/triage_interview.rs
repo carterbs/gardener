@@ -145,3 +145,69 @@ pub fn run_interview(
         coverage_grade_override,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::run_interview;
+    use crate::runtime::FakeTerminal;
+    use crate::triage_discovery::DimensionAssessment;
+    use crate::triage_discovery::DiscoveryAssessment;
+
+    fn discovery(grade: &str) -> DiscoveryAssessment {
+        DiscoveryAssessment {
+            agent_steering: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "agent".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            knowledge_accessible: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "knowledge".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            mechanical_guardrails: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "guardrails".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            local_feedback_loop: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "feedback".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            coverage_signal: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "coverage".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            overall_readiness_score: 0,
+            overall_readiness_grade: grade.to_string(),
+            primary_gap: "agent_steering".to_string(),
+            notable_findings: "none".to_string(),
+            scope_notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn non_tty_path_formats_read_only_sections() {
+        let terminal = FakeTerminal::new(false);
+        let result = run_interview(
+            &terminal,
+            &discovery("B"),
+            4,
+            "cargo test --all-targets",
+        )
+        .expect("interview");
+
+        assert_eq!(result.preferred_parallelism, Some(4));
+        assert_eq!(result.validation_command, "cargo test --all-targets");
+        assert_eq!(result.additional_context, String::new());
+        assert_eq!(result.external_docs_accessible, true);
+        assert_eq!(result.agent_steering_correction, "B: agent");
+    }
+}

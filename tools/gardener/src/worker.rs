@@ -26,6 +26,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +62,12 @@ struct ReviewArtifact {
     verdict: String,
     suggestions: Vec<String>,
     recorded_at_unix_ms: i64,
+}
+
+static MERGE_PHASE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn merge_phase_lock() -> &'static Mutex<()> {
+    MERGE_PHASE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
@@ -683,6 +690,28 @@ fn execute_task_live(
         }
     }
 
+    append_run_log(
+        "info",
+        "worker.merging.lock.waiting",
+        json!({
+            "worker_id": identity.worker_id,
+            "task_id": task_id,
+            "branch": branch
+        }),
+    );
+    let _merge_guard = merge_phase_lock().lock().map_err(|_| {
+        GardenerError::Process("worker merging lock poisoned".to_string())
+    })?;
+    append_run_log(
+        "info",
+        "worker.merging.lock.acquired",
+        json!({
+            "worker_id": identity.worker_id,
+            "task_id": task_id,
+            "branch": branch
+        }),
+    );
+
     let merging_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
@@ -717,6 +746,7 @@ fn execute_task_live(
         });
     }
     let mut merge_output = parse_merge_output(&merging_result.payload);
+    let mut merge_recovered_from_git = false;
     if let Err(err) = verify_merge_output(identity.worker_id.as_str(), &merge_output) {
         append_run_log(
             "error",
@@ -753,6 +783,7 @@ fn execute_task_live(
                     merged: true,
                     merge_sha: Some(sha),
                 };
+                merge_recovered_from_git = true;
             }
             _ => {
                 // Merge genuinely did not happen — send to unresolved, not a fatal crash.
@@ -781,14 +812,27 @@ fn execute_task_live(
                 "error": err.to_string()
             }),
         );
-        return Ok(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason: Some(format!("post-merge validation failed: {err}")),
-        });
+        if merge_recovered_from_git {
+            append_run_log(
+                "warn",
+                "worker.merging.post_validation_failed_nonblocking",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "error": err.to_string(),
+                    "reason": "merge already verified by git recovery path"
+                }),
+            );
+        } else {
+            return Ok(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Failed,
+                logs,
+                teardown: None,
+                failure_reason: Some(format!("post-merge validation failed: {err}")),
+            });
+        }
     }
 
     fsm.transition(WorkerState::Complete)?;
@@ -802,6 +846,14 @@ fn execute_task_live(
             "task_id": task_id,
             "merge_verified": teardown.merge_verified,
             "worktree_cleaned": teardown.worktree_cleaned
+        }),
+    );
+    append_run_log(
+        "info",
+        "worker.merging.lock.releasing",
+        json!({
+            "worker_id": identity.worker_id,
+            "task_id": task_id
         }),
     );
 

@@ -53,7 +53,7 @@ use logging::{
     append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
     structured_fallback_line,
 };
-use runtime::{clear_interrupt, ProductionRuntime};
+use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{run_startup_audits, run_startup_audits_with_progress};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
@@ -84,6 +84,8 @@ pub struct Cli {
     pub quality_grades_only: bool,
     #[arg(long)]
     pub validation_command: Option<String>,
+    #[arg(long, default_value_t = false)]
+    pub validate: bool,
     #[arg(long, value_enum)]
     pub agent: Option<CliAgent>,
     #[arg(long, default_value_t = false)]
@@ -159,6 +161,7 @@ pub fn run_with_runtime(
             "cli.parsed",
             json!({
                 "config_override": cli.config.as_ref().map(|p| p.display().to_string()),
+                "validate": cli.validate,
                 "task_override": cli.task,
                 "target": cli.target,
                 "triage_only": cli.triage_only,
@@ -222,6 +225,32 @@ pub fn run_with_runtime(
 
         let validation = resolve_validation_command(&cfg, cli.validation_command.as_deref());
         let startup = StartupSnapshot { scope, validation };
+
+        if cli.validate {
+            append_run_log(
+                "info",
+                "cli.validate.started",
+                json!({ "command": startup.validation.command }),
+            );
+            let out = runtime.process_runner.run(ProcessRequest {
+                program: "sh".to_string(),
+                args: vec!["-lc".to_string(), startup.validation.command.clone()],
+                cwd: Some(startup.scope.working_dir.clone()),
+            })?;
+            append_run_log(
+                "info",
+                "cli.validate.completed",
+                json!({
+                    "command": startup.validation.command,
+                    "exit_code": out.exit_code,
+                }),
+            );
+            if out.exit_code != 0 {
+                return Ok(out.exit_code);
+            }
+            runtime.terminal.write_line("validation command passed")?;
+            return Ok(0);
+        }
 
         if cli.triage_only || cli.retriage {
             let _profile = ensure_profile_for_run(
@@ -329,7 +358,11 @@ pub fn run_with_runtime(
                     false,
                     cli.agent.map(Into::into),
                 )?;
-                apply_profile_runtime_preferences(&mut cfg_for_startup, profile.as_ref());
+                apply_profile_runtime_preferences(
+                    &mut cfg_for_startup,
+                    profile.as_ref(),
+                    cli.parallelism,
+                );
             }
             draw_boot_stage(
                 runtime,
@@ -500,7 +533,11 @@ impl Drop for UiGuard<'_> {
 fn apply_profile_runtime_preferences(
     cfg: &mut config::AppConfig,
     profile: Option<&repo_intelligence::RepoIntelligenceProfile>,
+    cli_parallelism: Option<u32>,
 ) {
+    if cli_parallelism.is_some() {
+        return;
+    }
     let Some(profile) = profile else {
         return;
     };
@@ -526,6 +563,42 @@ fn env_to_map(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> EnvMap {
         }
     }
     map
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{config, repo_intelligence, runtime, triage_discovery};
+    use std::path::Path;
+
+    fn sample_profile(preferred_parallelism: Option<u32>) -> repo_intelligence::RepoIntelligenceProfile {
+        let clock = runtime::FakeClock::default();
+        let mut profile = repo_intelligence::build_profile(
+            &clock,
+            Path::new("/tmp"),
+            Path::new("/tmp"),
+            "deadbeef".to_string(),
+            triage_discovery::DiscoveryAssessment::unknown(),
+            false,
+            None,
+            vec![],
+            vec![],
+            "npm run validate".to_string(),
+            false,
+        );
+        profile.user_validated.preferred_parallelism = preferred_parallelism;
+        profile
+    }
+
+    #[test]
+    fn profile_parallelism_does_not_override_cli_parallelism() {
+        let mut cfg = config::AppConfig::default();
+        cfg.orchestrator.parallelism = 4;
+        let profile = sample_profile(Some(8));
+
+        super::apply_profile_runtime_preferences(&mut cfg, Some(&profile), Some(4));
+
+        assert_eq!(cfg.orchestrator.parallelism, 4);
+    }
 }
 
 fn persist_agent_default(

@@ -195,7 +195,7 @@ fn execute_task_live(
             failure_reason,
         });
     }
-    let understand = parse_understand_output(&understand_result.payload, task_summary);
+    let understand = parse_understand_output(&understand_result.payload, worker_id, task_summary);
     append_run_log(
         "debug",
         "worker.task.classified",
@@ -549,7 +549,14 @@ fn execute_task_simulated(
         fsm.transition(WorkerState::Doing)?;
     }
 
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        &identity.worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let _doing_output: DoingOutput = parse_typed_payload(
@@ -579,7 +586,14 @@ fn execute_task_simulated(
     }
 
     fsm.transition(WorkerState::Gitting)?;
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let gitting_output: GittingOutput = parse_typed_payload(
@@ -591,7 +605,14 @@ fn execute_task_simulated(
     verify_gitting_output(&gitting_output)?;
 
     fsm.transition(WorkerState::Reviewing)?;
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let reviewing_output = ReviewingOutput {
@@ -622,7 +643,14 @@ fn execute_task_simulated(
         fsm.transition(WorkerState::Merging)?;
     }
 
-    let prepared = prepare_prompt(cfg, &registry, &learning_loop, fsm.state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        &registry,
+        &learning_loop,
+        fsm.state,
+        worker_id,
+        task_summary,
+    )?;
     logs.push(prepared.log_event(fsm.state));
 
     let merge_output: MergingOutput = parse_typed_payload(
@@ -697,7 +725,14 @@ fn run_agent_turn(
     state: WorkerState,
     task_summary: &str,
 ) -> Result<TurnResult, GardenerError> {
-    let prepared = prepare_prompt(cfg, registry, learning_loop, state, task_summary)?;
+    let prepared = prepare_prompt(
+        cfg,
+        registry,
+        learning_loop,
+        state,
+        &identity.worker_id,
+        task_summary,
+    )?;
     let backend = effective_agent_for_state(cfg, state).ok_or_else(|| {
         GardenerError::InvalidConfig(format!("no backend configured for {state:?}"))
     })?;
@@ -778,12 +813,14 @@ fn prepare_prompt(
     registry: &PromptRegistry,
     learning_loop: &LearningLoop,
     state: WorkerState,
+    worker_id: &str,
     task_summary: &str,
 ) -> Result<PreparedPrompt, GardenerError> {
     append_run_log(
         "debug",
         "worker.prompt.prepare",
         json!({
+            "worker_id": worker_id,
             "state": state.as_str(),
             "knowledge_entries": learning_loop.entries().len()
         }),
@@ -874,6 +911,7 @@ fn prepare_prompt(
         "debug",
         "worker.prompt.ready",
         json!({
+            "worker_id": worker_id,
             "state": state.as_str(),
             "prompt_version": prompt_version,
             "context_manifest_hash": context_manifest_hash,
@@ -887,7 +925,11 @@ fn prepare_prompt(
     })
 }
 
-fn parse_understand_output(payload: &serde_json::Value, task_summary: &str) -> UnderstandOutput {
+fn parse_understand_output(
+    payload: &serde_json::Value,
+    worker_id: &str,
+    task_summary: &str,
+) -> UnderstandOutput {
     if let Ok(parsed) = serde_json::from_value::<UnderstandOutput>(payload.clone()) {
         return parsed;
     }
@@ -896,6 +938,7 @@ fn parse_understand_output(payload: &serde_json::Value, task_summary: &str) -> U
         "warn",
         "worker.understand.payload_invalid",
         json!({
+            "worker_id": worker_id,
             "task_summary": task_summary,
             "fallback_task_type": format!("{fallback:?}"),
             "payload": payload,
@@ -1028,10 +1071,7 @@ fn review_artifact_path(scope: &RuntimeScope, task_id: &str) -> PathBuf {
     scope
         .working_dir
         .join(".cache/gardener/reviews")
-        .join(format!(
-            "{}.json",
-            sanitize_for_branch(task_id).to_ascii_lowercase()
-        ))
+        .join(format!("{}.json", worktree_slug_for_task(task_id)))
 }
 
 fn verify_gitting_output(output: &GittingOutput) -> Result<(), GardenerError> {
@@ -1079,13 +1119,13 @@ fn teardown_after_completion(
 }
 
 fn worktree_branch_for(worker_id: &str, task_id: &str) -> String {
-    format!("gardener/{worker_id}-{}", sanitize_for_branch(task_id))
+    format!("gardener/{worker_id}-{}", worktree_slug_for_task(task_id))
 }
 
 fn worktree_path_for(repo_root: &Path, worker_id: &str, task_id: &str) -> PathBuf {
     repo_root
         .join(".worktrees")
-        .join(format!("{worker_id}-{}", sanitize_for_branch(task_id)))
+        .join(format!("{worker_id}-{}", worktree_slug_for_task(task_id)))
 }
 
 /// Returns a git-safe slug derived from the task ID.
@@ -1104,6 +1144,26 @@ fn sanitize_for_branch(task_id: &str) -> String {
         .join("-");
     collapsed.chars().take(24).collect()
 }
+
+fn worktree_slug_for_task(task_id: &str) -> String {
+    let base = sanitize_for_branch(task_id);
+    let base = if base.is_empty() { "task".to_string() } else { base };
+    let prefix = base.chars().take(WORKTREE_TASK_SLUG_PREFIX_CHARS).collect::<String>();
+    let suffix = worktree_slug_suffix(task_id);
+    format!("{prefix}-{suffix}")
+}
+
+fn worktree_slug_suffix(task_id: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    for &byte in task_id.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    format!("{:08x}", hash)
+}
+
+const WORKTREE_TASK_SLUG_PREFIX_CHARS: usize = 14;
 
 fn ctx_item(
     section: &str,
@@ -1163,7 +1223,8 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 mod tests {
     use super::{
         execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
-        verify_merge_output, worktree_branch_for, worktree_path_for,
+        verify_merge_output, worktree_branch_for, worktree_path_for, worktree_slug_for_task,
+        worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::fsm::{GittingOutput, MergingOutput};
@@ -1272,7 +1333,10 @@ mod tests {
             !branch.contains(':'),
             "branch name must not contain colon: {branch}"
         );
-        assert_eq!(branch, "gardener/worker-1-manual-tui-GARD-03");
+        assert_eq!(
+            branch,
+            format!("gardener/worker-1-{}", worktree_slug_for_task("manual:tui:GARD-03"))
+        );
 
         let path = worktree_path_for(
             std::path::Path::new("/repo"),
@@ -1287,6 +1351,22 @@ mod tests {
     }
 
     #[test]
+    fn worktree_slug_for_task_is_stable_and_collision_resistant() {
+        let first = worktree_slug_for_task("manual:tui:GARD-01");
+        let second = worktree_slug_for_task("manual:tui:GARD-11");
+        assert_ne!(first, second);
+        let first_suffix = first.rsplitn(2, '-').next().unwrap_or_default();
+        assert_eq!(first_suffix, worktree_slug_suffix("manual:tui:GARD-01"));
+        assert_eq!(first_suffix.len(), 16);
+        assert_eq!(second.rsplitn(2, '-').next().unwrap_or_default(), worktree_slug_suffix("manual:tui:GARD-11"));
+        assert!(
+            first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 16
+        );
+        let branch = worktree_branch_for("worker-1", "manual:tui:GARD-01");
+        assert_eq!(branch.len(), "gardener/worker-1-".len() + first.len());
+    }
+
+    #[test]
     fn review_artifact_path_is_task_scoped_and_git_safe() {
         let scope = RuntimeScope {
             process_cwd: PathBuf::from("/repo"),
@@ -1296,7 +1376,10 @@ mod tests {
         let path = review_artifact_path(&scope, "manual:tui:GARD-01");
         assert_eq!(
             path.display().to_string(),
-            "/repo/.cache/gardener/reviews/manual-tui-gard-01.json"
+            format!(
+                "/repo/.cache/gardener/reviews/{}.json",
+                worktree_slug_for_task("manual:tui:GARD-01")
+            )
         );
     }
 }

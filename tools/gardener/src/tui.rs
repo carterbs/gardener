@@ -992,15 +992,13 @@ fn draw_dashboard_frame(
                     Span::raw("  "),
                     Span::styled("Flow: ", Style::default().fg(Color::Blue)),
                     Span::raw(humanize_breadcrumb(&row.breadcrumb)),
+                    Span::raw("  "),
+                    Span::styled(
+                        detail_hint,
+                        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                    ),
                 ]),
             ];
-            lines.push(Line::from(vec![
-                Span::styled("    ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    detail_hint,
-                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
-                ),
-            ]));
             if row.commands_expanded {
                 lines.extend(
                     row.command_details.iter().map(|entry| {
@@ -1985,7 +1983,7 @@ mod tests {
                 "Interview complete".to_string(),
             ],
             &[],
-            StartupHeadline {
+            super::StartupHeadline {
                 spinner_frame: 0,
                 verb: "Triage".to_string(),
                 startup_active: false,

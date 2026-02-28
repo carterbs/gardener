@@ -2,6 +2,7 @@ use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use serde_json::json;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,20 +63,72 @@ impl<'a> WorktreeClient<'a> {
 
     pub fn create_or_resume(&self, path: &Path, branch: &str) -> Result<(), GardenerError> {
         let existing = self.list()?;
-        if existing
-            .iter()
-            .any(|entry| entry.path == path && entry.branch.as_deref() == Some(branch))
-        {
+        if let Some(existing_entry) = existing.iter().find(|entry| entry.path == path) {
+            if existing_entry.branch.as_deref() == Some(branch) {
+                append_run_log(
+                    "debug",
+                    "worktree.create.resumed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "path": path.display().to_string(),
+                        "branch": branch
+                    }),
+                );
+                return Ok(());
+            }
+
             append_run_log(
-                "debug",
-                "worktree.create.resumed",
+                "error",
+                "worktree.create.path_collision",
                 json!({
                     "cwd": self.cwd.display().to_string(),
                     "path": path.display().to_string(),
-                    "branch": branch
+                    "requested_branch": branch,
+                    "existing_branch": existing_entry.branch,
                 }),
             );
-            return Ok(());
+            return Err(GardenerError::Process(
+                "worktree create failed: path is already used by another worktree".to_string(),
+            ));
+        }
+
+        if path.exists() {
+            if Self::is_empty_directory(path) {
+                if let Err(error) = fs::remove_dir_all(path) {
+                    append_run_log(
+                        "error",
+                        "worktree.create.preexisting_path_remove_failed",
+                        json!({
+                            "cwd": self.cwd.display().to_string(),
+                            "path": path.display().to_string(),
+                            "error": error.to_string()
+                        }),
+                    );
+                    return Err(GardenerError::Process(
+                        "worktree create failed: unable to clear stale path".to_string(),
+                    ));
+                }
+                append_run_log(
+                    "warn",
+                    "worktree.create.preexisting_path_cleaned",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "path": path.display().to_string()
+                    }),
+                );
+            } else {
+                append_run_log(
+                    "error",
+                    "worktree.create.preexisting_path_blocked",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "path": path.display().to_string()
+                    }),
+                );
+                return Err(GardenerError::Process(
+                    "worktree create failed: path exists and is not registered as a git worktree".to_string(),
+                ));
+            }
         }
 
         append_run_log(
@@ -99,6 +152,57 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            let branch_exists = self.branch_exists(branch)?;
+            let branch_collision = branch_exists
+                || out
+                    .stderr
+                    .to_lowercase()
+                    .contains("fatal: a branch named") && out.stderr.to_lowercase().contains("already exists");
+            if branch_collision {
+                append_run_log(
+                    "warn",
+                    "worktree.create.branch_already_exists",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "path": path.display().to_string(),
+                        "branch": branch,
+                        "stderr": out.stderr
+                    }),
+                );
+                let attach = self.runner.run(ProcessRequest {
+                    program: "git".to_string(),
+                    args: vec![
+                        "worktree".to_string(),
+                        "add".to_string(),
+                        path.display().to_string(),
+                        branch.to_string(),
+                    ],
+                    cwd: Some(self.cwd.clone()),
+                })?;
+                if attach.exit_code == 0 {
+                    append_run_log(
+                        "info",
+                        "worktree.created_from_existing_branch",
+                        json!({
+                            "cwd": self.cwd.display().to_string(),
+                            "path": path.display().to_string(),
+                            "branch": branch
+                        }),
+                    );
+                    return Ok(());
+                }
+                append_run_log(
+                    "error",
+                    "worktree.create.from_existing_branch_failed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "path": path.display().to_string(),
+                        "branch": branch,
+                        "exit_code": attach.exit_code,
+                        "stderr": attach.stderr
+                    }),
+                );
+            }
             append_run_log(
                 "error",
                 "worktree.create.failed",
@@ -122,6 +226,40 @@ impl<'a> WorktreeClient<'a> {
             }),
         );
         Ok(())
+    }
+
+    fn is_empty_directory(path: &Path) -> bool {
+        match fs::read_dir(path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => false,
+        }
+    }
+
+    fn branch_exists(&self, branch: &str) -> Result<bool, GardenerError> {
+        if self.reference_exists(&format!("refs/heads/{branch}"))? {
+            return Ok(true);
+        }
+        if self.reference_exists(&format!("refs/remotes/origin/{branch}"))? {
+            return Ok(true);
+        }
+        if self.reference_exists(&format!("refs/remotes/upstream/{branch}"))? {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn reference_exists(&self, reference: &str) -> Result<bool, GardenerError> {
+        let check = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec![
+                "show-ref".to_string(),
+                "--verify".to_string(),
+                "--quiet".to_string(),
+                reference.to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        Ok(check.exit_code == 0)
     }
 
     pub fn remove_recreate_if_stale_empty(
@@ -291,10 +429,12 @@ fn parse_porcelain(text: &str) -> Result<Vec<WorktreeEntry>, GardenerError> {
 }
 
 #[cfg(test)]
-mod tests {
+    mod tests {
     use super::WorktreeClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
+    use std::fs;
     use std::path::Path;
+    use tempfile::tempdir;
 
     #[test]
     fn create_or_resume_is_idempotent() {
@@ -308,6 +448,138 @@ mod tests {
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("idempotent resume");
+        assert_eq!(runner.spawned().len(), 1);
+    }
+
+    #[test]
+    fn create_or_resume_reuses_existing_branch_if_create_fails() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 255,
+            stdout: String::new(),
+            stderr:
+                "fatal: a branch named 'task-1' already exists\n".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "  task-1\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, "/repo")
+            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
+            .expect("reused branch");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 4);
+        assert_eq!(spawned[1].args[0], "worktree");
+        assert_eq!(spawned[1].args[1], "add");
+        assert_eq!(spawned[1].args[3], "-b");
+        assert_eq!(spawned[3].args[0], "worktree");
+        assert_eq!(spawned[3].args[1], "add");
+        assert_eq!(spawned[3].args[3], "task-1");
+    }
+
+    #[test]
+    fn create_or_resume_reuses_existing_branch_when_branch_exists_reference_check_succeeds() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 255,
+            stdout: String::new(),
+            stderr: "fatal: unable to write new index file".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, "/repo")
+            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
+            .expect("reused branch via reference check");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 4);
+        assert_eq!(spawned[1].args[0], "worktree");
+        assert_eq!(spawned[1].args[1], "add");
+        assert_eq!(spawned[1].args[3], "-b");
+        assert_eq!(spawned[2].args[0], "show-ref");
+        assert_eq!(spawned[2].args[1], "--verify");
+        assert_eq!(spawned[2].args[2], "--quiet");
+        assert_eq!(spawned[2].args[3], "refs/heads/task-1");
+        assert_eq!(spawned[3].args[0], "worktree");
+        assert_eq!(spawned[3].args[1], "add");
+        assert_eq!(spawned[3].args[3], "task-1");
+    }
+
+    #[test]
+    fn create_or_resume_cleans_empty_unregistered_path_before_creating() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join(".worktrees/task-1");
+        fs::create_dir_all(&path).expect("create stale path");
+
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, tmp.path())
+            .create_or_resume(&path, "task-1")
+            .expect("recreated after cleaning");
+
+        assert!(!path.exists());
+        assert_eq!(runner.spawned().len(), 2);
+    }
+
+    #[test]
+    fn create_or_resume_fails_on_non_empty_unregistered_path() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join(".worktrees/task-1");
+        fs::create_dir_all(&path).expect("create stale path");
+        fs::write(path.join("leftover.txt"), "leftover").expect("create stale file");
+
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let err = WorktreeClient::new(&runner, tmp.path())
+            .create_or_resume(&path, "task-1")
+            .expect_err("non-empty stale path blocked");
+
+        assert!(
+            err.to_string().contains("not registered as a git worktree"),
+            "unexpected error: {err}"
+        );
         assert_eq!(runner.spawned().len(), 1);
     }
 

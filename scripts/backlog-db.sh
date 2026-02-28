@@ -13,7 +13,7 @@ Usage:
     --priority P0|P1|P2  (default: P1)
     --scope KEY        (default: runtime)
     --status ready|complete|leased|in_progress|failed (default: ready)
-    --kind feature|maintenance|quality_gap (default: feature)
+    --kind feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision (default: feature)
     --source manual    (default: manual)
     --id TASK_ID       Optional custom task_id (default: manual:<scope>:auto-<unix_ms>)
     --db PATH          Optional DB path (default: .cache/gardener/backlog.sqlite)

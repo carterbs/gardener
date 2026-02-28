@@ -344,9 +344,7 @@ pub fn run_worker_pool_fsm(
                                         "final_state": summary.final_state.as_str()
                                     }),
                                 );
-                                if summary.final_state == crate::types::WorkerState::Failed
-                                    && summary.failure_reason.is_none()
-                                {
+                                if summary.final_state == crate::types::WorkerState::Failed {
                                     let unresolved = store.mark_unresolved(&task_id, &worker_id)?;
                                     append_run_log(
                                         "warn",
@@ -355,6 +353,7 @@ pub fn run_worker_pool_fsm(
                                             "worker_id": worker_id,
                                             "task_id": task_id,
                                             "marked_unresolved": unresolved,
+                                            "failure_reason": summary.failure_reason,
                                         }),
                                     );
                                     let unresolved_message = if unresolved {
@@ -366,8 +365,6 @@ pub fn run_worker_pool_fsm(
                                     workers[idx].tool_line = unresolved_message.clone();
                                     workers[idx].breadcrumb = "unresolved".to_string();
                                     append_worker_command(&mut workers[idx], &unresolved_message);
-                                } else if let Some(reason) = summary.failure_reason {
-                                    shutdown_error = Some((worker_id.clone(), task_id.clone(), reason));
                                 } else {
                                     let _ = store.release_lease(&task_id, &worker_id)?;
                                     emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {

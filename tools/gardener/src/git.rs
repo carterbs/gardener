@@ -106,6 +106,16 @@ impl<'a> GitClient<'a> {
         Ok(detached)
     }
 
+    pub fn head_sha(&self) -> Result<Option<String>, GardenerError> {
+        let out = self.run(["git", "rev-parse", "HEAD"])?;
+        if out.exit_code == 0 {
+            let sha = out.stdout.trim().to_string();
+            Ok(if sha.is_empty() { None } else { Some(sha) })
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn verify_ancestor(
         &self,
         maybe_ancestor: &str,

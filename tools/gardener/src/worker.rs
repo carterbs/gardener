@@ -716,7 +716,7 @@ fn execute_task_live(
             failure_reason,
         });
     }
-    let merge_output = parse_merge_output(&merging_result.payload);
+    let mut merge_output = parse_merge_output(&merging_result.payload);
     if let Err(err) = verify_merge_output(identity.worker_id.as_str(), &merge_output) {
         append_run_log(
             "error",
@@ -727,14 +727,45 @@ fn execute_task_live(
                 "error": err.to_string()
             }),
         );
-        return Ok(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason: Some(err.to_string()),
-        });
+        // Git-based recovery: the agent's JSON output is unreliable. Check whether
+        // the branch actually landed on main before giving up.
+        let repo_root_git = GitClient::new(process_runner, repo_root);
+        let branch_merged = repo_root_git
+            .verify_ancestor(&branch, "main")
+            .unwrap_or(false);
+        let recovered_sha = if branch_merged {
+            repo_root_git.head_sha().unwrap_or(None)
+        } else {
+            None
+        };
+        match recovered_sha {
+            Some(sha) if !sha.is_empty() => {
+                append_run_log(
+                    "warn",
+                    "worker.merging.output.recovered_from_git",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "task_id": task_id,
+                        "sha": sha,
+                    }),
+                );
+                merge_output = MergingOutput {
+                    merged: true,
+                    merge_sha: Some(sha),
+                };
+            }
+            _ => {
+                // Merge genuinely did not happen — send to unresolved, not a fatal crash.
+                return Ok(WorkerRunSummary {
+                    worker_id: identity.worker_id,
+                    session_id: identity.session.session_id,
+                    final_state: WorkerState::Failed,
+                    logs,
+                    teardown: None,
+                    failure_reason: None,
+                });
+            }
+        }
     }
 
     // Post-merge validation: run the project validation command from the repo

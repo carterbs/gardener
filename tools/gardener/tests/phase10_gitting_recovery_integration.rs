@@ -152,9 +152,21 @@ fn commit_only_gitting_recovery_recovers_when_second_status_is_clean() {
         r#"{"verdict":"approve","suggestions":[]}"#,
     )));
     runner.push_response(Ok(git_status_output("")));
+    // pre-merge rebase: git rebase main
+    runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
     runner.push_response(Ok(turn_completed_output(
         r#"{"merged":true,"merge_sha":"beadbeef"}"#,
     )));
+    // post-merge validation: sh -lc <validation_command>
+    runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
     runner.push_response(Ok(ProcessOutput {
         exit_code: 0,
         stdout: String::new(),

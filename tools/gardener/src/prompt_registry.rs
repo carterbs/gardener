@@ -272,22 +272,26 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 
 fn merging_template_local() -> PromptTemplate {
     PromptTemplate {
-        version: "v1-merging-local",
+        version: "v2-merging-local",
         body: r#"Intent: merge the current worktree branch into main on the local repo and report the resulting merge commit SHA.
 
 ## Steps
 
 1. Confirm the current branch and worktree state with git status.
 2. From the repo root (not the worktree), run: git merge --no-ff <current-branch>
-3. If merge conflicts occur, resolve them carefully — keep behavior from both sides where appropriate.
+3. If merge conflicts occur, resolve them carefully:
+   - Read clippy-lints.toml at the repo root for the canonical lint configuration.
+   - Keep behavior from both sides where appropriate — do not silently drop changes.
+   - After resolving, run: ./scripts/run-validate.sh to verify the resolution is correct.
+   - If validation fails, fix the conflict resolution and re-run validation before continuing.
 4. Capture the resulting commit SHA with: git rev-parse HEAD
 5. Verify the merge completed cleanly with git status.
 
 ## On failure
 
-If the merge cannot complete (unresolvable conflicts, dirty worktree, etc.), set merged=false, merge_sha="" and explain the failure in the summary.
+If the merge cannot complete (unresolvable conflicts, dirty worktree, validation fails after resolution, etc.), set merged=false, merge_sha="" and explain the failure in the summary.
 
-Guardrails: do not push; do not open a pull request; do not modify source files; include the deterministic merge_sha when merged=true.
+Guardrails: do not push; do not open a pull request; do not modify source files beyond conflict resolution; include the deterministic merge_sha when merged=true.
 Output schema must be JSON envelope with payload fields: merged, merge_sha.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }

@@ -264,6 +264,43 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn rebase_onto_local(&self, base: &str) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "git.rebase_local.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base": base
+            }),
+        );
+        let rebase = self.run(["git", "rebase", base])?;
+        if rebase.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "git.rebase_local.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "base": base,
+                    "stderr": rebase.stderr
+                }),
+            );
+            let _ = self.run(["git", "rebase", "--abort"]);
+            return Err(GardenerError::Process(format!(
+                "rebase onto {base} failed: {}",
+                rebase.stderr
+            )));
+        }
+        append_run_log(
+            "info",
+            "git.rebase_local.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base": base
+            }),
+        );
+        Ok(())
+    }
+
     pub fn run_validation_command(&self, command: &str) -> Result<(), GardenerError> {
         append_run_log(
             "info",

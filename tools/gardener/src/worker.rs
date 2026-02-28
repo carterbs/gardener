@@ -509,6 +509,30 @@ fn execute_task_live(
         });
     }
 
+    // Pre-merge rebase: bring the worktree branch up to date with main so the
+    // subsequent merge is clean (or at worst fast-forward).  If the rebase has
+    // conflicts we abort and fail — the retry path already handles rebase via
+    // the doing_template_retry_rebase prompt.
+    if let Err(err) = git.rebase_onto_local("main") {
+        append_run_log(
+            "error",
+            "worker.merging.pre_rebase_failed",
+            json!({
+                "worker_id": identity.worker_id,
+                "task_id": task_id,
+                "error": err.to_string()
+            }),
+        );
+        return Ok(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Failed,
+            logs,
+            teardown: None,
+            failure_reason: Some(format!("pre-merge rebase failed: {err}")),
+        });
+    }
+
     let merging_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
@@ -560,6 +584,29 @@ fn execute_task_live(
             logs,
             teardown: None,
             failure_reason: Some(err.to_string()),
+        });
+    }
+
+    // Post-merge validation: run the project validation command from the repo
+    // root to catch regressions introduced by conflict resolution.
+    let repo_root_git = GitClient::new(process_runner, &scope.working_dir);
+    if let Err(err) = repo_root_git.run_validation_command(&cfg.validation.command) {
+        append_run_log(
+            "error",
+            "worker.merging.post_validation_failed",
+            json!({
+                "worker_id": identity.worker_id,
+                "task_id": task_id,
+                "error": err.to_string()
+            }),
+        );
+        return Ok(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Failed,
+            logs,
+            teardown: None,
+            failure_reason: Some(format!("post-merge validation failed: {err}")),
         });
     }
 

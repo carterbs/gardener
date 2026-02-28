@@ -1,16 +1,16 @@
 //! Replay infrastructure: load a recording and re-drive the FSM deterministically.
-//!
-//! Populated in Phase 4 of the session-replay implementation plan.
 
+use crate::agent::AgentAdapter;
+use crate::config::AppConfig;
 use crate::errors::GardenerError;
+use crate::protocol::{AgentTerminal, StepResult};
 use crate::replay::recording::{
     AgentTurnRecord, BacklogMutationRecord, BacklogTaskRecord, ProcessCallRecord,
     RecordEntry, SessionStartRecord,
 };
 use crate::runtime::{ProcessOutput, ProcessRequest, ProcessRunner};
-use crate::agent::AgentAdapter;
-use crate::protocol::{StepResult, AgentTerminal};
-use crate::types::AgentKind;
+use crate::types::{AgentKind, RuntimeScope};
+use crate::worker::execute_task;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Mutex;
@@ -300,4 +300,83 @@ pub struct ReplayOutcome {
 pub struct SessionReplayReport {
     pub outcomes: Vec<ReplayOutcome>,
     pub all_passed: bool,
+}
+
+// ── replay_worker_task ────────────────────────────────────────────────────────
+
+/// Replay a single worker's task execution from a recording.
+///
+/// Uses `ReplayProcessRunner` pre-seeded with the worker's recorded subprocess
+/// responses.  The real agent adapter (Claude/Codex) re-parses those responses
+/// so the FSM drives through the same state machine as the original run.
+pub fn replay_worker_task(
+    recording: &SessionRecording,
+    worker_id: &str,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> Result<ReplayOutcome, GardenerError> {
+    // Find the task that was claimed by this worker
+    let claim = recording
+        .backlog_mutations()
+        .into_iter()
+        .find(|m| m.worker_id == worker_id && m.operation == "claim_next")
+        .ok_or_else(|| {
+            GardenerError::Process(format!(
+                "replay: no claim_next mutation found for worker {worker_id}"
+            ))
+        })?;
+    let task = recording
+        .backlog
+        .iter()
+        .find(|t| t.task_id == claim.task_id)
+        .ok_or_else(|| {
+            GardenerError::Process(format!(
+                "replay: task {} not found in backlog snapshot",
+                claim.task_id
+            ))
+        })?;
+
+    let runner = ReplayProcessRunner::from_recording(recording, worker_id);
+    let summary = execute_task(
+        cfg,
+        &runner,
+        scope,
+        worker_id,
+        &task.task_id,
+        &task.title,
+        task.attempt_count,
+    )?;
+
+    let mismatches = runner.verify_request_alignment();
+    let passed = mismatches.is_empty();
+    Ok(ReplayOutcome {
+        worker_id: worker_id.to_string(),
+        final_state: summary.final_state,
+        request_mismatches: mismatches,
+        passed,
+    })
+}
+
+// ── replay_session ────────────────────────────────────────────────────────────
+
+/// Replay a full recorded session, one worker at a time (serial, not parallel).
+///
+/// Returns a `SessionReplayReport` with per-worker pass/fail and an overall result.
+/// Serial replay catches FSM logic regressions regardless of concurrency ordering.
+pub fn replay_session(
+    recording: &SessionRecording,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> Result<SessionReplayReport, GardenerError> {
+    let worker_ids = recording.worker_ids();
+    let mut outcomes = Vec::with_capacity(worker_ids.len());
+    for worker_id in &worker_ids {
+        let outcome = replay_worker_task(recording, worker_id, cfg, scope)?;
+        outcomes.push(outcome);
+    }
+    let all_passed = outcomes.iter().all(|o| o.passed);
+    Ok(SessionReplayReport {
+        outcomes,
+        all_passed,
+    })
 }

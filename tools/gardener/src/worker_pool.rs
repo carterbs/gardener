@@ -1144,6 +1144,14 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_quit_does_not_copy_without_target() {
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys([INTERRUPT_SENTINEL_KEY]);
+        wait_for_quit(&terminal, None).expect("wait should complete even without copy target");
+        assert!(terminal.clipboard_copies().is_empty());
+    }
+
+    #[test]
     fn wait_for_quit_copies_error_on_copy_shortcut() {
         let terminal = FakeTerminal::new(true);
         terminal.enqueue_keys(['c']);

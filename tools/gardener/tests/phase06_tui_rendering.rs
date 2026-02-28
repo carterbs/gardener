@@ -131,7 +131,7 @@ fn dashboard_keeps_three_workers_visible_with_backlog() {
 }
 
 #[test]
-fn dashboard_problems_panel_on_zombie_worker() {
+fn dashboard_skips_human_problems_panel() {
     let zombie = WorkerRow {
         worker_id: "w-zombie".to_string(),
         state: "doing".to_string(),
@@ -146,8 +146,8 @@ fn dashboard_problems_panel_on_zombie_worker() {
     };
     let frame = render_dashboard(&[zombie], &zero_stats(), &empty_backlog(), 120, 30);
     assert!(
-        frame.contains("Problem") || frame.contains("Human") || frame.contains("zombie"),
-        "frame should show problem indicator for zombie worker"
+        !frame.contains("Problems Requiring Human") && !frame.contains("needs intervention"),
+        "legacy zombie problem panel was removed from dashboard"
     );
 }
 

@@ -17,7 +17,10 @@ use crate::tui::{
     reset_workers_scroll, scroll_workers_down, scroll_workers_up,
     BacklogView, QueueStats, WorkerRow,
 };
-use crate::replay::recorder::set_recording_worker_id;
+use crate::replay::recorder::{
+    emit_record, next_seq, set_recording_worker_id, timestamp_ns,
+};
+use crate::replay::recording::{BacklogMutationRecord, RecordEntry};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 use serde_json::json;
@@ -138,7 +141,23 @@ pub fn run_worker_pool_fsm(
                     "title": task.title
                 }),
             );
+            emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                seq: next_seq(),
+                timestamp_ns: timestamp_ns(),
+                worker_id: worker_id.clone(),
+                operation: "claim_next".to_string(),
+                task_id: task.task_id.clone(),
+                result_ok: true,
+            }));
             let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
+            emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                seq: next_seq(),
+                timestamp_ns: timestamp_ns(),
+                worker_id: worker_id.clone(),
+                operation: "mark_in_progress".to_string(),
+                task_id: task.task_id.clone(),
+                result_ok: true,
+            }));
 
             workers[idx].state = "doing".to_string();
             workers[idx].task_title = task.title.clone();
@@ -266,6 +285,14 @@ pub fn run_worker_pool_fsm(
 
                             if summary.final_state == crate::types::WorkerState::Complete {
                                 let _ = store.mark_complete(&task_id, &worker_id)?;
+                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                                    seq: next_seq(),
+                                    timestamp_ns: timestamp_ns(),
+                                    worker_id: worker_id.clone(),
+                                    operation: "mark_complete".to_string(),
+                                    task_id: task_id.clone(),
+                                    result_ok: true,
+                                }));
                                 completed = completed.saturating_add(1);
                                 workers[idx].state = "complete".to_string();
                                 let completed_message = format!("completed {}", task_id);
@@ -340,6 +367,14 @@ pub fn run_worker_pool_fsm(
                                     shutdown_error = Some((worker_id.clone(), task_id.clone(), reason));
                                 } else {
                                     let _ = store.release_lease(&task_id, &worker_id)?;
+                                    emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                                        seq: next_seq(),
+                                        timestamp_ns: timestamp_ns(),
+                                        worker_id: worker_id.clone(),
+                                        operation: "release_lease".to_string(),
+                                        task_id: task_id.clone(),
+                                        result_ok: true,
+                                    }));
                                 }
                             }
                         } else {

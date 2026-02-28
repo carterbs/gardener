@@ -56,6 +56,8 @@ use logging::{
     append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
     structured_fallback_line,
 };
+use replay::recorder::emit_record;
+use replay::recording::{BacklogSnapshotRecord, BacklogTaskRecord, RecordEntry};
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
@@ -418,6 +420,13 @@ pub fn run_with_runtime(
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
             let startup_backlog = store.list_tasks()?;
+            emit_record(RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
+                tasks: startup_backlog
+                    .iter()
+                    .cloned()
+                    .map(BacklogTaskRecord::from)
+                    .collect(),
+            }));
             let startup_backlog_tasks = startup_backlog
                 .into_iter()
                 .map(|task| {

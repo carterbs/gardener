@@ -500,6 +500,28 @@ impl BacklogStore {
         })
     }
 
+    pub fn count_tasks_by_priority(&self) -> StoreResult<(usize, usize, usize)> {
+        self.read_pool.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT
+                        COALESCE(SUM(CASE WHEN priority = 'P0' THEN 1 ELSE 0 END), 0) AS p0,
+                        COALESCE(SUM(CASE WHEN priority = 'P1' THEN 1 ELSE 0 END), 0) AS p1,
+                        COALESCE(SUM(CASE WHEN priority = 'P2' THEN 1 ELSE 0 END), 0) AS p2
+                     FROM backlog_tasks"
+                )
+                .map_err(db_err)?;
+            statement
+                .query_row([], |row| {
+                    let p0: i64 = row.get(0)?;
+                    let p1: i64 = row.get(1)?;
+                    let p2: i64 = row.get(2)?;
+                    Ok((p0 as usize, p1 as usize, p2 as usize))
+                })
+                .map_err(db_err)
+        })
+    }
+
     pub fn get_task(&self, task_id: &str) -> StoreResult<Option<BacklogTask>> {
         self.read_pool.with_conn(|conn| fetch_task(conn, task_id))
     }

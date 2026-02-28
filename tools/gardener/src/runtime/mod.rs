@@ -13,6 +13,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
+const RESIZE_SENTINEL_KEY: char = '\0';
+const DEFAULT_TERMINAL_WIDTH: u16 = 120;
+const DEFAULT_TERMINAL_HEIGHT: u16 = 30;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRequest {
     pub program: String,
@@ -70,6 +74,9 @@ pub trait Terminal: Send + Sync {
     fn stdin_is_tty(&self) -> bool;
     fn write_line(&self, line: &str) -> Result<(), GardenerError>;
     fn draw(&self, frame: &str) -> Result<(), GardenerError>;
+    fn draw_dimensions(&self) -> (u16, u16) {
+        crossterm::terminal::size().unwrap_or((DEFAULT_TERMINAL_WIDTH, DEFAULT_TERMINAL_HEIGHT))
+    }
     fn draw_dashboard(
         &self,
         workers: &[WorkerRow],
@@ -86,16 +93,19 @@ pub trait Terminal: Send + Sync {
         heartbeat_interval_seconds: u64,
         lease_timeout_seconds: u64,
     ) -> Result<(), GardenerError> {
-        let frame = render_dashboard(workers, stats, backlog, 120, 30);
+        let (width, height) = self.draw_dimensions();
+        let frame = render_dashboard(workers, stats, backlog, width, height);
         let _ = (heartbeat_interval_seconds, lease_timeout_seconds);
         self.draw(&frame)
     }
     fn draw_report(&self, report_path: &str, report: &str) -> Result<(), GardenerError> {
-        let frame = crate::tui::render_report_view(report_path, report, 120, 30);
+        let (width, height) = self.draw_dimensions();
+        let frame = crate::tui::render_report_view(report_path, report, width, height);
         self.draw(&frame)
     }
     fn draw_triage(&self, activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
-        let frame = render_triage(activity, artifacts, 120, 30);
+        let (width, height) = self.draw_dimensions();
+        let frame = render_triage(activity, artifacts, width, height);
         self.draw(&frame)
     }
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
@@ -162,23 +172,26 @@ fn start_key_listener_if_needed() {
             let Ok(event) = crossterm::event::read() else {
                 continue;
             };
-            let crossterm::event::Event::Key(key) = event else {
-                continue;
-            };
-            match key.code {
-                crossterm::event::KeyCode::Char('c')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    enqueue_key('q');
-                    request_interrupt();
-                }
-                crossterm::event::KeyCode::Char(c) => {
-                    enqueue_key(c);
-                    if c == 'q' {
+            match event {
+                crossterm::event::Event::Key(key) => match key.code {
+                    crossterm::event::KeyCode::Char('c')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        enqueue_key('q');
                         request_interrupt();
                     }
+                    crossterm::event::KeyCode::Char(c) => {
+                        enqueue_key(c);
+                        if c == 'q' {
+                            request_interrupt();
+                        }
+                    }
+                    _ => {}
+                },
+                crossterm::event::Event::Resize(_, _) => {
+                    enqueue_key(RESIZE_SENTINEL_KEY);
                 }
                 _ => {}
             }
@@ -687,6 +700,7 @@ impl Terminal for ProductionTerminal {
                 crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
             },
+            crossterm::event::Event::Resize(_, _) => Ok(Some(RESIZE_SENTINEL_KEY)),
             _ => Ok(None),
         }
     }
@@ -895,7 +909,8 @@ impl Terminal for FakeTerminal {
         stats: &QueueStats,
         backlog: &BacklogView,
     ) -> Result<(), GardenerError> {
-        let frame = render_dashboard(workers, stats, backlog, 120, 30);
+        let (width, height) = self.draw_dimensions();
+        let frame = render_dashboard(workers, stats, backlog, width, height);
         self.draw(&frame)?;
         let mut count = self.dashboard_draws.lock().expect("dashboard draw lock");
         *count = count.saturating_add(1);
@@ -907,7 +922,8 @@ impl Terminal for FakeTerminal {
             .lock()
             .expect("report draw lock")
             .push((report_path.to_string(), report.to_string()));
-        let frame = crate::tui::render_report_view(report_path, report, 120, 30);
+        let (width, height) = self.draw_dimensions();
+        let frame = crate::tui::render_report_view(report_path, report, width, height);
         self.draw(&frame)
     }
 

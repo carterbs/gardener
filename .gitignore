@@ -1,5 +1,5 @@
-target/
 .cache/
+!.cache/gardener/backlog.sqlite
 .DS_STORE
 .worktrees/
 docs/quality-grades.md

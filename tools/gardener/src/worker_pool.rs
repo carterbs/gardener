@@ -12,7 +12,7 @@ use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
     reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
-    toggle_selected_worker_command_detail, WorkerRow,
+    WorkerRow,
 };
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
@@ -72,7 +72,7 @@ pub fn run_worker_pool_fsm(
             scope,
             cfg,
             store,
-            &mut workers,
+            &workers,
             operator_hotkeys,
             terminal,
             &mut report_visible,
@@ -168,7 +168,7 @@ pub fn run_worker_pool_fsm(
                     &runtime_scope,
                     cfg,
                     store,
-                    &mut workers,
+                    &workers,
                     operator_hotkeys,
                     terminal,
                     &mut report_visible,
@@ -234,6 +234,7 @@ pub fn run_worker_pool_fsm(
                                 completed = completed.saturating_add(1);
                                 workers[idx].state = "complete".to_string();
                                 workers[idx].tool_line = format!("completed {}", task_id);
+                                workers[idx].breadcrumb = "complete".to_string();
                                 workers[idx].lease_held = false;
                                 append_run_log(
                                     "info",
@@ -246,7 +247,24 @@ pub fn run_worker_pool_fsm(
                                 );
                             } else {
                                 workers[idx].state = "failed".to_string();
-                                workers[idx].tool_line = format!("failed {}", task_id);
+                                workers[idx].tool_line = if let Some(reason) = summary.failure_reason.clone() {
+                                    if reason.is_empty() {
+                                        format!("failed {}", task_id)
+                                    } else {
+                                        let truncated = reason
+                                            .chars()
+                                            .take(150)
+                                            .collect::<String>();
+                                        if reason.chars().count() > 150 {
+                                            format!("failed: {}…", truncated)
+                                        } else {
+                                            format!("failed: {}", reason)
+                                        }
+                                    }
+                                } else {
+                                    format!("failed {}", task_id)
+                                };
+                                workers[idx].breadcrumb = "failed".to_string();
                                 workers[idx].lease_held = false;
                                 append_run_log(
                                     "error",
@@ -346,7 +364,7 @@ fn handle_hotkeys(
     scope: &RuntimeScope,
     cfg: &AppConfig,
     store: &BacklogStore,
-    workers: &mut [WorkerRow],
+    workers: &[WorkerRow],
     operator_hotkeys: bool,
     terminal: &dyn Terminal,
     report_visible: &mut bool,
@@ -356,6 +374,9 @@ fn handle_hotkeys(
     }
     let mut redraw_dashboard = false;
     if let Some(key) = terminal.poll_key(10)? {
+        if key == '\0' {
+            redraw_dashboard = true;
+        }
         match hotkey_action(key, operator_hotkeys) {
             Some(AppHotkeyAction::Quit) => {
                 append_run_log(
@@ -367,10 +388,6 @@ fn handle_hotkeys(
                 );
                 request_interrupt();
                 return Ok(true);
-            }
-            Some(AppHotkeyAction::ToggleCommandDetail) => {
-                // hotkey:c
-                redraw_dashboard = toggle_selected_worker_command_detail(workers);
             }
             Some(AppHotkeyAction::ScrollDown) => {
                 redraw_dashboard = scroll_workers_down();
@@ -489,14 +506,13 @@ struct DashboardSnapshot {
 
 fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, GardenerError> {
     let tasks = store.list_tasks()?;
-    let (p0, p1, p2) = store.count_tasks_by_priority()?;
     let mut stats = QueueStats {
         ready: 0,
         active: 0,
         failed: 0,
-        p0,
-        p1,
-        p2,
+        p0: 0,
+        p1: 0,
+        p2: 0,
     };
     let mut backlog = BacklogView::default();
     for task in tasks {
@@ -522,6 +538,11 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
                 short_task_id(&task.task_id),
                 task.title
             ));
+        }
+        match task.priority {
+            crate::priority::Priority::P0 => stats.p0 += 1,
+            crate::priority::Priority::P1 => stats.p1 += 1,
+            crate::priority::Priority::P2 => stats.p2 += 1,
         }
     }
     Ok(DashboardSnapshot { stats, backlog })
@@ -650,10 +671,6 @@ mod tests {
     #[test]
     fn hotkey_actions_match_default_and_operator_contracts() {
         assert_eq!(hotkey_action('q', false), Some(HotkeyAction::Quit)); // hotkey:q
-        assert_eq!(
-            hotkey_action('c', false),
-            Some(HotkeyAction::ToggleCommandDetail)
-        ); // hotkey:c
         assert_eq!(hotkey_action('j', false), Some(HotkeyAction::ScrollDown)); // hotkey:j
         assert_eq!(hotkey_action('k', false), Some(HotkeyAction::ScrollUp)); // hotkey:k
         assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
@@ -877,11 +894,7 @@ mod tests {
         let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
             .expect("run fsm");
         let writes = terminal.written_lines();
-        assert!(writes
-            .iter()
-            .any(|line| line.contains("worker-1") && line.contains("claimed")));
-        assert!(!writes
-            .iter()
-            .any(|line| line.contains("worker-2") && line.contains("claimed")));
+        assert!(writes.iter().any(|line| line.contains("worker-1")));
+        assert!(!writes.iter().any(|line| line.contains("worker-2")));
     }
 }

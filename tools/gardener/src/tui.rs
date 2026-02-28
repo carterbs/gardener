@@ -147,6 +147,8 @@ impl StartupHeadline {
 pub enum WorkerState {
     Doing,
     Reviewing,
+    Complete,
+    Failed,
     Idle,
 }
 
@@ -154,7 +156,9 @@ impl WorkerState {
     fn from_str(state: &str) -> Self {
         match state {
             "reviewing" => Self::Reviewing,
-            "idle" | "complete" | "failed" => Self::Idle,
+            "complete" => Self::Complete,
+            "failed" => Self::Failed,
+            "idle" => Self::Idle,
             _ => Self::Doing,
         }
     }
@@ -397,6 +401,8 @@ struct WorkerMetrics {
     doing: usize,
     reviewing: usize,
     idle: usize,
+    complete: usize,
+    failed: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -419,12 +425,18 @@ impl WorkerMetrics {
             doing: 0,
             reviewing: 0,
             idle: 0,
+            complete: 0,
+            failed: 0,
         };
         for worker in workers {
             if worker.state.eq_ignore_ascii_case("reviewing") {
                 metrics.reviewing += 1;
-            } else if matches!(worker.state.as_str(), "idle" | "complete" | "failed") {
+            } else if worker.state.eq_ignore_ascii_case("idle") {
                 metrics.idle += 1;
+            } else if worker.state.eq_ignore_ascii_case("complete") {
+                metrics.complete += 1;
+            } else if worker.state.eq_ignore_ascii_case("failed") {
+                metrics.failed += 1;
             } else {
                 metrics.doing += 1;
             }
@@ -438,12 +450,16 @@ impl WorkerMetrics {
             doing: 0,
             reviewing: 0,
             idle: 0,
+            complete: 0,
+            failed: 0,
         };
         for worker in workers {
             match worker.state_bucket {
                 WorkerState::Doing => metrics.doing += 1,
                 WorkerState::Reviewing => metrics.reviewing += 1,
                 WorkerState::Idle => metrics.idle += 1,
+                WorkerState::Complete => metrics.complete += 1,
+                WorkerState::Failed => metrics.failed += 1,
             }
         }
         metrics
@@ -749,11 +765,14 @@ fn draw_dashboard_frame(
     lease_timeout_seconds: u64,
     startup_headline: StartupHeadlineView,
 ) {
-    let app_state = AppState::from_dashboard_feed(
+    let mut app_state = AppState::from_dashboard_feed(
         workers,
         backlog,
         StartupHeadline::from_view(startup_headline),
     );
+    let viewport = frame.area();
+    app_state.terminal_width = viewport.width;
+    app_state.terminal_height = viewport.height;
     let human_problems = workers
         .iter()
         .filter_map(|row| {
@@ -787,7 +806,12 @@ fn draw_dashboard_frame(
     let body_height = chunks[1].height;
     let now_rows: u16 = 7;
     let remaining = body_height.saturating_sub(now_rows);
-    let backlog_rows = if remaining > 8 { remaining - 8 } else { 1 };
+    let backlog_reserve = if app_state.terminal_width >= 120 { 6 } else { 8 };
+    let backlog_rows = if remaining > backlog_reserve {
+        remaining - backlog_reserve
+    } else {
+        1
+    };
     let workers_rows = remaining.saturating_sub(backlog_rows).max(1);
     let body = Layout::default()
         .direction(Direction::Vertical)
@@ -889,7 +913,17 @@ fn draw_dashboard_frame(
                     format!("{} ", metrics.idle),
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("idle", Style::default().fg(Color::Gray)),
+                Span::styled("idle  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{} ", metrics.complete),
+                    Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("complete  ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{} ", metrics.failed),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("failed", Style::default().fg(Color::Gray)),
             ]),
         ])
         .block(
@@ -988,10 +1022,13 @@ fn draw_dashboard_frame(
                     Span::styled(format!("{:<13}", humanize_state(&row.state)), state_style),
                     Span::raw("  "),
                     Span::styled("Action: ", Style::default().fg(Color::Blue)),
-                    Span::raw(format!("{:<22}", humanize_action(&row.tool_line))),
+                    Span::raw(format!(
+                        "{:<22}",
+                        truncate_right(&humanize_action(&row.tool_line), 22)
+                    )),
                     Span::raw("  "),
                     Span::styled("Flow: ", Style::default().fg(Color::Blue)),
-                    Span::raw(humanize_breadcrumb(&row.breadcrumb)),
+                    Span::raw(worker_flow_summary(&row.state, &row.tool_line, &row.breadcrumb)),
                     Span::raw("  "),
                     Span::styled(
                         detail_hint,
@@ -1124,7 +1161,7 @@ fn draw_dashboard_frame(
 }
 
 fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifacts: &[String]) {
-    let app_state = AppState::from_triage_feed(
+    let mut app_state = AppState::from_triage_feed(
         activity,
         artifacts,
         StartupHeadline {
@@ -1134,6 +1171,9 @@ fn draw_triage_frame(frame: &mut ratatui::Frame<'_>, activity: &[String], artifa
             ellipsis_phase: 0,
         },
     );
+    let viewport = frame.area();
+    app_state.terminal_width = viewport.width;
+    app_state.terminal_height = viewport.height;
     draw_triage_frame_from_state(frame, &app_state);
 }
 
@@ -1146,9 +1186,18 @@ fn draw_triage_frame_from_state(frame: &mut ratatui::Frame<'_>, state: &AppState
             Constraint::Length(2),
         ])
         .split(frame.area());
+    let triage_narrow = state.terminal_width < 80;
     let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .direction(if triage_narrow {
+            Direction::Vertical
+        } else {
+            Direction::Horizontal
+        })
+        .constraints(if triage_narrow {
+            [Constraint::Min(1), Constraint::Min(1)]
+        } else {
+            [Constraint::Percentage(62), Constraint::Percentage(38)]
+        })
         .split(chunks[1]);
 
     let summary = Paragraph::new(Line::from(vec![
@@ -1397,8 +1446,13 @@ pub fn draw_dashboard_live(
 }
 
 pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
-    let lines = report.lines().take(22).collect::<Vec<_>>().join("\n");
     with_live_terminal(|terminal| {
+        let available_lines = terminal
+            .size()
+            .map_err(|e| GardenerError::Io(e.to_string()))?
+            .height
+            .saturating_sub(8) as usize;
+        let lines = report.lines().take(available_lines).collect::<Vec<_>>().join("\n");
         terminal
             .draw(|frame| draw_report_frame(frame, path, &lines))
             .map(|_| ())
@@ -1575,17 +1629,116 @@ fn humanize_state(state: &str) -> String {
 }
 
 fn humanize_action(action: &str) -> String {
+    if action.eq_ignore_ascii_case("waiting for claim") {
+        return "Waiting for work".to_string();
+    }
+    if action.eq_ignore_ascii_case("claimed") {
+        return "Task claimed".to_string();
+    }
     if action.eq_ignore_ascii_case("orchestrator") {
         return "Coordinator".to_string();
+    }
+    if let Some(rest) = action.strip_prefix("failed: ") {
+        let rest = if rest.is_empty() {
+            "unknown issue".to_string()
+        } else {
+            rest.to_string()
+        };
+        return format!("Failed: {}", truncate_right(&rest, 12));
+    }
+    if action.starts_with("failed ") || action.starts_with("completed ") || action.starts_with("completed:") {
+        return if action.starts_with("failed ") || action.starts_with("failed") {
+            "Task failed".to_string()
+        } else {
+            "Task complete".to_string()
+        };
+    }
+    if let Some(prompt) = action.strip_prefix("prompt ") {
+        return format!("Prompt {}", prompt);
     }
     title_case_words(action)
 }
 
+fn worker_flow_summary(state: &str, tool_line: &str, breadcrumb: &str) -> String {
+    if state == "failed" {
+        if let Some(reason) = tool_line.strip_prefix("failed: ") {
+            let details = if reason.is_empty() {
+                "unknown issue".to_string()
+            } else {
+                truncate_right(reason, 52)
+            };
+            return format!("Task failed ({})", details);
+        }
+        if let Some(task) = tool_line.strip_prefix("failed ") {
+            return format!("Task failed on {}", task);
+        }
+        return "Task failed".to_string();
+    }
+
+    if state == "complete" {
+        return "Task complete".to_string();
+    }
+
+    if state == "reviewing" {
+        return "Reviewing patch and results".to_string();
+    }
+
+    if state == "merging" {
+        if let Some(prompt) = tool_line.strip_prefix("prompt ") {
+            return format!("Merging changes (prompt {})", prompt);
+        }
+        return "Merging changes".to_string();
+    }
+
+    let base = if breadcrumb.is_empty() {
+        humanize_state(state)
+    } else {
+        humanize_breadcrumb(breadcrumb)
+    };
+    if base.is_empty() {
+        humanize_state(state)
+    } else if let Some(prompt) = tool_line.strip_prefix("prompt ") {
+        format!("{base} (prompt {prompt})")
+    } else if base.len() > 56 {
+        truncate_right(&base, 56)
+    } else {
+        base
+    }
+}
+
 fn humanize_breadcrumb(path: &str) -> String {
-    path.split('>')
-        .map(title_case_words)
+    let parts = path
+        .split('>')
+        .map(str::trim)
+        .filter(|step| !step.is_empty())
+        .filter(|step| !step.eq_ignore_ascii_case("state"))
+        .map(humanize_breadcrumb_step)
         .collect::<Vec<_>>()
-        .join(" > ")
+        .join(" > ");
+    if !parts.is_empty() {
+        return parts;
+    }
+    if path.is_empty() {
+        String::new()
+    } else {
+        title_case_words(path)
+    }
+}
+
+fn humanize_breadcrumb_step(step: &str) -> String {
+    match step {
+        "claim" => "Claiming".to_string(),
+        "understand" => "Understanding".to_string(),
+        "planning" => "Planning".to_string(),
+        "doing" => "Doing".to_string(),
+        "gitting" => "Git + PR".to_string(),
+        "reviewing" => "Reviewing".to_string(),
+        "merging" => "Merging".to_string(),
+        "working" => "Working".to_string(),
+        "backlog_sync" => "Backlog Sync".to_string(),
+        "boot" => "Boot".to_string(),
+        _ => title_case_words(step),
+    }
 }
 
 fn title_case_words(raw: &str) -> String {
@@ -1957,6 +2110,15 @@ mod tests {
         assert_eq!(
             humanize_breadcrumb("boot>backlog_sync"),
             "Boot > Backlog Sync"
+        );
+        assert_eq!(humanize_breadcrumb("state>merging"), "Merging");
+        assert_eq!(
+            worker_flow_summary("merging", "prompt 42", "state>merging"),
+            "Merging changes (prompt 42)"
+        );
+        assert_eq!(
+            worker_flow_summary("failed", "failed: conflict applying patch", ""),
+            "Task failed (conflict applying patch)"
         );
     }
 

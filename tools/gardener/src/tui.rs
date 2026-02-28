@@ -487,6 +487,14 @@ fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
     }
 }
 
+fn dashboard_worker_rows_for_width(width: u16) -> u16 {
+    match width {
+        0..=79 => 6,
+        80..=119 => 8,
+        _ => 10,
+    }
+}
+
 fn is_backlog_status_token(token: &str) -> bool {
     matches!(token, "INP" | "inp" | "Q" | "q")
 }
@@ -804,7 +812,9 @@ fn draw_dashboard_frame(
             Some(describe_problem_for_human(row, class))
         })
         .collect::<Vec<_>>();
-    let has_human_problems = !human_problems.is_empty();
+    let has_human_problems = !human_problems.is_empty()
+        && app_state.terminal_height >= 20
+        && app_state.terminal_width >= 80;
 
     let layout_constraints = if has_human_problems {
         vec![
@@ -827,7 +837,7 @@ fn draw_dashboard_frame(
     let body_height = chunks[1].height;
     let now_rows: u16 = 7;
     let remaining = body_height.saturating_sub(now_rows);
-    let backlog_reserve = if app_state.terminal_width >= 120 { 6 } else { 8 };
+    let backlog_reserve = dashboard_worker_rows_for_width(app_state.terminal_width);
     let requested_backlog_rows = if remaining > backlog_reserve {
         remaining - backlog_reserve
     } else {

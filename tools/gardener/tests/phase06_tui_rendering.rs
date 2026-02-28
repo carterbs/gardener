@@ -32,6 +32,24 @@ fn empty_backlog() -> BacklogView {
     BacklogView::default()
 }
 
+fn worker_names_in_frame(frame: &str) -> usize {
+    const WORKER_NAMES: &[&str] = &[
+        "Lawn Mower",
+        "Leaf Blower",
+        "Hedge Trimmer",
+        "Edger",
+        "String Trimmer",
+        "Wheelbarrow",
+        "Seed Spreader",
+        "Pruning Shears",
+        "Sprinkler",
+    ];
+    frame
+        .lines()
+        .filter(|line| WORKER_NAMES.iter().any(|name| line.contains(name)))
+        .count()
+}
+
 #[test]
 fn dashboard_header_shows_queue_stats() {
     let workers = vec![make_worker("w-01", "doing", "Fix the bug")];
@@ -146,6 +164,58 @@ fn triage_render_includes_artifacts() {
     assert!(
         frame.contains("Detected agent") || frame.contains("codex"),
         "triage frame should contain artifact text"
+    );
+}
+
+#[test]
+fn triage_layout_collapses_when_narrow_and_expands_when_wide() {
+    let activity = vec!["Scanning repository shape".to_string()];
+    let artifacts = vec!["repo-intelligence.toml (pending)".to_string()];
+    let narrow = render_triage(&activity, &artifacts, 79, 26);
+    let wide = render_triage(&activity, &artifacts, 120, 26);
+
+    let narrow_lines = narrow.lines().collect::<Vec<_>>();
+    let wide_lines = wide.lines().collect::<Vec<_>>();
+
+    let narrow_activity = narrow_lines
+        .iter()
+        .position(|line| line.contains("Live Activity"))
+        .expect("narrow triage includes live activity");
+    let narrow_artifacts = narrow_lines
+        .iter()
+        .position(|line| line.contains("Triage Artifacts"))
+        .expect("narrow triage includes triage artifacts");
+
+    let wide_activity = wide_lines
+        .iter()
+        .position(|line| line.contains("Live Activity"))
+        .expect("wide triage includes live activity");
+    let wide_artifacts = wide_lines
+        .iter()
+        .position(|line| line.contains("Triage Artifacts"))
+        .expect("wide triage includes triage artifacts");
+
+    assert!(
+        narrow_artifacts > narrow_activity,
+        "narrow layouts should stack activity above artifacts"
+    );
+    assert!(
+        wide_artifacts == wide_activity,
+        "wide layouts should place activity and artifacts side by side"
+    );
+}
+
+#[test]
+fn dashboard_allocates_more_worker_rows_with_wider_viewport() {
+    let workers = (0..9)
+        .map(|idx| make_worker(&format!("w-{idx:02}"), "doing", &format!("task {idx:02}")))
+        .collect::<Vec<_>>();
+    let narrow = render_dashboard(&workers, &zero_stats(), &BacklogView::default(), 79, 24);
+    let wide = render_dashboard(&workers, &zero_stats(), &BacklogView::default(), 120, 24);
+
+    assert!(
+        worker_names_in_frame(&wide) > worker_names_in_frame(&narrow),
+        "wider terminal should show more worker rows"
     );
 }
 

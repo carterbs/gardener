@@ -65,7 +65,7 @@ impl<'a> WorktreeClient<'a> {
         let existing = self.list()?;
         if let Some(existing_entry) = existing
             .iter()
-            .find(|entry| Self::paths_match(&existing_entry.path, path))
+            .find(|entry| Self::paths_match(&entry.path, path))
         {
             if existing_entry.branch.as_deref() == Some(branch) {
                 append_run_log(

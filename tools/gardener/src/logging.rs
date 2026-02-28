@@ -187,6 +187,11 @@ pub fn current_run_log_path() -> Option<PathBuf> {
     logger_slot.as_ref().map(|logger| logger.path.clone())
 }
 
+pub fn current_run_id() -> Option<String> {
+    let context_slot = run_context_slot().lock().expect("run context lock");
+    context_slot.as_ref().map(|context| context.run_id.clone())
+}
+
 pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String> {
     if max_lines == 0 {
         return Vec::new();
@@ -319,8 +324,8 @@ fn random_hex(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_run_log, clear_run_logger, default_run_log_path, init_run_logger,
-        structured_fallback_line, JsonlLogger,
+        append_run_log, clear_run_logger, current_run_id, current_run_log_path, default_run_log_path,
+        init_run_logger, structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
     use std::path::Path;
@@ -368,6 +373,16 @@ mod tests {
         clear_run_logger();
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("..."));
+    }
+
+    #[test]
+    fn current_run_context_functions_report_initialized_run_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("context.jsonl");
+        let run_id = init_run_logger(&path, dir.path());
+        assert_eq!(current_run_id().as_deref(), Some(run_id.as_str()));
+        assert_eq!(current_run_log_path(), Some(path));
+        clear_run_logger();
     }
 
     #[test]

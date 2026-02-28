@@ -543,7 +543,25 @@ fn execute_task_live(
         });
     }
     let merge_output = parse_merge_output(&merging_result.payload);
-    verify_merge_output(identity.worker_id.as_str(), &merge_output)?;
+    if let Err(err) = verify_merge_output(identity.worker_id.as_str(), &merge_output) {
+        append_run_log(
+            "error",
+            "worker.task.merge_verification_failed",
+            json!({
+                "worker_id": identity.worker_id,
+                "task_id": task_id,
+                "error": err.to_string()
+            }),
+        );
+        return Ok(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Failed,
+            logs,
+            teardown: None,
+            failure_reason: Some(err.to_string()),
+        });
+    }
 
     fsm.transition(WorkerState::Complete)?;
 
@@ -1049,12 +1067,11 @@ fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
         merged: payload
             .get("merged")
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true),
+            .unwrap_or(false),
         merge_sha: payload
             .get("merge_sha")
             .and_then(serde_json::Value::as_str)
-            .map(ToString::to_string)
-            .or_else(|| Some("unknown".to_string())),
+            .map(ToString::to_string),
     }
 }
 
@@ -1178,6 +1195,11 @@ fn verify_merge_output(worker_id: &str, output: &MergingOutput) -> Result<(), Ga
             "merged": output.merged,
         }),
     );
+    if !output.merged {
+        return Err(GardenerError::InvalidConfig(
+            "merging verification failed: merged must be true".to_string(),
+        ));
+    }
     if output.merged
         && output
             .merge_sha
@@ -1328,13 +1350,15 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 mod tests {
     use super::{
         execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
-        verify_merge_output, worktree_branch_for, worktree_path_for, worktree_slug_for_task,
+        parse_merge_output, verify_merge_output, worktree_branch_for, worktree_path_for,
+        worktree_slug_for_task,
         worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::fsm::{GittingOutput, MergingOutput};
     use crate::runtime::FakeProcessRunner;
     use crate::types::{RuntimeScope, WorkerState};
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[test]
@@ -1408,6 +1432,23 @@ mod tests {
         })
         .expect_err("must fail");
         assert!(format!("{err}").contains("merge_sha required"));
+    }
+
+    #[test]
+    fn merge_verification_requires_explicit_success_flag() {
+        let err = verify_merge_output("worker-1", &MergingOutput {
+            merged: false,
+            merge_sha: Some("deadbeef".to_string()),
+        })
+        .expect_err("must fail");
+        assert!(format!("{err}").contains("merged must be true"));
+    }
+
+    #[test]
+    fn merge_output_default_is_not_merged() {
+        let output = parse_merge_output(&json!({"merge_sha":"deadbeef"}));
+        assert!(!output.merged);
+        assert_eq!(output.merge_sha.as_deref(), Some("deadbeef"));
     }
 
     #[test]

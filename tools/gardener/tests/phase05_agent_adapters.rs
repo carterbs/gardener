@@ -14,7 +14,7 @@ fn load_fixture(relative: &str) -> String {
             .join("tests/fixtures/agent-responses")
             .join(relative),
     )
-    .unwrap()
+    .expect("test fixture should not fail")
 }
 
 fn claude_context() -> AdapterContext {

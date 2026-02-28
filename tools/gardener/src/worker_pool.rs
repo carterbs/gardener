@@ -18,7 +18,7 @@ use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 use serde_json::json;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const WORKER_POOL_ID: &str = "worker_pool";
 
@@ -144,6 +144,7 @@ pub fn run_worker_pool_fsm(
         let (tx, rx): (mpsc::Sender<WorkerResultMessage>, mpsc::Receiver<WorkerResultMessage>) =
             mpsc::channel();
         let runtime_scope = scope.clone();
+        let mut last_dashboard_refresh = Instant::now();
 
         std::thread::scope(|scope_guard| -> Result<(), GardenerError> {
             for (idx, task) in claimed {
@@ -301,7 +302,18 @@ pub fn run_worker_pool_fsm(
                         }
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
+                            render(
+                                terminal,
+                                &workers,
+                                &dashboard_snapshot(store)?,
+                                hb,
+                                lt,
+                            )?;
+                            last_dashboard_refresh = Instant::now();
+                        }
+                    }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         active = 0;
                     }

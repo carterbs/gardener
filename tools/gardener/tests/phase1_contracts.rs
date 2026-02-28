@@ -1,4 +1,5 @@
 use assert_cmd::cargo::cargo_bin_cmd;
+use std::fs;
 use gardener::config::{
     effective_agent_for_state, effective_model_for_state, load_config, resolve_scope,
     resolve_validation_command, AppConfig, CliOverrides, StateConfig,
@@ -15,8 +16,7 @@ use gardener::types::{AgentKind, NonInteractiveReason, WorkerState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
-
-const TEST_REPO_ROOT: &str = "/tmp/gardener-phase1-contracts";
+use tempfile::TempDir;
 
 fn default_profile_path(git_root: Option<&str>) -> PathBuf {
     let repo_root = PathBuf::from(git_root.unwrap_or("/repo"));
@@ -154,13 +154,12 @@ fn binary_help_and_prune_smoke() {
 
 #[test]
 fn run_with_runtime_paths_and_errors() {
-    // Clean stale SQLite from prior runs to avoid claiming leftover tasks
-    let _ =
-        std::fs::remove_file(PathBuf::from(TEST_REPO_ROOT).join(".cache/gardener/backlog.sqlite"));
+    let dir = TempDir::new().expect("tempdir");
+    let repo_root = dir.path().to_str().expect("utf8").to_string();
     let runtime = runtime_with_config(
         "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n",
         true,
-        Some(TEST_REPO_ROOT),
+        Some(&repo_root),
     );
     let prune = vec![
         "gardener".into(),
@@ -169,7 +168,7 @@ fn run_with_runtime_paths_and_errors() {
         "/config.toml".into(),
     ];
     assert_eq!(
-        gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime).unwrap(),
+        gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime).expect("test fixture should not fail"),
         0
     );
 
@@ -181,7 +180,7 @@ fn run_with_runtime_paths_and_errors() {
     ];
     let backlog_result = gardener::run_with_runtime(&backlog, &[], Path::new("/cwd"), &runtime);
     eprintln!("backlog result: {backlog_result:?}");
-    assert_eq!(backlog_result.unwrap(), 0);
+    assert_eq!(backlog_result.expect("test fixture should not fail"), 0);
 
     let quality = vec![
         "gardener".into(),
@@ -191,7 +190,7 @@ fn run_with_runtime_paths_and_errors() {
     ];
     let quality_result = gardener::run_with_runtime(&quality, &[], Path::new("/cwd"), &runtime);
     eprintln!("quality result: {quality_result:?}");
-    assert_eq!(quality_result.unwrap(), 0);
+    assert_eq!(quality_result.expect("test fixture should not fail"), 0);
 
     let validate = vec![
         "gardener".into(),
@@ -201,21 +200,21 @@ fn run_with_runtime_paths_and_errors() {
     ];
     let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime);
     eprintln!("validate result: {validate_result:?}");
-    assert_eq!(validate_result.unwrap(), 0);
+    assert_eq!(validate_result.expect("test fixture should not fail"), 0);
 
     let normal = vec!["gardener".into(), "--config".into(), "/config.toml".into()];
     let normal_result = gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime);
     eprintln!("normal result: {normal_result:?}");
-    assert_eq!(normal_result.unwrap(), 0);
+    assert_eq!(normal_result.expect("test fixture should not fail"), 0);
 
     let help = vec!["gardener".into(), "--help".into()];
     assert_eq!(
-        gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime).unwrap(),
+        gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime).expect("test fixture should not fail"),
         0
     );
 
     let invalid = vec!["gardener".into(), "--agent".into(), "invalid".into()];
-    let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime).unwrap_err();
+    let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime).expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(_)));
 
     let retriage = vec!["gardener".into(), "--retriage".into()];
@@ -225,13 +224,15 @@ fn run_with_runtime_paths_and_errors() {
         Path::new("/cwd"),
         &runtime,
     )
-    .unwrap_err();
+    .expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 
     let triage = vec!["gardener".into(), "--triage-only".into()];
-    let non_tty_runtime = runtime_with_config("", false, Some(TEST_REPO_ROOT));
+    let dir2 = TempDir::new().expect("tempdir");
+    let repo_root2 = dir2.path().to_str().expect("utf8").to_string();
+    let non_tty_runtime = runtime_with_config("", false, Some(&repo_root2));
     let err =
-        gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).unwrap_err();
+        gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 }
 
@@ -263,7 +264,7 @@ fn run_with_runtime_validate_flag_runs_configured_validation_command() {
         "/config.toml".into(),
     ];
     let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime);
-    assert_eq!(validate_result.unwrap(), 7);
+    assert_eq!(validate_result.expect("test fixture should not fail"), 7);
 
     let spawned = process.spawned();
     assert_eq!(spawned.len(), 2);
@@ -273,6 +274,24 @@ fn run_with_runtime_validate_flag_runs_configured_validation_command() {
         vec!["-lc".to_string(), "npm run validate".to_string()]
     );
     assert_eq!(spawned[1].cwd, Some(PathBuf::from("/repo")));
+}
+
+#[test]
+fn run_validate_script_enforces_expect_used_lint() {
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("scripts")
+        .join("run-validate.sh");
+    let script = fs::read_to_string(script_path).expect("run-validate.sh should be readable");
+    let clippy_command = script
+        .lines()
+        .find(|line| line.contains("cargo clippy -p gardener --all-targets"))
+        .expect("run-validate.sh should include a clippy command");
+
+    assert!(clippy_command.contains("-W clippy::unwrap_used"));
+    assert!(clippy_command.contains("-W clippy::expect_used"));
+    assert!(script.contains("scripts/check-no-warnings.sh"));
 }
 
 #[test]
@@ -289,13 +308,15 @@ fn run_with_runtime_propagates_write_and_config_errors() {
     let normal = vec!["gardener".into()];
 
     for args in [prune, backlog, quality, normal] {
-        let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime).unwrap_err();
+        let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime).expect_err("test fixture should not fail");
         assert!(
             matches!(err, GardenerError::Io(message) if message.contains("terminal write failed") || message.contains("terminal draw failed"))
         );
     }
 
-    let ok_runtime = runtime_with_config("", true, Some(TEST_REPO_ROOT));
+    let ok_dir = TempDir::new().expect("tempdir");
+    let ok_repo_root = ok_dir.path().to_str().expect("utf8").to_string();
+    let ok_runtime = runtime_with_config("", true, Some(&ok_repo_root));
     let missing_cfg = vec![
         "gardener".into(),
         "--prune-only".into(),
@@ -303,7 +324,7 @@ fn run_with_runtime_propagates_write_and_config_errors() {
         "/missing.toml".into(),
     ];
     let err =
-        gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime).unwrap_err();
+        gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime).expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Io(message) if message.contains("missing file")));
 }
 
@@ -335,7 +356,7 @@ default = "claude"
         ..CliOverrides::default()
     };
 
-    let (cfg, _scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).unwrap();
+    let (cfg, _scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).expect("test fixture should not fail");
     assert_eq!(cfg.orchestrator.parallelism, 9);
     assert_eq!(cfg.validation.command, "npm run validate:cli");
     assert_eq!(cfg.agent.default, Some(AgentKind::Codex));
@@ -419,7 +440,7 @@ test_mode = true
         config_path: Some(PathBuf::from("/cfg.toml")),
         ..CliOverrides::default()
     };
-    let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).unwrap();
+    let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).expect("test fixture should not fail");
     assert_eq!(cfg.scheduler.lease_timeout_seconds, 111);
     assert_eq!(cfg.scheduler.heartbeat_interval_seconds, 22);
     assert_eq!(cfg.prompts.turn_budget.understand, 10);
@@ -448,7 +469,7 @@ test_mode = true
         &bad_parallel,
         &FakeProcessRunner::default(),
     )
-    .unwrap_err();
+    .expect_err("test fixture should not fail");
     assert!(
         matches!(err, GardenerError::InvalidConfig(message) if message.contains("parallelism"))
     );
@@ -464,7 +485,7 @@ test_mode = true
         &bad_agent,
         &FakeProcessRunner::default(),
     )
-    .unwrap_err();
+    .expect_err("test fixture should not fail");
     assert!(
         matches!(err, GardenerError::InvalidConfig(message) if message.contains("agent.default"))
     );
@@ -482,7 +503,7 @@ test_mode = true
         &bad_model,
         &FakeProcessRunner::default(),
     )
-    .unwrap_err();
+    .expect_err("test fixture should not fail");
     assert!(
         matches!(err, GardenerError::InvalidConfig(message) if message.contains("seeding.model"))
     );
@@ -500,7 +521,7 @@ test_mode = true
         &bad_state_model,
         &FakeProcessRunner::default(),
     )
-    .unwrap_err();
+    .expect_err("test fixture should not fail");
     assert!(
         matches!(err, GardenerError::InvalidConfig(message) if message.contains("states.doing.model"))
     );
@@ -596,7 +617,7 @@ fn config_covers_prompts_without_budget_and_state_backend_present_validation_loo
         &fs,
         &process_runner,
     )
-    .unwrap();
+    .expect("test fixture should not fail");
 
     let fs = FakeFileSystem::with_file(
         "/s.toml",
@@ -617,7 +638,7 @@ fn config_covers_prompts_without_budget_and_state_backend_present_validation_loo
         &fs,
         &process_runner,
     )
-    .unwrap();
+    .expect("test fixture should not fail");
 }
 
 #[test]
@@ -708,17 +729,17 @@ fn output_envelope_contract() {
     let good = format!(
         "x\n{START_MARKER}\n{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"ok\":true}}}}\n{END_MARKER}\n"
     );
-    let parsed = parse_last_envelope(&good, WorkerState::Doing).unwrap();
+    let parsed = parse_last_envelope(&good, WorkerState::Doing).expect("test fixture should not fail");
     assert_eq!(parsed.payload["ok"], true);
 
     assert!(matches!(
-        parse_last_envelope("x", WorkerState::Doing).unwrap_err(),
+        parse_last_envelope("x", WorkerState::Doing).expect_err("test fixture should not fail"),
         GardenerError::OutputEnvelope(_)
     ));
 
     let bad_json = format!("{START_MARKER} nope {END_MARKER}");
     assert!(matches!(
-        parse_last_envelope(&bad_json, WorkerState::Doing).unwrap_err(),
+        parse_last_envelope(&bad_json, WorkerState::Doing).expect_err("test fixture should not fail"),
         GardenerError::OutputEnvelope(_)
     ));
 }
@@ -727,7 +748,7 @@ fn output_envelope_contract() {
 fn output_envelope_error_contracts() {
     let reversed = format!("{END_MARKER}{START_MARKER}");
     assert!(matches!(
-        parse_last_envelope(&reversed, WorkerState::Doing).unwrap_err(),
+        parse_last_envelope(&reversed, WorkerState::Doing).expect_err("test fixture should not fail"),
         GardenerError::OutputEnvelope(message) if message.contains("before")
     ));
 
@@ -735,7 +756,7 @@ fn output_envelope_error_contracts() {
         "{START_MARKER} {{\"schema_version\":2,\"state\":\"doing\",\"payload\":{{}}}} {END_MARKER}"
     );
     assert!(matches!(
-        parse_last_envelope(&bad_schema, WorkerState::Doing).unwrap_err(),
+        parse_last_envelope(&bad_schema, WorkerState::Doing).expect_err("test fixture should not fail"),
         GardenerError::OutputEnvelope(message) if message.contains("schema_version")
     ));
 
@@ -743,7 +764,7 @@ fn output_envelope_error_contracts() {
         "{START_MARKER} {{\"schema_version\":1,\"state\":\"planning\",\"payload\":{{}}}} {END_MARKER}"
     );
     assert!(matches!(
-        parse_last_envelope(&mismatch, WorkerState::Doing).unwrap_err(),
+        parse_last_envelope(&mismatch, WorkerState::Doing).expect_err("test fixture should not fail"),
         GardenerError::OutputEnvelope(message) if message.contains("state mismatch")
     ));
 }
@@ -753,17 +774,17 @@ fn runtime_fake_contracts() {
     let now = UNIX_EPOCH + Duration::from_secs(10);
     let clock = FakeClock::new(now);
     let deadline = UNIX_EPOCH + Duration::from_secs(20);
-    clock.sleep_until(deadline).unwrap();
+    clock.sleep_until(deadline).expect("test fixture should not fail");
     assert_eq!(clock.now(), deadline);
 
     let fs = FakeFileSystem::default();
     let path = Path::new("a.txt");
-    fs.write_string(path, "hello").unwrap();
-    assert_eq!(fs.read_to_string(path).unwrap(), "hello");
-    fs.remove_file(path).unwrap();
+    fs.write_string(path, "hello").expect("test fixture should not fail");
+    assert_eq!(fs.read_to_string(path).expect("test fixture should not fail"), "hello");
+    fs.remove_file(path).expect("test fixture should not fail");
     assert!(!fs.exists(path));
     assert!(matches!(
-        fs.read_to_string(path).unwrap_err(),
+        fs.read_to_string(path).expect_err("test fixture should not fail"),
         GardenerError::Io(_)
     ));
 
@@ -779,12 +800,12 @@ fn runtime_fake_contracts() {
             args: vec![],
             cwd: None,
         })
-        .unwrap();
+        .expect("test fixture should not fail");
     assert_eq!(out.exit_code, 0);
 
     let terminal = FakeTerminal::new(false);
-    terminal.write_line("line").unwrap();
-    terminal.draw("frame").unwrap();
+    terminal.write_line("line").expect("test fixture should not fail");
+    terminal.draw("frame").expect("test fixture should not fail");
     assert!(!terminal.stdin_is_tty());
 }
 
@@ -796,14 +817,14 @@ fn runtime_extra_branch_coverage() {
     let fs = FakeFileSystem::default();
     fs.set_fail_next(GardenerError::Io("x".to_string()));
     assert!(matches!(
-        fs.create_dir_all(Path::new("d")).unwrap_err(),
+        fs.create_dir_all(Path::new("d")).expect_err("test fixture should not fail"),
         GardenerError::Io(_)
     ));
-    fs.create_dir_all(Path::new("d")).unwrap();
+    fs.create_dir_all(Path::new("d")).expect("test fixture should not fail");
 
     let term = FakeTerminal::new(true);
-    term.write_line("a").unwrap();
-    term.draw("b").unwrap();
+    term.write_line("a").expect("test fixture should not fail");
+    term.draw("b").expect("test fixture should not fail");
     assert_eq!(term.written_lines(), vec!["a".to_string()]);
     assert_eq!(term.drawn_frames(), vec!["b".to_string()]);
 
@@ -819,9 +840,9 @@ fn runtime_extra_branch_coverage() {
             args: vec![],
             cwd: None,
         })
-        .unwrap();
-    let _ = runner.wait(h).unwrap();
-    runner.kill(h).unwrap();
+        .expect("test fixture should not fail");
+    let _ = runner.wait(h).expect("test fixture should not fail");
+    runner.kill(h).expect("test fixture should not fail");
     assert_eq!(runner.spawned().len(), 1);
     assert_eq!(runner.waits(), vec![0]);
     assert_eq!(runner.kills(), vec![0]);
@@ -831,20 +852,20 @@ fn runtime_extra_branch_coverage() {
 #[test]
 fn runtime_production_contracts() {
     let clock = ProductionClock;
-    clock.sleep_until(clock.now()).unwrap();
+    clock.sleep_until(clock.now()).expect("test fixture should not fail");
     clock
         .sleep_until(clock.now() + Duration::from_millis(1))
-        .unwrap();
+        .expect("test fixture should not fail");
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("test fixture should not fail");
     let path = dir.path().join("x.txt");
     let fs = ProductionFileSystem;
     let nested = dir.path().join("a/b/c");
-    fs.create_dir_all(&nested).unwrap();
-    fs.write_string(&path, "abc").unwrap();
-    assert_eq!(fs.read_to_string(&path).unwrap(), "abc");
+    fs.create_dir_all(&nested).expect("test fixture should not fail");
+    fs.write_string(&path, "abc").expect("test fixture should not fail");
+    assert_eq!(fs.read_to_string(&path).expect("test fixture should not fail"), "abc");
     assert!(fs.exists(&path));
-    fs.remove_file(&path).unwrap();
+    fs.remove_file(&path).expect("test fixture should not fail");
 
     let runner = ProductionProcessRunner::new();
     let _runner_default = ProductionProcessRunner::default();
@@ -854,7 +875,7 @@ fn runtime_production_contracts() {
             args: vec!["-c".to_string(), "printf ok".to_string()],
             cwd: None,
         })
-        .unwrap();
+        .expect("test fixture should not fail");
     assert_eq!(out.stdout, "ok");
 
     let handle = runner
@@ -863,21 +884,21 @@ fn runtime_production_contracts() {
             args: vec!["-c".to_string(), "sleep 1".to_string()],
             cwd: None,
         })
-        .unwrap();
-    runner.kill(handle).unwrap();
+        .expect("test fixture should not fail");
+    runner.kill(handle).expect("test fixture should not fail");
     assert!(matches!(
-        runner.wait(999).unwrap_err(),
+        runner.wait(999).expect_err("test fixture should not fail"),
         GardenerError::Process(_)
     ));
     assert!(matches!(
-        runner.kill(999).unwrap_err(),
+        runner.kill(999).expect_err("test fixture should not fail"),
         GardenerError::Process(_)
     ));
 
     let rt = ProductionRuntime::new();
     let _rt_default = ProductionRuntime::default();
     let prod_terminal = gardener::runtime::ProductionTerminal;
-    prod_terminal.draw("frame").unwrap();
+    prod_terminal.draw("frame").expect("test fixture should not fail");
     assert!(rt.terminal.stdin_is_tty() || !rt.terminal.stdin_is_tty());
 }
 

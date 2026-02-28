@@ -20,3 +20,8 @@ cargo test -p gardener --all-targets
 
 echo "Running project validation command: scripts/check-no-warnings.sh"
 scripts/check-no-warnings.sh
+
+echo "Running project validation command: cargo clippy -p gardener --all-targets -- -W clippy::unwrap_used -W clippy::expect_used"
+cargo clippy -p gardener --all-targets -- -W clippy::unwrap_used -W clippy::expect_used
+echo "Running project validation command: cargo clippy -p gardener --lib --bins -- -D clippy::unwrap_used -W clippy::expect_used"
+cargo clippy -p gardener --lib --bins -- -D clippy::unwrap_used -W clippy::expect_used

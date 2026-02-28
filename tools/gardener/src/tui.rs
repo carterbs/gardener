@@ -1,4 +1,5 @@
 use crate::errors::GardenerError;
+use crate::logging::{current_run_id, current_run_log_path};
 use crate::hotkeys::{dashboard_controls_legend, report_controls_legend};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
@@ -536,6 +537,25 @@ fn now_hhmmss() -> String {
     )
 }
 
+fn run_context_summary() -> (String, String) {
+    let run_id = current_run_id().unwrap_or_else(|| "none".to_string());
+    let run_log_path = current_run_log_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    (truncate_right(&run_id, 28), run_log_path)
+}
+
+fn worker_ids_summary(workers: &[WorkerRow]) -> String {
+    if workers.is_empty() {
+        return "none".to_string();
+    }
+    workers
+        .iter()
+        .map(|worker| worker.worker_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
     if worker_id.is_empty() {
         return WORKER_EQUIPMENT_NAMES[index % WORKER_EQUIPMENT_NAMES.len()].to_string();
@@ -837,6 +857,8 @@ fn draw_dashboard_frame(
     frame.render_widget(summary, chunks[0]);
 
     let metrics = WorkerMetrics::from_app_state(&app_state.workers);
+    let (run_id, run_log_path) = run_context_summary();
+    let worker_ids = worker_ids_summary(workers);
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
@@ -894,6 +916,16 @@ fn draw_dashboard_frame(
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("failed", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::styled("Workers: ", Style::default().fg(Color::Gray)),
+                Span::raw(truncate_right(&worker_ids, 52)),
+            ]),
+            Line::from(vec![
+                Span::styled("Run: ", Style::default().fg(Color::Gray)),
+                Span::raw(run_id),
+                Span::styled(" | Log: ", Style::default().fg(Color::Gray)),
+                Span::raw(truncate_right(&run_log_path, 72)),
             ]),
         ])
         .block(
@@ -2323,8 +2355,16 @@ mod tests {
         let backlog = BacklogView::default();
 
         let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
+        let strip_workers_summary = |frame: &str| {
+            frame
+                .lines()
+                .filter(|line| !line.contains("Workers:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let initial_without_summary = strip_workers_summary(&initial);
         assert!(initial.contains("> Lawn Mower"));
-        assert!(!initial.contains("w9 "));
+        assert!(!initial_without_summary.contains("w9 "));
 
         for _ in 0..10 {
             let _ = scroll_workers_down();

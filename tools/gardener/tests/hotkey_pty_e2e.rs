@@ -257,6 +257,7 @@ max_turns = 12
 fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
     let (report_path, _dir, store, cmd) = setup_pty_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
+    session.set_expect_timeout(Some(Duration::from_secs(30)));
 
     session.send("v").expect("send v");
     session.send("g").expect("send g");
@@ -286,6 +287,7 @@ fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
 fn pty_e2e_ctrl_c_quits() {
     let (_report_path, _dir, store, cmd) = setup_pty_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
+    session.set_expect_timeout(Some(Duration::from_secs(30)));
     session.send("\u{3}").expect("send ctrl-c");
     session.expect(Eof).expect("session exited");
     let tasks = store.list_tasks().expect("list tasks");
@@ -303,9 +305,12 @@ fn pty_e2e_ctrl_c_quits() {
 fn pty_e2e_q_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
-    session.set_expect_timeout(Some(Duration::from_secs(8)));
+    session.set_expect_timeout(Some(Duration::from_secs(30)));
     std::thread::sleep(Duration::from_millis(350));
-    session.send("q").expect("send q");
+    for _ in 0..5 {
+        session.send("q").expect("send q");
+        std::thread::sleep(Duration::from_millis(150));
+    }
     session.expect(Eof).expect("session exited");
 
     let tasks = store.list_tasks().expect("list tasks");

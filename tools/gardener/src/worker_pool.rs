@@ -17,6 +17,7 @@ use crate::tui::{
     reset_workers_scroll, scroll_workers_down, scroll_workers_up,
     BacklogView, QueueStats, WorkerRow,
 };
+use crate::replay::recorder::set_recording_worker_id;
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 use serde_json::json;
@@ -173,6 +174,7 @@ pub fn run_worker_pool_fsm(
                 let process_runner = runtime.process_runner.clone();
                 let worker_scope = runtime_scope.clone();
                 scope_guard.spawn(move || {
+                    set_recording_worker_id(&worker_id);
                     let result = execute_task(
                         &cfg,
                         process_runner.as_ref(),

@@ -5,10 +5,12 @@ use crate::hotkeys::{
     action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
 };
 use crate::logging::{
-    append_run_log, current_log_line_count, recent_worker_log_lines, recent_worker_tool_commands,
-    structured_fallback_line,
+    append_run_log, current_log_line_count, recent_worker_log_lines, recent_worker_state_events,
+    recent_worker_tool_commands, structured_fallback_line,
 };
 use crate::priority::Priority;
+use crate::replay::recorder::{emit_record, next_seq, set_recording_worker_id, timestamp_ns};
+use crate::replay::recording::{BacklogMutationRecord, RecordEntry};
 use crate::runtime::Terminal;
 use crate::runtime::{
     clear_interrupt, request_interrupt, ProductionRuntime, INTERRUPT_SENTINEL_KEY,
@@ -16,13 +18,9 @@ use crate::runtime::{
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
-    reset_workers_scroll, scroll_workers_down, scroll_workers_up,
-    BacklogView, QueueStats, WorkerRow,
+    reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
+    WorkerRow,
 };
-use crate::replay::recorder::{
-    emit_record, next_seq, set_recording_worker_id, timestamp_ns,
-};
-use crate::replay::recording::{BacklogMutationRecord, RecordEntry};
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 use serde_json::json;
@@ -96,6 +94,7 @@ pub fn run_worker_pool_fsm(
         })
         .collect::<Vec<_>>();
     let mut last_worker_command_line = current_log_line_count();
+    let mut last_worker_state_line = last_worker_command_line;
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let command_poll_chunk = 32;
     let mut completed = 0usize;
@@ -123,7 +122,8 @@ pub fn run_worker_pool_fsm(
         let available_slots = parallelism.min(target.saturating_sub(completed));
         for idx in 0..available_slots {
             let worker_id = workers[idx].worker_id.clone();
-            let claimed_task = store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
+            let claimed_task =
+                store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
             let Some(task) = claimed_task else {
                 workers[idx].state = "idle".to_string();
                 workers[idx].task_title = "idle".to_string();
@@ -180,8 +180,10 @@ pub fn run_worker_pool_fsm(
         let mut active = claimed.len();
         let mut shutdown_error: Option<(String, String, String)> = None;
         let mut quit_requested = false;
-        let (tx, rx): (mpsc::Sender<WorkerResultMessage>, mpsc::Receiver<WorkerResultMessage>) =
-            mpsc::channel();
+        let (tx, rx): (
+            mpsc::Sender<WorkerResultMessage>,
+            mpsc::Receiver<WorkerResultMessage>,
+        ) = mpsc::channel();
         let runtime_scope = scope.clone();
         let mut last_dashboard_refresh = Instant::now();
 
@@ -260,8 +262,7 @@ pub fn run_worker_pool_fsm(
                                 let prompt = format!("prompt {}", event.prompt_version);
                                 workers[idx].tool_line = prompt.clone();
                                 append_worker_command(&mut workers[idx], &prompt);
-                                workers[idx].breadcrumb =
-                                    format!("state>{}", event.state.as_str());
+                                workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
                                 let now = Instant::now();
                                 last_activity_pulse[idx] = now;
                                 workers[idx].last_heartbeat_secs = 0;
@@ -277,13 +278,7 @@ pub fn run_worker_pool_fsm(
                                     }),
                                 );
                                 refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
-                                render(
-                                    terminal,
-                                    &workers,
-                                    &dashboard_snapshot(store)?,
-                                    hb,
-                                    lt,
-                                )?;
+                                render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                             }
 
                             if summary.final_state == crate::types::WorkerState::Complete {
@@ -314,23 +309,22 @@ pub fn run_worker_pool_fsm(
                                 );
                             } else {
                                 workers[idx].state = "failed".to_string();
-                                let failed_message = if let Some(reason) = summary.failure_reason.clone() {
-                                    if reason.is_empty() {
-                                        format!("failed {}", task_id)
-                                    } else {
-                                        let truncated = reason
-                                            .chars()
-                                            .take(150)
-                                            .collect::<String>();
-                                        if reason.chars().count() > 150 {
-                                            format!("failed: {}…", truncated)
+                                let failed_message =
+                                    if let Some(reason) = summary.failure_reason.clone() {
+                                        if reason.is_empty() {
+                                            format!("failed {}", task_id)
                                         } else {
-                                            format!("failed: {}", reason)
+                                            let truncated =
+                                                reason.chars().take(150).collect::<String>();
+                                            if reason.chars().count() > 150 {
+                                                format!("failed: {}…", truncated)
+                                            } else {
+                                                format!("failed: {}", reason)
+                                            }
                                         }
-                                    }
-                                } else {
-                                    format!("failed {}", task_id)
-                                };
+                                    } else {
+                                        format!("failed {}", task_id)
+                                    };
                                 workers[idx].tool_line = failed_message.clone();
                                 append_worker_command(&mut workers[idx], &failed_message);
                                 workers[idx].breadcrumb = "failed".to_string();
@@ -367,14 +361,16 @@ pub fn run_worker_pool_fsm(
                                     append_worker_command(&mut workers[idx], &unresolved_message);
                                 } else {
                                     let _ = store.release_lease(&task_id, &worker_id)?;
-                                    emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                        seq: next_seq(),
-                                        timestamp_ns: timestamp_ns(),
-                                        worker_id: worker_id.clone(),
-                                        operation: "release_lease".to_string(),
-                                        task_id: task_id.clone(),
-                                        result_ok: true,
-                                    }));
+                                    emit_record(RecordEntry::BacklogMutation(
+                                        BacklogMutationRecord {
+                                            seq: next_seq(),
+                                            timestamp_ns: timestamp_ns(),
+                                            worker_id: worker_id.clone(),
+                                            operation: "release_lease".to_string(),
+                                            task_id: task_id.clone(),
+                                            result_ok: true,
+                                        },
+                                    ));
                                 }
                             }
                         } else {
@@ -389,15 +385,17 @@ pub fn run_worker_pool_fsm(
                             &mut last_worker_command_line,
                             command_poll_chunk,
                         );
-                        if updated_commands || last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
+                        let updated_states = append_worker_state_events(
+                            &mut workers,
+                            &mut last_worker_state_line,
+                            command_poll_chunk,
+                        );
+                        if updated_commands
+                            || updated_states
+                            || last_dashboard_refresh.elapsed() >= Duration::from_secs(1)
+                        {
                             refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
-                            render(
-                                terminal,
-                                &workers,
-                                &dashboard_snapshot(store)?,
-                                hb,
-                                lt,
-                            )?;
+                            render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                             last_dashboard_refresh = Instant::now();
                         }
                     }
@@ -414,7 +412,9 @@ pub fn run_worker_pool_fsm(
             if terminal.stdin_is_tty() {
                 terminal.draw_shutdown_screen("Error", &shutdown_message)?;
             } else {
-                terminal.write_line(&format!("Error: worker {worker_id} task {task_id}: {reason}"))?;
+                terminal.write_line(&format!(
+                    "Error: worker {worker_id} task {task_id}: {reason}"
+                ))?;
             }
             wait_for_quit(terminal, Some(&shutdown_message))?;
             return Ok(completed);
@@ -468,9 +468,9 @@ fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(
     // Poll until the user presses any key. poll_key returns None on timeout,
     // Some(key) when a key arrives. For fake terminals with an empty queue
     // the first poll immediately returns None and we exit — this prevents
-        // test hangs while still blocking on a real TTY until input is received.
-        loop {
-            match terminal.poll_key(100)? {
+    // test hangs while still blocking on a real TTY until input is received.
+    loop {
+        match terminal.poll_key(100)? {
             Some(INTERRUPT_SENTINEL_KEY) => {
                 if let Some(target) = copy_target {
                     if let Err(error) = terminal.copy_to_clipboard(target) {
@@ -615,8 +615,9 @@ fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
                     title: format!("Escalation requested for {active} active worker(s)"),
                     details: "Operator requested park/escalate from TUI hotkey".to_string(),
                     scope_key: "runtime".to_string(),
-                    rationale: "Operator requested immediate attention on active worker saturation."
-                        .to_string(),
+                    rationale:
+                        "Operator requested immediate attention on active worker saturation."
+                            .to_string(),
                     priority: Priority::P0,
                     source: "tui_hotkey".to_string(),
                     related_pr: None,
@@ -731,6 +732,32 @@ fn append_worker_tool_commands(
         if !matched {
             continue;
         }
+    }
+    updated
+}
+
+fn append_worker_state_events(
+    workers: &mut [WorkerRow],
+    last_worker_state_line: &mut usize,
+    max_events: usize,
+) -> bool {
+    let events = recent_worker_state_events(*last_worker_state_line, max_events);
+    let mut updated = false;
+    for (line, worker_id, state) in events {
+        for worker in workers.iter_mut() {
+            if worker.worker_id != worker_id {
+                continue;
+            }
+            if worker.state != state {
+                worker.state = state.clone();
+                worker.breadcrumb = format!("state>{state}");
+                worker.tool_line = format!("running {state}");
+                append_worker_command(worker, &format!("state {state}"));
+                updated = true;
+            }
+            break;
+        }
+        *last_worker_state_line = line + 1;
     }
     updated
 }
@@ -1135,8 +1162,11 @@ mod tests {
     fn wait_for_quit_copies_error_on_ctrl_c() {
         let terminal = FakeTerminal::new(true);
         terminal.enqueue_keys([INTERRUPT_SENTINEL_KEY]);
-        wait_for_quit(&terminal, Some("failed because the cosmos aligned the wrong way."))
-            .expect("wait should complete after copy shortcut");
+        wait_for_quit(
+            &terminal,
+            Some("failed because the cosmos aligned the wrong way."),
+        )
+        .expect("wait should complete after copy shortcut");
         assert_eq!(
             terminal.clipboard_copies(),
             vec!["failed because the cosmos aligned the wrong way.".to_string()]
@@ -1157,7 +1187,10 @@ mod tests {
         terminal.enqueue_keys(['c']);
         wait_for_quit(&terminal, Some("error line from agent"))
             .expect("wait should complete after copy shortcut");
-        assert_eq!(terminal.clipboard_copies(), vec!["error line from agent".to_string()]);
+        assert_eq!(
+            terminal.clipboard_copies(),
+            vec!["error line from agent".to_string()]
+        );
     }
 
     #[test]
@@ -1166,7 +1199,10 @@ mod tests {
         terminal.enqueue_keys(['C']);
         wait_for_quit(&terminal, Some("error line from agent"))
             .expect("wait should complete after copy shortcut");
-        assert_eq!(terminal.clipboard_copies(), vec!["error line from agent".to_string()]);
+        assert_eq!(
+            terminal.clipboard_copies(),
+            vec!["error line from agent".to_string()]
+        );
     }
 
     #[test]

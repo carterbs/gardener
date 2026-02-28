@@ -2,10 +2,10 @@ use crate::errors::GardenerError;
 use crate::log_retention::enforce_total_budget;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,12 +99,16 @@ pub fn default_run_log_path(working_dir: &Path) -> PathBuf {
 }
 
 pub fn init_run_logger(path: impl AsRef<Path>, working_dir: &Path) -> String {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     init_run_logger_nolock(path, working_dir)
 }
 
 pub fn clear_run_logger() {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     clear_run_logger_nolock()
 }
 
@@ -140,7 +144,9 @@ pub fn set_run_working_dir(path: &Path) {
 }
 
 pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     append_run_log_nolock(level, event_type, payload);
 }
 
@@ -203,7 +209,9 @@ fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
 }
 
 pub fn current_run_log_path() -> Option<PathBuf> {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     current_run_log_path_nolock()
 }
 
@@ -213,7 +221,9 @@ fn current_run_log_path_nolock() -> Option<PathBuf> {
 }
 
 pub fn current_run_id() -> Option<String> {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     current_run_id_nolock()
 }
 
@@ -223,7 +233,9 @@ fn current_run_id_nolock() -> Option<String> {
 }
 
 pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String> {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     recent_worker_log_lines_nolock(worker_id, max_lines)
 }
 
@@ -269,12 +281,17 @@ fn recent_worker_log_lines_nolock(worker_id: &str, max_lines: usize) -> Vec<Stri
     if lines.len() <= max_lines {
         return lines;
     }
-    lines.split_off(lines.len() - max_lines).into_iter().collect()
+    lines
+        .split_off(lines.len() - max_lines)
+        .into_iter()
+        .collect()
 }
 
 pub fn current_log_line_count() -> usize {
     let _ = structured_fallback_line("logging", "current_log_line_count", "starting");
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     current_log_line_count_nolock()
 }
 
@@ -295,7 +312,9 @@ pub fn recent_worker_tool_commands(
     from_line: usize,
     max_lines: usize,
 ) -> Vec<(usize, String, String)> {
-    let _guard = run_log_activity_lock().lock().expect("run log activity lock");
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
     recent_worker_tool_commands_nolock(from_line, max_lines)
 }
 
@@ -370,6 +389,75 @@ fn recent_worker_tool_commands_nolock(
     events.split_off(events.len() - max_lines)
 }
 
+pub fn recent_worker_state_events(
+    from_line: usize,
+    max_lines: usize,
+) -> Vec<(usize, String, String)> {
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
+    recent_worker_state_events_nolock(from_line, max_lines)
+}
+
+fn recent_worker_state_events_nolock(
+    from_line: usize,
+    max_lines: usize,
+) -> Vec<(usize, String, String)> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let Some(path) = current_run_log_path_nolock() else {
+        return Vec::new();
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut events = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if idx < from_line {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let event_type = value
+            .get("event_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if event_type != "agent.turn.started" {
+            continue;
+        }
+
+        let worker_id = match value
+            .get("payload")
+            .and_then(|p| p.get("worker_id"))
+            .and_then(Value::as_str)
+        {
+            Some(worker_id) if !worker_id.is_empty() => worker_id.to_string(),
+            _ => continue,
+        };
+        let state = match value
+            .get("payload")
+            .and_then(|p| p.get("state"))
+            .and_then(Value::as_str)
+        {
+            Some(state) if !state.is_empty() => state.to_string(),
+            _ => continue,
+        };
+        events.push((idx, worker_id, state));
+    }
+
+    if events.len() <= max_lines {
+        return events;
+    }
+    events.split_off(events.len() - max_lines)
+}
+
 fn extract_payload_command(payload: &Value) -> Option<String> {
     payload
         .get("command")
@@ -383,11 +471,7 @@ fn extract_payload_command(payload: &Value) -> Option<String> {
                 .map(|command| command.replace('\n', "\\n"))
         })
         .or_else(|| payload.get("payload").and_then(extract_payload_command))
-        .or_else(|| {
-            payload
-                .get("item")
-                .and_then(extract_payload_command)
-        })
+        .or_else(|| payload.get("item").and_then(extract_payload_command))
 }
 
 fn kv_attr(key: &str, value: &str) -> Value {
@@ -477,14 +561,17 @@ fn random_hex(bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_run_logger_nolock, current_run_id_nolock, current_run_log_path_nolock, default_run_log_path,
-        init_run_logger_nolock, append_run_log_nolock, structured_fallback_line, JsonlLogger,
+        append_run_log_nolock, clear_run_logger_nolock, current_run_id_nolock,
+        current_run_log_path_nolock, default_run_log_path, init_run_logger_nolock,
+        structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
     use std::path::Path;
 
     fn with_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        super::run_log_activity_lock().lock().expect("run log activity lock")
+        super::run_log_activity_lock()
+            .lock()
+            .expect("run log activity lock")
     }
 
     #[test]
@@ -629,7 +716,10 @@ mod tests {
         }
 
         assert_eq!(super::truncate_utf8("short", 20), "short");
-        assert_eq!(super::truncate_utf8(&"x".repeat(20), 10), "x".repeat(7) + "...");
+        assert_eq!(
+            super::truncate_utf8(&"x".repeat(20), 10),
+            "x".repeat(7) + "..."
+        );
     }
 
     #[test]
@@ -666,11 +756,7 @@ mod tests {
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"Message","command":"skip"}}"#,
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-2","kind":"ToolCall","command":"ignored"}}"#,
         ];
-        std::fs::write(
-            &path,
-            log_lines.join("\n"),
-        )
-        .expect("seed log");
+        std::fs::write(&path, log_lines.join("\n")).expect("seed log");
         let lines = super::recent_worker_tool_commands_nolock(0, 2);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].0, 0);
@@ -679,6 +765,30 @@ mod tests {
         assert_eq!(lines[1].1, "worker-2");
         assert!(lines[0].2.contains("rg abc"));
         assert!(lines[1].2.contains("ignored"));
+        clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn recent_worker_state_events_collects_turn_start_events() {
+        let _guard = with_test_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("run.jsonl");
+        init_run_logger_nolock(&path, dir.path());
+        let log_lines = [
+            r#"{"event_type":"agent.turn.started","payload":{"worker_id":"worker-1","state":"understand"}}"#,
+            r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"ToolCall","command":"ignored"}}"#,
+            r#"{"event_type":"agent.turn.started","payload":{"worker_id":"worker-2","state":"gitting"}}"#,
+        ];
+        std::fs::write(&path, log_lines.join("\n")).expect("seed log");
+
+        let lines = super::recent_worker_state_events_nolock(0, 8);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, 0);
+        assert_eq!(lines[0].1, "worker-1");
+        assert_eq!(lines[0].2, "understand");
+        assert_eq!(lines[1].0, 2);
+        assert_eq!(lines[1].1, "worker-2");
+        assert_eq!(lines[1].2, "gitting");
         clear_run_logger_nolock();
     }
 

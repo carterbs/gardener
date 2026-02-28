@@ -1417,8 +1417,13 @@ pub fn draw_dashboard_live(
 }
 
 pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
-    let lines = report.lines().take(22).collect::<Vec<_>>().join("\n");
     with_live_terminal(|terminal| {
+        let available_lines = terminal
+            .size()
+            .map_err(|e| GardenerError::Io(e.to_string()))?
+            .height
+            .saturating_sub(8) as usize;
+        let lines = report.lines().take(available_lines).collect::<Vec<_>>().join("\n");
         terminal
             .draw(|frame| draw_report_frame(frame, path, &lines))
             .map(|_| ())

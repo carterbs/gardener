@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use gardener::config::{
     effective_agent_for_state, effective_model_for_state, load_config, resolve_scope,
     resolve_validation_command, AppConfig, CliOverrides, StateConfig,
@@ -118,21 +118,21 @@ fn fixture(path: &str) -> String {
 
 #[test]
 fn binary_help_and_prune_smoke() {
-    let mut help = Command::cargo_bin("gardener").expect("bin");
+    let mut help = cargo_bin_cmd!("gardener");
     help.arg("--help");
     let out = help.assert().success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("--agent"));
     assert!(!stdout.contains("--headless"));
 
-    let mut prune = Command::cargo_bin("gardener").expect("bin");
+    let mut prune = cargo_bin_cmd!("gardener");
     prune
         .arg("--prune-only")
         .arg("--config")
         .arg(fixture("configs/phase01-minimal.toml"));
     prune.assert().success();
 
-    let mut scoped = Command::cargo_bin("gardener").expect("bin");
+    let mut scoped = cargo_bin_cmd!("gardener");
     scoped
         .arg("--prune-only")
         .arg("--config")

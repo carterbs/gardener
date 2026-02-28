@@ -130,17 +130,6 @@ impl StartupHeadline {
         }
     }
 
-    fn spinner(&self) -> &'static str {
-        STARTUP_SPINNER_FRAMES[self.spinner_frame % STARTUP_SPINNER_FRAMES.len()]
-    }
-
-    fn ellipsis(&self) -> &'static str {
-        match self.ellipsis_phase {
-            0 => ".",
-            1 => "..",
-            _ => "...",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,31 +408,6 @@ struct ParsedBacklogItem {
 }
 
 impl WorkerMetrics {
-    fn from_workers(workers: &[WorkerRow]) -> Self {
-        let mut metrics = Self {
-            total: workers.len(),
-            doing: 0,
-            reviewing: 0,
-            idle: 0,
-            complete: 0,
-            failed: 0,
-        };
-        for worker in workers {
-            if worker.state.eq_ignore_ascii_case("reviewing") {
-                metrics.reviewing += 1;
-            } else if worker.state.eq_ignore_ascii_case("idle") {
-                metrics.idle += 1;
-            } else if worker.state.eq_ignore_ascii_case("complete") {
-                metrics.complete += 1;
-            } else if worker.state.eq_ignore_ascii_case("failed") {
-                metrics.failed += 1;
-            } else {
-                metrics.doing += 1;
-            }
-        }
-        metrics
-    }
-
     fn from_app_state(workers: &[WorkerCard]) -> Self {
         let mut metrics = Self {
             total: workers.len(),
@@ -467,13 +431,6 @@ impl WorkerMetrics {
 }
 
 impl ParsedBacklogPriority {
-    fn span_style(self) -> Style {
-        match self {
-            Self::P0 => Style::default().fg(Color::Rgb(255, 122, 122)),
-            Self::P1 => Style::default().fg(Color::Rgb(255, 207, 105)),
-            Self::P2 => Style::default().fg(Color::Rgb(127, 230, 148)),
-        }
-    }
 }
 
 fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
@@ -1930,7 +1887,7 @@ mod tests {
         render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
         scroll_workers_up, toggle_selected_worker_command_detail, AppState, ProblemClass, StageState,
         BacklogView,
-        QueueStats, StartupHeadlineView, WorkerMetrics, WorkerRow,
+        QueueStats, StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow, WorkerState,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -2113,11 +2070,11 @@ mod tests {
         );
         assert_eq!(humanize_breadcrumb("state>merging"), "Merging");
         assert_eq!(
-            worker_flow_summary("merging", "prompt 42", "state>merging"),
+            super::worker_flow_summary("merging", "prompt 42", "state>merging"),
             "Merging changes (prompt 42)"
         );
         assert_eq!(
-            worker_flow_summary("failed", "failed: conflict applying patch", ""),
+            super::worker_flow_summary("failed", "failed: conflict applying patch", ""),
             "Task failed (conflict applying patch)"
         );
     }
@@ -2265,47 +2222,50 @@ mod tests {
     #[test]
     fn worker_metrics_are_derived_from_states() {
         let workers = vec![
-            WorkerRow {
-                worker_id: "w1".to_string(),
+            WorkerCard {
+                name: "w1".to_string(),
                 state: "doing".to_string(),
-                task_title: String::new(),
+                task: String::new(),
                 tool_line: String::new(),
                 breadcrumb: String::new(),
+                activity: Vec::new(),
+                command_details: Vec::new(),
+                commands_expanded: false,
+                state_bucket: WorkerState::Doing,
                 last_heartbeat_secs: 0,
-                session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
-                commands_expanded: false,
-                command_details: Vec::new(),
             },
-            WorkerRow {
-                worker_id: "w2".to_string(),
+            WorkerCard {
+                name: "w2".to_string(),
                 state: "reviewing".to_string(),
-                task_title: String::new(),
+                task: String::new(),
                 tool_line: String::new(),
                 breadcrumb: String::new(),
+                activity: Vec::new(),
+                command_details: Vec::new(),
+                commands_expanded: false,
+                state_bucket: WorkerState::Reviewing,
                 last_heartbeat_secs: 0,
-                session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
-                commands_expanded: false,
-                command_details: Vec::new(),
             },
-            WorkerRow {
-                worker_id: "w3".to_string(),
+            WorkerCard {
+                name: "w3".to_string(),
                 state: "idle".to_string(),
-                task_title: String::new(),
+                task: String::new(),
                 tool_line: String::new(),
                 breadcrumb: String::new(),
+                activity: Vec::new(),
+                command_details: Vec::new(),
+                commands_expanded: false,
+                state_bucket: WorkerState::Idle,
                 last_heartbeat_secs: 0,
-                session_age_secs: 0,
                 lease_held: false,
                 session_missing: false,
-                commands_expanded: false,
-                command_details: Vec::new(),
             },
         ];
-        let metrics = WorkerMetrics::from_workers(&workers);
+        let metrics = WorkerMetrics::from_app_state(&workers);
         assert_eq!(metrics.total, 3);
         assert_eq!(metrics.doing, 1);
         assert_eq!(metrics.reviewing, 1);

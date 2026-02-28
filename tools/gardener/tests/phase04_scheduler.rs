@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 
 fn fixture(path: &str) -> String {
     format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"))
@@ -6,7 +6,7 @@ fn fixture(path: &str) -> String {
 
 #[test]
 fn scheduler_mode_completes_target() {
-    let mut cmd = Command::cargo_bin("gardener").expect("bin");
+    let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--parallelism")
         .arg("3")
         .arg("--quit-after")

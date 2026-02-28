@@ -1,4 +1,4 @@
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 
 fn fixture(path: &str) -> String {
     format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"))
@@ -6,7 +6,7 @@ fn fixture(path: &str) -> String {
 
 #[test]
 fn help_lists_phase1_flags() {
-    let mut cmd = Command::cargo_bin("gardener").expect("bin");
+    let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--help");
     let out = cmd.assert().success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
@@ -18,7 +18,7 @@ fn help_lists_phase1_flags() {
 
 #[test]
 fn prune_only_smoke_succeeds() {
-    let mut cmd = Command::cargo_bin("gardener").expect("bin");
+    let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--prune-only")
         .arg("--config")
         .arg(fixture("configs/phase01-minimal.toml"));
@@ -27,7 +27,7 @@ fn prune_only_smoke_succeeds() {
 
 #[test]
 fn prune_only_with_scoped_working_dir_succeeds() {
-    let mut cmd = Command::cargo_bin("gardener").expect("bin");
+    let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--prune-only")
         .arg("--config")
         .arg(fixture("configs/phase01-minimal.toml"))
@@ -39,7 +39,7 @@ fn prune_only_with_scoped_working_dir_succeeds() {
 #[test]
 fn sync_only_exports_snapshot_and_exits_zero() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut cmd = Command::cargo_bin("gardener").expect("bin");
+    let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--sync-only")
         .arg("--config")
         .arg(fixture("configs/phase09-cutover.toml"))
@@ -52,7 +52,7 @@ fn sync_only_exports_snapshot_and_exits_zero() {
 
 #[test]
 fn invalid_config_path_exits_nonzero() {
-    let mut cmd = Command::cargo_bin("gardener").expect("bin");
+    let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--prune-only")
         .arg("--config")
         .arg(fixture("configs/missing.toml"));

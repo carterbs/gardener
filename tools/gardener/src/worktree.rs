@@ -81,19 +81,57 @@ impl<'a> WorktreeClient<'a> {
                 return Ok(());
             }
 
+            // Path is registered but branch doesn't match (detached HEAD or
+            // leftover from a previous task).  Force-remove and fall through
+            // to re-creation instead of returning a fatal error.
             append_run_log(
-                "error",
-                "worktree.create.path_collision",
+                "warn",
+                "worktree.create.stale_path_reclaim",
                 json!({
                     "cwd": self.cwd.display().to_string(),
                     "path": path.display().to_string(),
                     "requested_branch": branch,
                     "existing_branch": existing_entry.branch,
+                    "detached": existing_entry.detached,
                 }),
             );
-            return Err(GardenerError::Process(
-                "worktree create failed: path is already used by another worktree".to_string(),
-            ));
+            let remove = self.runner.run(ProcessRequest {
+                program: "git".to_string(),
+                args: vec![
+                    "worktree".to_string(),
+                    "remove".to_string(),
+                    "--force".to_string(),
+                    path.display().to_string(),
+                ],
+                cwd: Some(self.cwd.clone()),
+            })?;
+            if remove.exit_code != 0 {
+                append_run_log(
+                    "error",
+                    "worktree.create.stale_path_reclaim_failed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "path": path.display().to_string(),
+                        "requested_branch": branch,
+                        "existing_branch": existing_entry.branch,
+                        "exit_code": remove.exit_code,
+                        "stderr": remove.stderr,
+                    }),
+                );
+                return Err(GardenerError::Process(
+                    "worktree create failed: path is already used by another worktree and could not be reclaimed".to_string(),
+                ));
+            }
+            append_run_log(
+                "info",
+                "worktree.create.stale_path_reclaimed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "path": path.display().to_string(),
+                    "requested_branch": branch,
+                }),
+            );
+            // Fall through to create the worktree fresh below.
         }
 
         if path.exists() {
@@ -365,56 +403,6 @@ impl<'a> WorktreeClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         Ok(check.exit_code == 0)
-    }
-
-    pub fn remove_recreate_if_stale_empty(
-        &self,
-        path: &Path,
-        branch: &str,
-    ) -> Result<(), GardenerError> {
-        append_run_log(
-            "info",
-            "worktree.stale.remove_started",
-            json!({
-                "cwd": self.cwd.display().to_string(),
-                "path": path.display().to_string(),
-                "branch": branch
-            }),
-        );
-        let remove = self.runner.run(ProcessRequest {
-            program: "git".to_string(),
-            args: vec![
-                "worktree".to_string(),
-                "remove".to_string(),
-                "--force".to_string(),
-                path.display().to_string(),
-            ],
-            cwd: Some(self.cwd.clone()),
-        })?;
-        if remove.exit_code != 0 {
-            append_run_log(
-                "error",
-                "worktree.stale.remove_failed",
-                json!({
-                    "cwd": self.cwd.display().to_string(),
-                    "path": path.display().to_string(),
-                    "branch": branch,
-                    "exit_code": remove.exit_code,
-                    "stderr": remove.stderr
-                }),
-            );
-            return Err(GardenerError::Process("worktree remove failed".to_string()));
-        }
-        append_run_log(
-            "info",
-            "worktree.stale.removed",
-            json!({
-                "cwd": self.cwd.display().to_string(),
-                "path": path.display().to_string(),
-                "branch": branch
-            }),
-        );
-        self.create_or_resume(path, branch)
     }
 
     pub fn cleanup_on_completion(&self, path: &Path) -> Result<(), GardenerError> {
@@ -806,6 +794,97 @@ mod tests {
             "unexpected error: {err}"
         );
         assert_eq!(runner.spawned().len(), 1);
+    }
+
+    #[test]
+    fn create_or_resume_reclaims_detached_head_worktree() {
+        let runner = FakeProcessRunner::default();
+        // list returns a worktree at the target path but detached (no branch)
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.worktrees/task-1\ndetached\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git worktree remove --force succeeds
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git worktree add -b succeeds
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // hook resolve (source)
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        // hook resolve (target)
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, "/repo")
+            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
+            .expect("should reclaim detached HEAD worktree");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 5);
+        // [0] = list, [1] = remove --force, [2] = add -b, [3-4] = hook resolves
+        assert_eq!(spawned[1].args[0], "worktree");
+        assert_eq!(spawned[1].args[1], "remove");
+        assert_eq!(spawned[1].args[2], "--force");
+        assert_eq!(spawned[2].args[0], "worktree");
+        assert_eq!(spawned[2].args[1], "add");
+    }
+
+    #[test]
+    fn create_or_resume_reclaims_wrong_branch_worktree() {
+        let runner = FakeProcessRunner::default();
+        // list returns worktree at target path but on a different branch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.worktrees/task-1\nbranch refs/heads/old-branch\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git worktree remove --force succeeds
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git worktree add -b succeeds
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // hook resolves
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        WorktreeClient::new(&runner, "/repo")
+            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
+            .expect("should reclaim wrong-branch worktree");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 5);
+        assert_eq!(spawned[1].args[1], "remove");
+        assert_eq!(spawned[2].args[1], "add");
     }
 
     #[test]

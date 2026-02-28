@@ -9,20 +9,9 @@ GARDENER_BINARY=${GARDENER_BINARY:-scripts/brad-gardener}
 CODEXXX_BINARY=${CODEXXX_BINARY:-codexxx}
 TARGET_BRANCH=${GARDENER_TARGET_BRANCH:-main}
 MAX_FAILURES=${GARDENER_MAX_FAILURES:-5}
-LOG_PATH=${GARDENER_LOG_PATH:-.gardener/otel-logs.jsonl}
-if [[ -z "${GARDENER_LOG_PATH:-}" ]]; then
-  if [[ -f .cache/gardener/otel-logs.jsonl ]]; then
-    LOG_PATH=.cache/gardener/otel-logs.jsonl
-  elif [[ -f .gardener/otel-logs.jsonl ]]; then
-    LOG_PATH=.gardener/otel-logs.jsonl
-  fi
-fi
-STREAM_OTEL_LOGS=${GARDENER_STREAM_OTEL_LOGS:-1}
-OTEL_LOG_TAIL_LINES=${GARDENER_OTEL_LOG_TAIL_LINES:-30}
 ZSHRC_PATH=${ZSHRC_PATH:-"$HOME/.zshrc"}
 USE_ATTEMPT_DB=${GARDENER_USE_ATTEMPT_DB:-1}
 DB_ATTEMPT_DIR=.cache/gardener/agent-db-attempts
-OTEL_STREAM_PID=""
 
 if [[ -n "${GARDENER_DB_PATH:-}" ]]; then
   BASE_DB_PATH=$GARDENER_DB_PATH
@@ -147,33 +136,7 @@ run_with_agent() {
   echo "info: codexxx produced commit $after_sha"
 }
 
-start_otel_stream() {
-  if ! is_true "$STREAM_OTEL_LOGS"; then
-    return 0
-  fi
-
-  if ! [[ "$OTEL_LOG_TAIL_LINES" =~ ^[0-9]+$ ]] || [[ "$OTEL_LOG_TAIL_LINES" -le 0 ]]; then
-    echo "warning: invalid GARDENER_OTEL_LOG_TAIL_LINES=$OTEL_LOG_TAIL_LINES, defaulting to 30" >&2
-    OTEL_LOG_TAIL_LINES=30
-  fi
-
-  {
-    echo "info: streaming last $OTEL_LOG_TAIL_LINES lines from $LOG_PATH (live updates)"
-    tail -n "$OTEL_LOG_TAIL_LINES" -F "$LOG_PATH" 2>/dev/null | sed -u 's/^/[otel] /'
-  } &
-  OTEL_STREAM_PID=$!
-}
-
-stop_otel_stream() {
-  if [[ -n "${OTEL_STREAM_PID:-}" ]]; then
-    kill "$OTEL_STREAM_PID" >/dev/null 2>&1 || true
-    wait "$OTEL_STREAM_PID" >/dev/null 2>&1 || true
-    OTEL_STREAM_PID=""
-  fi
-}
-
 interrupt() {
-  stop_otel_stream
   echo "info: interrupted; aborting gardener retry loop." >&2
   exit 130
 }
@@ -190,8 +153,6 @@ is_interrupt_code() {
 }
 
 trap interrupt INT TERM
-trap stop_otel_stream EXIT
-
 
 mkdir -p "$DB_ATTEMPT_DIR"
 
@@ -224,9 +185,7 @@ for attempt in $(seq 1 "$MAX_FAILURES"); do
     echo "info: attempt $attempt using production DB ${BASE_DB_PATH}"
   fi
 
-  start_otel_stream
   if run_with_env "${run_db_env[@]}" "$GARDENER_BINARY" "${GARDENER_ARGS[@]}" >"$stdout_file" 2>"$stderr_file"; then
-    stop_otel_stream
     echo "info: gardener succeeded on attempt $attempt"
     if is_true "$USE_ATTEMPT_DB"; then
       echo "info: isolated DB run preserved at $attempt_run_db"
@@ -238,7 +197,6 @@ for attempt in $(seq 1 "$MAX_FAILURES"); do
     exit 0
   fi
   gardener_rc=$?
-  stop_otel_stream
   if is_interrupt_code "$gardener_rc"; then
     exit "$gardener_rc"
   fi
@@ -279,10 +237,6 @@ for attempt in $(seq 1 "$MAX_FAILURES"); do
     echo "STDERR (full):"
     cat "$stderr_file"
     echo
-    if [[ -f "$LOG_PATH" ]]; then
-      echo "Recent run log ($LOG_PATH):"
-      tail -n "$OTEL_LOG_TAIL_LINES" "$LOG_PATH"
-    fi
     echo
     echo "Task: Fix this failure in the repository and commit the fix directly to $TARGET_BRANCH."
     echo "You must only return a concise summary once commit is made."

@@ -10,6 +10,13 @@ CODEXXX_BINARY=${CODEXXX_BINARY:-codexxx}
 TARGET_BRANCH=${GARDENER_TARGET_BRANCH:-main}
 MAX_FAILURES=${GARDENER_MAX_FAILURES:-5}
 LOG_PATH=${GARDENER_LOG_PATH:-.gardener/otel-logs.jsonl}
+if [[ -z "${GARDENER_LOG_PATH:-}" ]]; then
+  if [[ -f .cache/gardener/otel-logs.jsonl ]]; then
+    LOG_PATH=.cache/gardener/otel-logs.jsonl
+  elif [[ -f .gardener/otel-logs.jsonl ]]; then
+    LOG_PATH=.gardener/otel-logs.jsonl
+  fi
+fi
 STREAM_OTEL_LOGS=${GARDENER_STREAM_OTEL_LOGS:-1}
 OTEL_LOG_TAIL_LINES=${GARDENER_OTEL_LOG_TAIL_LINES:-30}
 ZSHRC_PATH=${ZSHRC_PATH:-"$HOME/.zshrc"}
@@ -110,13 +117,19 @@ fi
 
 run_with_agent() {
   local prompt_file=$1
+  local run_rc
   local before_sha
   before_sha=$(git rev-parse HEAD)
 
   # shellcheck disable=SC2206
   local codexxx_args=(${CODEXXX_ARGS:-})
-  if ! run_with_env "$CODEXXX_BINARY" "${codexxx_args[@]}" <"$prompt_file"; then
-    echo "error: codexxx command failed" >&2
+  run_with_env "$CODEXXX_BINARY" "${codexxx_args[@]}" <"$prompt_file"
+  run_rc=$?
+  if [[ "$run_rc" -ne 0 ]]; then
+    if is_interrupt_code "$run_rc"; then
+      return "$run_rc"
+    fi
+    echo "error: codexxx command failed (exit $run_rc)" >&2
     return 1
   fi
 

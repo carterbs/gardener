@@ -43,6 +43,7 @@ pub struct TeardownReport {
     pub sandbox_torn_down: bool,
     pub worktree_cleaned: bool,
     pub state_cleared: bool,
+    pub main_updated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,6 +607,7 @@ fn execute_task_live(
                         sandbox_torn_down: true,
                         worktree_cleaned,
                         state_cleared: true,
+                        main_updated: false,
                     };
                     append_run_log(
                         "info",
@@ -877,7 +879,8 @@ fn execute_task_live(
 
     fsm.transition(WorkerState::Complete)?;
 
-    let teardown = teardown_after_completion(&worktree_client, &worktree_path, &merge_output);
+    let teardown =
+        teardown_after_completion(&worktree_client, &worktree_path, &merge_output, &repo_root_git);
     append_run_log(
         "info",
         "worker.task.complete",
@@ -885,7 +888,8 @@ fn execute_task_live(
             "worker_id": identity.worker_id,
             "task_id": task_id,
             "merge_verified": teardown.merge_verified,
-            "worktree_cleaned": teardown.worktree_cleaned
+            "worktree_cleaned": teardown.worktree_cleaned,
+            "main_updated": teardown.main_updated
         }),
     );
     append_run_log(
@@ -1062,6 +1066,7 @@ fn execute_task_simulated(
         sandbox_torn_down: true,
         worktree_cleaned: true,
         state_cleared: true,
+        main_updated: false,
     };
 
     append_run_log(
@@ -1644,9 +1649,24 @@ fn teardown_after_completion(
     worktree_client: &WorktreeClient<'_>,
     worktree_path: &Path,
     output: &MergingOutput,
+    repo_git: &GitClient<'_>,
 ) -> TeardownReport {
     let worktree_cleaned = if output.merged {
         worktree_client.cleanup_on_completion(worktree_path).is_ok()
+    } else {
+        false
+    };
+    let main_updated = if output.merged {
+        if let Err(err) = repo_git.pull_main() {
+            append_run_log(
+                "warn",
+                "worker.teardown.pull_main_failed",
+                json!({ "error": err.to_string() }),
+            );
+            false
+        } else {
+            true
+        }
     } else {
         false
     };
@@ -1656,6 +1676,7 @@ fn teardown_after_completion(
         sandbox_torn_down: output.merged,
         worktree_cleaned,
         state_cleared: output.merged,
+        main_updated,
     }
 }
 

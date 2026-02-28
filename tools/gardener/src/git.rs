@@ -401,6 +401,50 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn pull_main(&self) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "git.pull_main.started",
+            json!({ "cwd": self.cwd.display().to_string() }),
+        );
+        let fetch = self.run(["git", "fetch", "origin", "main"])?;
+        if fetch.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "git.pull_main.fetch_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": fetch.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git fetch origin main failed: {}",
+                fetch.stderr
+            )));
+        }
+        let merge = self.run(["git", "merge", "--ff-only", "origin/main"])?;
+        if merge.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "git.pull_main.merge_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": merge.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git merge --ff-only origin/main failed: {}",
+                merge.stderr
+            )));
+        }
+        append_run_log(
+            "info",
+            "git.pull_main.succeeded",
+            json!({ "cwd": self.cwd.display().to_string() }),
+        );
+        Ok(())
+    }
+
     pub fn run_validation_command(&self, command: &str) -> Result<(), GardenerError> {
         append_run_log(
             "info",

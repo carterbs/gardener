@@ -1583,7 +1583,8 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 mod tests {
     use super::{
         execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
-        parse_merge_output, verify_merge_output, worktree_branch_for, worktree_path_for,
+        parse_merge_output, parse_conflict_resolution_output, verify_merge_output,
+        worktree_branch_for, worktree_path_for,
         worktree_slug_for_task,
         worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };

@@ -238,6 +238,7 @@ pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String>
 }
 
 pub fn current_log_line_count() -> usize {
+    let _ = structured_fallback_line("logging", "current_log_line_count", "starting");
     let Some(path) = current_run_log_path() else {
         return 0;
     };
@@ -253,6 +254,7 @@ pub fn recent_worker_tool_commands(
     from_line: usize,
     max_lines: usize,
 ) -> Vec<(usize, String, String)> {
+    let _ = structured_fallback_line("logging", "recent_worker_tool_commands", "starting");
     if max_lines == 0 {
         return Vec::new();
     }

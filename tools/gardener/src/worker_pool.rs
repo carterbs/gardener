@@ -89,8 +89,10 @@ pub fn run_worker_pool_fsm(
         })
         .collect::<Vec<_>>();
     let mut last_worker_command_line = current_log_line_count();
+    let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let command_poll_chunk = 32;
     let mut completed = 0usize;
+    refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
     render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
     while completed < target {
@@ -143,6 +145,7 @@ pub fn run_worker_pool_fsm(
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
             append_worker_command(&mut workers[idx], "claimed");
+            refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
             render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
             claimed.push((idx, task));
         }
@@ -235,7 +238,10 @@ pub fn run_worker_pool_fsm(
                                 append_worker_command(&mut workers[idx], &prompt);
                                 workers[idx].breadcrumb =
                                     format!("state>{}", event.state.as_str());
-                                last_activity_pulse[idx] = Instant::now();
+                                let now = Instant::now();
+                                last_activity_pulse[idx] = now;
+                                workers[idx].last_heartbeat_secs = 0;
+                                workers[idx].session_age_secs = 0;
                                 append_run_log(
                                     "debug",
                                     "worker.turn.state",
@@ -246,6 +252,7 @@ pub fn run_worker_pool_fsm(
                                         "context_manifest_hash": event.context_manifest_hash
                                     }),
                                 );
+                                refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                                 render(
                                     terminal,
                                     &workers,
@@ -336,6 +343,7 @@ pub fn run_worker_pool_fsm(
                         } else {
                             request_interrupt();
                         }
+                        refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -345,6 +353,7 @@ pub fn run_worker_pool_fsm(
                             command_poll_chunk,
                         );
                         if updated_commands || last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
+                            refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                             render(
                                 terminal,
                                 &workers,
@@ -583,6 +592,17 @@ fn append_worker_command(worker: &mut WorkerRow, command: &str) {
     }
 }
 
+fn refresh_worker_heartbeats(workers: &mut [WorkerRow], last_activity_pulse: &[Instant]) {
+    let now = Instant::now();
+    for (idx, worker) in workers.iter_mut().enumerate() {
+        if let Some(last_pulse) = last_activity_pulse.get(idx) {
+            let age = now.duration_since(*last_pulse).as_secs();
+            worker.last_heartbeat_secs = age;
+            worker.session_age_secs = age;
+        }
+    }
+}
+
 fn now_hhmmss() -> String {
     let timestamp = now_unix_millis().rem_euclid(86_400_000);
     let secs = (timestamp / 1000) as u64;
@@ -753,13 +773,12 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{hotkey_action, run_worker_pool_fsm};
-    use crate::errors::GardenerError;
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
     use crate::priority::Priority;
     use crate::runtime::{
-        FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime, Terminal,
+        FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
     };
     use crate::task_identity::TaskKind;
     use crate::types::RuntimeScope;
@@ -890,7 +909,6 @@ mod tests {
         assert!(!terminal.report_draws().is_empty());
     }
 
-    #[test]
     #[test]
     fn run_worker_pool_fsm_handles_v_and_b_with_report_draws() {
         let dir = TempDir::new().expect("tempdir");

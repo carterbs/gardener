@@ -18,9 +18,11 @@ use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WORKER_LIST_ROW_HEIGHT: usize = 3;
+const COMPACT_WORKER_LIST_ROW_HEIGHT: usize = 2;
 const RECENT_COMMAND_STREAM_LIMIT: usize = 4;
-const WORKER_FLOW_STATES: [&str; 6] = [
+const WORKER_FLOW_STATES: [&str; 7] = [
     "understand",
+    "planning",
     "doing",
     "gitting",
     "reviewing",
@@ -400,6 +402,7 @@ fn wizard_step_indicator(current_step: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+#[allow(dead_code)]
 fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
     let mut command = command.to_string();
     let prefix = format!("{timestamp}  ");
@@ -803,6 +806,7 @@ fn draw_dashboard_frame(
     let viewport = frame.area();
     app_state.terminal_width = viewport.width;
     app_state.terminal_height = viewport.height;
+    let compact_view = app_state.terminal_width <= 80 && app_state.terminal_height <= 19;
     let human_problems = workers
         .iter()
         .filter_map(|row| {
@@ -836,7 +840,13 @@ fn draw_dashboard_frame(
         .constraints(layout_constraints)
         .split(frame.area());
     let body_height = chunks[1].height;
-    let now_rows: u16 = 7;
+    let now_rows: u16 = if app_state.terminal_height <= 12 {
+        3
+    } else if compact_view {
+        5
+    } else {
+        7
+    };
     let remaining = body_height.saturating_sub(now_rows);
     let backlog_reserve = dashboard_worker_rows_for_width(app_state.terminal_width);
     let requested_backlog_rows = if remaining > backlog_reserve {
@@ -1002,10 +1012,18 @@ fn draw_dashboard_frame(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(body[1]);
-    let viewport_height = workers_panel[1]
-        .height
-        .min(frame.area().height.saturating_sub(12).max(1));
-    let worker_row_capacity = (viewport_height as usize / WORKER_LIST_ROW_HEIGHT).max(1);
+    let viewport_cap = if compact_view {
+        frame.area().height.saturating_sub(11)
+    } else {
+        frame.area().height.saturating_sub(12)
+    };
+    let viewport_height = workers_panel[1].height.min(viewport_cap.max(1));
+    let worker_row_height = if compact_view {
+        COMPACT_WORKER_LIST_ROW_HEIGHT
+    } else {
+        WORKER_LIST_ROW_HEIGHT
+    };
+    let worker_row_capacity = (viewport_height as usize / worker_row_height).max(1);
     let max_worker_offset = app_state.workers.len().saturating_sub(worker_row_capacity);
     WORKERS_VIEWPORT_CAPACITY.with(|cell| {
         *cell.borrow_mut() = worker_row_capacity;
@@ -1068,24 +1086,33 @@ fn draw_dashboard_frame(
                 Style::default().fg(Color::Blue),
             ));
             flow_spans.extend(flow_line);
-            let lines = vec![
-                Line::from(vec![
+            let lines = if compact_view {
+                vec![Line::from(vec![
                     Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
                     Span::raw(": "),
                     Span::raw(row.task.clone()),
                 ]),
-                Line::from(flow_spans),
-                Line::from(vec![
-                    Span::raw("    "),
-                    Span::styled("Commands: ", Style::default().fg(Color::Blue)),
-                    Span::styled(
-                        command_stream,
-                        Style::default()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                ]),
-            ];
+                Line::from(flow_spans)]
+            } else {
+                vec![
+                    Line::from(vec![
+                        Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
+                        Span::raw(": "),
+                        Span::raw(row.task.clone()),
+                    ]),
+                    Line::from(flow_spans),
+                    Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled("Commands: ", Style::default().fg(Color::Blue)),
+                        Span::styled(
+                            command_stream,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::DIM),
+                        ),
+                    ]),
+                ]
+            };
             ListItem::new(lines)
         })
         .collect::<Vec<_>>();
@@ -1753,14 +1780,15 @@ fn worker_command_stream(commands: &[CommandEntry]) -> String {
         .join("  |  ")
 }
 
-fn normalize_worker_state<'a>(state: &'a str) -> &'a str {
+fn normalize_worker_state(state: &str) -> &str {
     match state {
-        "init" | "boot" | "planning" | "backlog_sync" | "working" | "seeding" => "understand",
+        "init" | "boot" | "backlog_sync" | "working" | "seeding" => "understand",
         "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "unresolved" | "idle" => state,
         _ => "unknown",
     }
 }
 
+#[allow(dead_code)]
 fn worker_flow_summary(state: &str, tool_line: &str, breadcrumb: &str) -> String {
     if state == "failed" {
         if let Some(reason) = tool_line.strip_prefix("failed: ") {

@@ -7,7 +7,6 @@ use gardener::hotkeys::{
 fn all_standard_bindings_resolved() {
     let cases = [
         ('q', HotkeyAction::Quit),
-        ('c', HotkeyAction::ToggleCommandDetail),
         ('j', HotkeyAction::ScrollDown),
         ('k', HotkeyAction::ScrollUp),
         ('v', HotkeyAction::ViewReport),

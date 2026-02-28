@@ -168,7 +168,16 @@ where
 
     // Backup the database before any store opens.
     let db_path = backlog_db_path(cfg, scope);
-    let _ = backup_db_if_exists(&db_path);
+    if let Err(e) = backup_db_if_exists(&db_path) {
+        append_run_log(
+            "error",
+            "startup.backup.failed",
+            json!({
+                "path": db_path.display().to_string(),
+                "error": e.to_string(),
+            }),
+        );
+    }
 
     // Open the store at most once, only when needed.
     let needs_store = cfg.startup.validate_on_boot || (run_seeding && !cfg.execution.test_mode);
@@ -290,6 +299,17 @@ where
     } else {
         0
     };
+    let will_seed = should_seed_backlog(run_seeding, cfg.execution.test_mode, existing_active_backlog_count);
+    append_run_log(
+        "info",
+        "startup.seeding_gate.checked",
+        json!({
+            "run_seeding": run_seeding,
+            "test_mode": cfg.execution.test_mode,
+            "existing_active_count": existing_active_backlog_count,
+            "will_seed": will_seed,
+        }),
+    );
     if should_seed_backlog(
         run_seeding,
         cfg.execution.test_mode,

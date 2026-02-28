@@ -175,6 +175,11 @@ impl BacklogStore {
             let meta = std::fs::metadata(&path)
                 .map_err(|e| GardenerError::Database(e.to_string()))?;
             if meta.len() == 0 {
+                append_run_log(
+                    "error",
+                    "backlog_store.open.zero_byte_rejected",
+                    json!({ "path": path.display().to_string() }),
+                );
                 return Err(GardenerError::Database(format!(
                     "backlog database is 0 bytes (corrupt): {}",
                     path.display()
@@ -191,10 +196,23 @@ impl BacklogStore {
                 .pragma_query_value(None, "quick_check", |row| row.get(0))
                 .map_err(db_err)?;
             if integrity != "ok" {
+                append_run_log(
+                    "error",
+                    "backlog_store.integrity_check.failed",
+                    json!({
+                        "path": path.display().to_string(),
+                        "result": integrity,
+                    }),
+                );
                 return Err(GardenerError::Database(format!(
                     "backlog database failed integrity check: {integrity}"
                 )));
             }
+            append_run_log(
+                "info",
+                "backlog_store.integrity_check.passed",
+                json!({ "path": path.display().to_string() }),
+            );
         }
 
         run_migrations(&mut write_conn)?;
@@ -277,12 +295,14 @@ impl BacklogStore {
         };
 
         let recovered = store.recover_stale_leases(system_time_unix())?;
+        let (p0, p1, p2) = store.count_tasks_by_priority().unwrap_or((0, 0, 0));
         append_run_log(
             "info",
             "backlog_store.opened",
             json!({
                 "path": path.display().to_string(),
                 "stale_recovered": recovered,
+                "task_count": { "p0": p0, "p1": p1, "p2": p2, "total": p0 + p1 + p2 },
             }),
         );
 
@@ -584,7 +604,13 @@ impl BacklogStore {
                     json!({ "count": count }),
                 );
             }
-            Ok(_) => {}
+            Ok(count) => {
+                append_run_log(
+                    "debug",
+                    "backlog.stale_leases.checked",
+                    json!({ "count": count }),
+                );
+            }
             Err(e) => {
                 append_run_log(
                     "error",
@@ -1127,7 +1153,14 @@ pub fn system_time_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .unwrap_or_else(|_| {
+            append_run_log(
+                "error",
+                "backlog_store.system_time_zero",
+                json!({ "reason": "SystemTime::duration_since(UNIX_EPOCH) failed; all timestamps will be 0" }),
+            );
+            0
+        })
 }
 
 #[cfg(test)]

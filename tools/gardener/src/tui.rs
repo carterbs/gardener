@@ -1584,7 +1584,12 @@ fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &st
     );
 
     frame.render_widget(
-        Paragraph::new("Press Ctrl+C to exit").block(
+        Paragraph::new(if is_error {
+            "Press Ctrl+C or c to copy the error message, then any key to exit"
+        } else {
+            "Press any key to exit"
+        })
+        .block(
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),

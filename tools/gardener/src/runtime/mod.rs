@@ -6,14 +6,16 @@ use crate::tui::{
 };
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 const RESIZE_SENTINEL_KEY: char = '\0';
+pub const INTERRUPT_SENTINEL_KEY: char = '\x03';
 const DEFAULT_TERMINAL_WIDTH: u16 = 120;
 const DEFAULT_TERMINAL_HEIGHT: u16 = 30;
 
@@ -111,6 +113,9 @@ pub trait Terminal: Send + Sync {
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
         self.write_line(&format!("{title}: {message}"))
     }
+    fn copy_to_clipboard(&self, _text: &str) -> Result<(), GardenerError> {
+        Ok(())
+    }
     fn close_ui(&self) -> Result<(), GardenerError> {
         Ok(())
     }
@@ -179,7 +184,7 @@ fn start_key_listener_if_needed() {
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL) =>
                     {
-                        enqueue_key('q');
+                        enqueue_key(INTERRUPT_SENTINEL_KEY);
                         request_interrupt();
                     }
                     crossterm::event::KeyCode::Char(c) => {
@@ -695,7 +700,7 @@ impl Terminal for ProductionTerminal {
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL) =>
                 {
-                    Ok(Some('q'))
+                    Ok(Some(INTERRUPT_SENTINEL_KEY))
                 }
                 crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
@@ -703,6 +708,10 @@ impl Terminal for ProductionTerminal {
             crossterm::event::Event::Resize(_, _) => Ok(Some(RESIZE_SENTINEL_KEY)),
             _ => Ok(None),
         }
+    }
+
+    fn copy_to_clipboard(&self, text: &str) -> Result<(), GardenerError> {
+        copy_to_clipboard(text)
     }
 }
 
@@ -843,6 +852,7 @@ pub struct FakeTerminal {
     pub is_tty: bool,
     writes: Arc<Mutex<Vec<String>>>,
     draws: Arc<Mutex<Vec<String>>>,
+    clipboard_copies: Arc<Mutex<Vec<String>>>,
     dashboard_draws: Arc<Mutex<usize>>,
     report_draws: Arc<Mutex<Vec<(String, String)>>>,
     shutdown_screens: Arc<Mutex<Vec<(String, String)>>>,
@@ -863,6 +873,13 @@ impl FakeTerminal {
 
     pub fn drawn_frames(&self) -> Vec<String> {
         self.draws.lock().expect("draw lock").clone()
+    }
+
+    pub fn clipboard_copies(&self) -> Vec<String> {
+        self.clipboard_copies
+            .lock()
+            .expect("clipboard copy lock")
+            .clone()
     }
 
     pub fn dashboard_draw_count(&self) -> usize {
@@ -935,6 +952,14 @@ impl Terminal for FakeTerminal {
         Ok(())
     }
 
+    fn copy_to_clipboard(&self, text: &str) -> Result<(), GardenerError> {
+        self.clipboard_copies
+            .lock()
+            .expect("clipboard copy lock")
+            .push(text.to_string());
+        Ok(())
+    }
+
     fn poll_key(&self, _timeout_ms: u64) -> Result<Option<char>, GardenerError> {
         if !self.is_tty {
             return Ok(None);
@@ -945,6 +970,68 @@ impl Terminal for FakeTerminal {
         }
         Ok(Some(queue.remove(0)))
     }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), GardenerError> {
+    let command_candidates = if cfg!(target_os = "macos") {
+        vec![("pbcopy", Vec::new())]
+    } else if cfg!(target_os = "windows") {
+        vec![("clip", Vec::new())]
+    } else {
+        vec![
+            ("wl-copy", Vec::new()),
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("xsel", vec!["--clipboard", "--input"]),
+        ]
+    };
+
+    for (command, args) in command_candidates {
+        match spawn_clipboard_command(command, args.as_slice(), text) {
+            Ok(true) => return Ok(()),
+            Ok(false) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(GardenerError::Io(
+        "clipboard copy command unavailable on this platform".to_string(),
+    ))
+}
+
+fn spawn_clipboard_command(
+    command: &'static str,
+    args: &[&str],
+    content: &str,
+) -> Result<bool, GardenerError> {
+    let mut process = match Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(process) => process,
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(false);
+            }
+            return Err(GardenerError::Io(format!(
+                "clipboard command '{command}' failed to start: {error}"
+            )));
+        }
+    };
+
+    if let Some(mut stdin) = process.stdin.take() {
+        stdin
+            .write_all(content.as_bytes())
+            .map_err(|error| GardenerError::Io(error.to_string()))?;
+    } else {
+        return Err(GardenerError::Io(format!(
+            "clipboard command '{command}' has no stdin"
+        )));
+    }
+    let status = process
+        .wait()
+        .map_err(|error| GardenerError::Io(error.to_string()))?;
+    Ok(status.success())
 }
 
 #[derive(Default, Clone)]

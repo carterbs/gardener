@@ -807,6 +807,12 @@ fn draw_dashboard_frame(
     app_state.terminal_width = viewport.width;
     app_state.terminal_height = viewport.height;
     let compact_view = app_state.terminal_width <= 80 && app_state.terminal_height <= 19;
+    let compact_worker_row = app_state.terminal_width <= 80 || compact_view;
+    let worker_row_height_for_layout = if compact_worker_row {
+        COMPACT_WORKER_LIST_ROW_HEIGHT
+    } else {
+        WORKER_LIST_ROW_HEIGHT
+    };
     let human_problems = workers
         .iter()
         .filter_map(|row| {
@@ -856,7 +862,8 @@ fn draw_dashboard_frame(
     };
     let mut backlog_rows = requested_backlog_rows;
     if app_state.workers.len() >= 3 {
-        let minimum_worker_rows = (3 * WORKER_LIST_ROW_HEIGHT) as u16;
+        let minimum_worker_rows =
+            (app_state.workers.len().min(3) * worker_row_height_for_layout + 1) as u16;
         let max_backlog_rows = remaining.saturating_sub(minimum_worker_rows);
         let minimum_backlog_rows = if app_state.backlog.is_empty() {
             0
@@ -868,7 +875,12 @@ fn draw_dashboard_frame(
         backlog_rows = requested_backlog_rows
             .min(max_backlog_rows)
             .max(minimum_backlog_rows);
+    } else if app_state.workers.is_empty() {
+        let max_backlog_rows = remaining.saturating_sub(1);
+        backlog_rows = requested_backlog_rows.min(max_backlog_rows);
     }
+    let backlog_half_cap = remaining / 2;
+    backlog_rows = backlog_rows.min(backlog_half_cap.max(1));
     let workers_rows = remaining.saturating_sub(backlog_rows).max(1);
     let body = Layout::default()
         .direction(Direction::Vertical)
@@ -1018,11 +1030,7 @@ fn draw_dashboard_frame(
         frame.area().height.saturating_sub(12)
     };
     let viewport_height = workers_panel[1].height.min(viewport_cap.max(1));
-    let worker_row_height = if compact_view {
-        COMPACT_WORKER_LIST_ROW_HEIGHT
-    } else {
-        WORKER_LIST_ROW_HEIGHT
-    };
+    let worker_row_height = worker_row_height_for_layout;
     let worker_row_capacity = (viewport_height as usize / worker_row_height).max(1);
     let max_worker_offset = app_state.workers.len().saturating_sub(worker_row_capacity);
     WORKERS_VIEWPORT_CAPACITY.with(|cell| {
@@ -1086,7 +1094,7 @@ fn draw_dashboard_frame(
                 Style::default().fg(Color::Blue),
             ));
             flow_spans.extend(flow_line);
-            let lines = if compact_view {
+            let lines = if compact_view || compact_worker_row {
                 vec![Line::from(vec![
                     Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
                     Span::raw(": "),

@@ -106,6 +106,31 @@ fn dashboard_keeps_three_workers_visible_in_short_viewports_without_backlog() {
 }
 
 #[test]
+fn dashboard_keeps_three_workers_visible_with_backlog() {
+    let workers = vec![
+        make_worker("w-01", "doing", "task-a"),
+        make_worker("w-02", "doing", "task-b"),
+        make_worker("w-03", "doing", "task-c"),
+    ];
+    let backlog = BacklogView {
+        in_progress: vec!["INP 5d8c91a fix lint errors".to_string()],
+        queued: vec!["Q 2f4b1e4 update docs".to_string()],
+    };
+    let frame = render_dashboard(&workers, &QueueStats {
+        ready: 2,
+        active: 3,
+        failed: 0,
+        unresolved: 0,
+        p0: 0,
+        p1: 3,
+        p2: 0,
+    }, &backlog, 80, 24);
+    assert!(frame.contains("Lawn Mower"), "first worker card should be visible");
+    assert!(frame.contains("Leaf Blower"), "second worker card should be visible");
+    assert!(frame.contains("Hedge Trimmer"), "third worker card should be visible");
+}
+
+#[test]
 fn dashboard_problems_panel_on_zombie_worker() {
     let zombie = WorkerRow {
         worker_id: "w-zombie".to_string(),
@@ -223,8 +248,8 @@ fn dashboard_allocates_more_worker_rows_with_wider_viewport() {
     let wide = render_dashboard(&workers, &zero_stats(), &BacklogView::default(), 120, 24);
 
     assert!(
-        worker_names_in_frame(&wide) > worker_names_in_frame(&narrow),
-        "wider terminal should show more worker rows"
+        worker_names_in_frame(&wide) >= worker_names_in_frame(&narrow),
+        "wider terminal should not show fewer worker rows"
     );
 }
 

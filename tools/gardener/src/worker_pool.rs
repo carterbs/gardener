@@ -10,7 +10,9 @@ use crate::logging::{
 };
 use crate::priority::Priority;
 use crate::runtime::Terminal;
-use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
+use crate::runtime::{
+    clear_interrupt, request_interrupt, ProductionRuntime, INTERRUPT_SENTINEL_KEY,
+};
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
@@ -25,6 +27,7 @@ use std::time::{Duration, Instant};
 
 const WORKER_POOL_ID: &str = "worker_pool";
 const WORKER_COMMAND_HISTORY_LIMIT: usize = 32;
+const COPY_SHORTCUT_KEY: char = 'c';
 
 type WorkerResultMessage = (
     usize,
@@ -373,12 +376,13 @@ pub fn run_worker_pool_fsm(
         })?;
 
         if let Some((worker_id, task_id, reason)) = shutdown_error {
+            let shutdown_message = worker_failure_prompt(&worker_id, &task_id, &reason);
             if terminal.stdin_is_tty() {
-                terminal.draw_shutdown_screen("Error", &worker_failure_prompt(&worker_id, &task_id, &reason))?;
+                terminal.draw_shutdown_screen("Error", &shutdown_message)?;
             } else {
                 terminal.write_line(&format!("Error: worker {worker_id} task {task_id}: {reason}"))?;
             }
-            wait_for_quit(terminal)?;
+            wait_for_quit(terminal, Some(&shutdown_message))?;
             return Ok(completed);
         }
         if quit_requested {
@@ -411,11 +415,11 @@ pub fn run_worker_pool_fsm(
     } else {
         terminal.write_line(&format!("{shutdown_title}: {shutdown_message}"))?;
     }
-    wait_for_quit(terminal)?;
+    wait_for_quit(terminal, None)?;
     Ok(completed)
 }
 
-fn wait_for_quit(terminal: &dyn Terminal) -> Result<(), GardenerError> {
+fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(), GardenerError> {
     append_run_log(
         "debug",
         "worker_pool.wait_for_quit.started",
@@ -433,6 +437,28 @@ fn wait_for_quit(terminal: &dyn Terminal) -> Result<(), GardenerError> {
     // test hangs while still blocking on a real TTY until input is received.
     loop {
         match terminal.poll_key(100)? {
+            Some(INTERRUPT_SENTINEL_KEY) | Some(COPY_SHORTCUT_KEY) if copy_target.is_some() => {
+                let target = copy_target.expect("copy target expected");
+                if let Err(error) = terminal.copy_to_clipboard(target) {
+                    append_run_log(
+                        "warn",
+                        "worker_pool.error_copy.failed",
+                        json!({
+                            "worker_id": WORKER_POOL_ID,
+                            "error": error.to_string()
+                        }),
+                    );
+                } else {
+                    append_run_log(
+                        "info",
+                        "worker_pool.error_copy.success",
+                        json!({
+                            "worker_id": WORKER_POOL_ID
+                        }),
+                    );
+                }
+                return Ok(());
+            }
             Some(_) => return Ok(()),
             None => {
                 // On a real terminal the key listener is running; keep waiting.
@@ -462,6 +488,17 @@ fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
     if let Some(key) = terminal.poll_key(10)? {
         if key == '\0' {
             redraw_dashboard = true;
+        }
+        if key == INTERRUPT_SENTINEL_KEY {
+            append_run_log(
+                "warn",
+                "hotkey.quit",
+                json!({
+                    "worker_id": WORKER_POOL_ID
+                }),
+            );
+            request_interrupt();
+            return Ok(true);
         }
         match hotkey_action(key, operator_hotkeys) {
             Some(AppHotkeyAction::Quit) => {
@@ -772,7 +809,7 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 
 #[cfg(test)]
 mod tests {
-    use super::{hotkey_action, run_worker_pool_fsm};
+    use super::{hotkey_action, run_worker_pool_fsm, wait_for_quit, INTERRUPT_SENTINEL_KEY};
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
@@ -1030,6 +1067,27 @@ mod tests {
 
         let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
             .expect("run fsm");
+    }
+
+    #[test]
+    fn wait_for_quit_copies_error_on_ctrl_c() {
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys([INTERRUPT_SENTINEL_KEY]);
+        wait_for_quit(&terminal, Some("failed because the cosmos aligned the wrong way."))
+            .expect("wait should complete after copy shortcut");
+        assert_eq!(
+            terminal.clipboard_copies(),
+            vec!["failed because the cosmos aligned the wrong way.".to_string()]
+        );
+    }
+
+    #[test]
+    fn wait_for_quit_copies_error_on_copy_shortcut() {
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['c']);
+        wait_for_quit(&terminal, Some("error line from agent"))
+            .expect("wait should complete after copy shortcut");
+        assert_eq!(terminal.clipboard_copies(), vec!["error line from agent".to_string()]);
     }
 
     #[test]

@@ -1628,7 +1628,8 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 mod tests {
     use super::{
         execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
-        parse_merge_output, parse_conflict_resolution_output, verify_merge_output,
+        parse_merge_output, parse_conflict_resolution_output, parse_reviewing_output,
+        parse_understand_output, verify_merge_output, extract_failure_reason,
         worktree_branch_for, worktree_path_for,
         worktree_slug_for_task,
         worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
@@ -1828,5 +1829,46 @@ mod tests {
                 worktree_slug_for_task("manual:tui:GARD-01")
             )
         );
+    }
+
+    #[test]
+    fn parse_reviewing_output_defaults_to_approve_without_verdict() {
+        let output = parse_reviewing_output(&serde_json::json!({}));
+        assert_eq!(output.verdict, crate::fsm::ReviewVerdict::Approve);
+        assert!(output.suggestions.is_empty());
+    }
+
+    #[test]
+    fn parse_reviewing_output_preserves_needs_changes_and_suggestions() {
+        let output = parse_reviewing_output(&serde_json::json!({
+            "verdict": "needs_changes",
+            "suggestions": ["first", 2, "third"],
+        }));
+        assert_eq!(output.verdict, crate::fsm::ReviewVerdict::NeedsChanges);
+        assert_eq!(output.suggestions, vec!["first", "third"]);
+    }
+
+    #[test]
+    fn parse_understand_output_falls_back_to_classifier_when_payload_invalid() {
+        let output = parse_understand_output(
+            &serde_json::json!({"foo": "bar"}),
+            "worker-1",
+            "refactor: move prompt registry to module",
+        );
+        assert_eq!(output.task_type, crate::fsm::TaskCategory::Refactor);
+        assert_eq!(
+            output.reasoning,
+            "fallback deterministic keyword classifier (invalid understand payload)"
+        );
+    }
+
+    #[test]
+    fn extract_failure_reason_parses_nested_detail_field() {
+        let detail = extract_failure_reason(&serde_json::json!({"message":"{\"detail\":\"merge conflicted\"}"}));
+        assert_eq!(detail.as_deref(), Some("merge conflicted"));
+
+        let plain = extract_failure_reason(&serde_json::json!({"reason":"hook failed"}));
+        assert_eq!(plain.as_deref(), Some("hook failed"));
+        assert!(extract_failure_reason(&serde_json::json!({"other":123})).is_none());
     }
 }

@@ -248,6 +248,10 @@ fn collect_docs_listing(repo_root: &std::path::Path) -> String {
 }
 
 fn walk_docs(root: &std::path::Path, files: &mut Vec<String>) {
+    walk_docs_with_root(root, root, files)
+}
+
+fn walk_docs_with_root(root: &std::path::Path, path: &std::path::Path, files: &mut Vec<String>) {
     append_run_log(
         "debug",
         "seeding.walk_docs",
@@ -255,7 +259,7 @@ fn walk_docs(root: &std::path::Path, files: &mut Vec<String>) {
             "root": root.display().to_string(),
         }),
     );
-    let mut entries = match std::fs::read_dir(root) {
+    let mut entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(_) => return,
     };
@@ -263,7 +267,7 @@ fn walk_docs(root: &std::path::Path, files: &mut Vec<String>) {
     for entry in entries.by_ref().flatten() {
         let path = entry.path();
         if path.is_dir() {
-            walk_docs(&path, files);
+            walk_docs_with_root(root, &path, files);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
@@ -308,11 +312,16 @@ fn extract_quality_risks(quality_doc: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::SeedPromptContext;
+    use super::{
+        collect_docs_listing, extract_quality_risks, read_optional_file, walk_docs, build_seed_prompt,
+        build_seed_prompt_context, build_seed_prompt_v2, SeedPromptContext,
+    };
     use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
     use crate::{repo_intelligence, repo_intelligence::RepoIntelligenceProfile};
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn prompt_builds_multiple_sections() {
@@ -377,5 +386,150 @@ mod tests {
         assert!(prompt.contains("primary_gap"));
         assert!(prompt.contains("Quality risks extracted from report"));
         assert!(prompt.contains("\"state\":\"seeding\""));
+    }
+
+    fn sample_profile() -> RepoIntelligenceProfile {
+        RepoIntelligenceProfile {
+            meta: repo_intelligence::RepoMeta {
+                schema_version: 1,
+                created_at: "0".to_string(),
+                head_sha: "HEAD".to_string(),
+                working_dir: "/repo".to_string(),
+                repo_root: "/repo".to_string(),
+                discovery_used: false,
+            },
+            detected_agent: repo_intelligence::DetectedAgentProfile {
+                primary: "codex".to_string(),
+                claude_signals: Vec::new(),
+                codex_signals: Vec::new(),
+                agents_md_present: false,
+                user_confirmed: false,
+            },
+            discovery: DiscoveryAssessment::unknown(),
+            user_validated: repo_intelligence::UserValidated {
+                agent_steering_correction: String::new(),
+                external_docs_surface: String::new(),
+                external_docs_accessible: false,
+                guardrails_correction: String::new(),
+                validation_command: String::new(),
+                coverage_grade_override: String::new(),
+                additional_context: String::new(),
+                preferred_parallelism: None,
+                corrections_made: 0,
+                validated_at: "0".to_string(),
+            },
+            agent_readiness: repo_intelligence::AgentReadiness {
+                agent_steering_score: 2,
+                knowledge_accessible_score: 2,
+                mechanical_guardrails_score: 2,
+                local_feedback_loop_score: 2,
+                coverage_signal_score: 2,
+                readiness_score: 82,
+                readiness_grade: "B".to_string(),
+                primary_gap: "coverage_signal".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn read_optional_file_returns_empty_when_missing() {
+        let dir = tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.md");
+        assert_eq!(read_optional_file(&missing), String::new());
+    }
+
+    #[test]
+    fn read_optional_file_reads_existing_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("notes.md");
+        fs::write(&path, "seeding notes").expect("write");
+        assert_eq!(read_optional_file(&path), "seeding notes");
+    }
+
+    #[test]
+    fn walk_docs_collects_nested_markdown_files() {
+        let dir = tempdir().expect("tempdir");
+        let docs_root = dir.path().join("docs");
+        let nested = docs_root.join("nested");
+        fs::create_dir_all(&nested).expect("mkdir");
+        fs::write(docs_root.join("README.md"), "root").expect("write");
+        fs::write(nested.join("inner.md"), "nested").expect("write");
+        fs::write(nested.join("ignore.txt"), "skip").expect("write");
+
+        let mut files = Vec::new();
+        walk_docs(&docs_root, &mut files);
+        assert_eq!(files.len(), 2);
+        assert!(files.contains(&"docs/README.md".to_string()));
+        assert!(files.contains(&"docs/nested/inner.md".to_string()));
+    }
+
+    #[test]
+    fn collect_docs_listing_skips_missing_and_non_markdown_files() {
+        let dir = tempdir().expect("tempdir");
+        let docs_root = dir.path().join("docs");
+        let nested = docs_root.join("nested");
+        fs::create_dir_all(&nested).expect("mkdir");
+        fs::write(docs_root.join("README.md"), "root").expect("write");
+        fs::write(nested.join("nested.md"), "nested").expect("write");
+        fs::write(nested.join("ignore.txt"), "skip").expect("write");
+
+        let listing = collect_docs_listing(dir.path());
+        assert_eq!(listing.lines().collect::<Vec<_>>(), vec!["- docs/README.md", "- docs/nested/nested.md"]);
+    }
+
+    #[test]
+    fn extract_quality_risks_ignores_unknown_rows() {
+        let risks = extract_quality_risks(
+            "| Domain | Score | Grade |\n\
+             | --- | --- | --- |\n\
+             | startup | 40 | C |\n\
+             | worker | 88 | A |\n\
+             | infra | 12 | Z |\n\
+             | docs | 55 |\n",
+        );
+        assert_eq!(risks, "| startup | 40 | C |\n| worker | 88 | A |");
+    }
+
+    #[test]
+    fn build_seed_prompt_context_includes_repo_artifacts() {
+        let dir = tempdir().expect("tempdir");
+        let repo_root = dir.path().to_path_buf();
+        fs::create_dir_all(repo_root.join("docs")).expect("mkdir docs");
+        fs::write(repo_root.join("AGENTS.md"), "# AGENTS").expect("write");
+        fs::write(repo_root.join("CLAUDE.md"), "## CLAUDE").expect("write");
+        fs::write(repo_root.join("docs").join("guide.md"), "- guide").expect("write");
+
+        let scope = RuntimeScope {
+            process_cwd: repo_root.clone(),
+            repo_root: Some(repo_root.clone()),
+            working_dir: repo_root,
+        };
+        let profile = sample_profile();
+        let context = build_seed_prompt_context(&profile, "Quality report", &scope);
+
+        assert_eq!(context.primary_gap, "coverage_signal");
+        assert_eq!(context.agents_md, "# AGENTS");
+        assert_eq!(context.claude_md, "## CLAUDE");
+        assert_eq!(context.docs_listing, "- docs/guide.md\n");
+        assert!(context.quality_risks.is_empty());
+
+        let prompt = build_seed_prompt_v2(&context);
+        assert!(prompt.contains("# AGENTS"));
+        assert!(prompt.contains("## CLAUDE"));
+    }
+
+    #[test]
+    fn build_seed_prompt_uses_quality_markdown_without_repository_files() {
+        let profile = sample_profile();
+        let prompt = build_seed_prompt(&profile, "Risk summary", &RuntimeScope {
+            process_cwd: std::env::current_dir().expect("cwd"),
+            repo_root: None,
+            working_dir: std::env::current_dir().expect("cwd"),
+        });
+
+        assert!(prompt.contains("No AGENTS.md found."));
+        assert!(prompt.contains("No CLAUDE.md found."));
+        assert!(prompt.contains("No docs directory found or readable."));
+        assert!(prompt.contains("Quality doc"));
     }
 }

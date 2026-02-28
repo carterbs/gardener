@@ -942,7 +942,28 @@ fn report_stamp_is_stale(
 
 #[cfg(test)]
 mod tests {
-    use super::{backup_db_if_exists, fallback_seed_tasks, should_seed_backlog};
+    use super::{
+        backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
+        extract_message_preview, fallback_seed_tasks, parse_seed_priority, quality_stamp_path,
+        report_stamp_is_stale, seed_generation, should_seed_backlog,
+        summarize_seed_agent_event,
+    };
+    use crate::backlog_store::{BacklogStore, NewTask};
+    use crate::config::AppConfig;
+    use crate::priority::Priority;
+    use crate::protocol::{AgentEvent, AgentEventKind};
+    use crate::repo_intelligence::{self, RepoIntelligenceProfile};
+    use crate::runtime::{
+        FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput,
+        ProductionRuntime,
+    };
+    use crate::task_identity::TaskKind;
+    use crate::triage;
+    use crate::triage_discovery::DiscoveryAssessment;
+    use crate::types::RuntimeScope;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
+    use tempfile::tempdir;
 
     #[test]
     fn fallback_seed_tasks_generate_multiple_unique_items() {
@@ -998,5 +1019,269 @@ mod tests {
         std::fs::write(&db, b"").expect("create zero-byte file");
         let result = backup_db_if_exists(&db).expect("no error");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn backlog_db_path_respects_test_mode() {
+        let dir = tempdir().expect("tempdir");
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(
+            backlog_db_path(&cfg, &scope),
+            dir.path().join(".cache/gardener/backlog.sqlite")
+        );
+    }
+
+    #[test]
+    fn parse_seed_priority_handles_unknown_values() {
+        assert_eq!(parse_seed_priority("P0"), Priority::P0);
+        assert_eq!(parse_seed_priority("P1"), Priority::P1);
+        assert_eq!(parse_seed_priority("P2"), Priority::P2);
+        assert_eq!(parse_seed_priority("MYSTERY"), Priority::P1);
+    }
+
+    #[test]
+    fn fallback_seed_tasks_uses_templates_when_no_risky_rows() {
+        let tasks = fallback_seed_tasks(
+            "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 92 | B |\n",
+            "infrastructure",
+            1,
+            "seed_runner_v2_fallback_gen_4",
+        );
+        assert_eq!(tasks.len(), 3);
+        assert!(tasks[0].title.contains("Bootstrap backlog for infrastructure #1"));
+    }
+
+    #[test]
+    fn fallback_seed_tasks_marks_f_fails_as_p0() {
+        let tasks = fallback_seed_tasks(
+            "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 30 | F |\n",
+            "startup",
+            1,
+            "seed_runner_v2_fallback_gen_4",
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].priority, Priority::P0);
+    }
+
+    #[test]
+    fn quality_stamp_path_appends_extension() {
+        let path = quality_stamp_path(std::path::Path::new("/tmp/report.md"));
+        assert_eq!(path, std::path::PathBuf::from("/tmp/report.md.stamp"));
+    }
+
+    #[test]
+    fn seed_generation_uses_max_observed_seed_run() {
+        let dir = tempdir().expect("tempdir");
+        let store = BacklogStore::open(dir.path().join("backlog.sqlite"))
+            .expect("open store");
+        let _ = store.upsert_task(NewTask {
+            kind: TaskKind::QualityGap,
+            title: "first".into(),
+            details: "details".into(),
+            rationale: "rationale".into(),
+            scope_key: "startup".into(),
+            priority: Priority::P1,
+            source: "seed_runner_v2_gen_2".into(),
+            related_pr: None,
+            related_branch: None,
+        });
+        let _ = store.upsert_task(NewTask {
+            kind: TaskKind::QualityGap,
+            title: "second".into(),
+            details: "details".into(),
+            rationale: "rationale".into(),
+            scope_key: "startup".into(),
+            priority: Priority::P1,
+            source: "seed_runner_v2_gen_7".into(),
+            related_pr: None,
+            related_branch: None,
+        });
+        assert_eq!(seed_generation(&store).expect("generation"), 8);
+    }
+
+    #[test]
+    fn extract_event_helpers_read_nested_and_fallback_fields() {
+        assert_eq!(
+            extract_event_label(&serde_json::json!({
+                "item": { "name": "test" },
+                "tool_name": "fallback"
+            })),
+            Some("test".to_string())
+        );
+        assert_eq!(
+            extract_command_preview(&serde_json::json!({
+                "item": {
+                    "command_line": "cargo test --all-targets --help"
+                }
+            })),
+            Some("cargo test --all-targets --help".to_string())
+        );
+        assert_eq!(
+            extract_message_preview(&serde_json::json!({
+                "delta": {
+                    "text": "short payload"
+                }
+            })),
+            Some("short payload".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_seed_agent_event_handles_multiple_kinds() {
+        assert_eq!(
+            summarize_seed_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::ThreadStarted,
+                raw_type: "thread.started".into(),
+                payload: serde_json::json!({}),
+            }),
+            Some("Agent session started".to_string())
+        );
+        assert!(
+            summarize_seed_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::ToolCall,
+                raw_type: "item.started".into(),
+                payload: serde_json::json!({"item": {"command":"echo hi"}}),
+            })
+            .as_deref()
+            .expect("tool call preview")
+            .contains("echo hi")
+        );
+        assert_eq!(
+            summarize_seed_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::TurnFailed,
+                raw_type: "turn.failed".into(),
+                payload: serde_json::json!({}),
+            }),
+            Some("Agent turn failed: turn.failed".to_string())
+        );
+        assert_eq!(
+            summarize_seed_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::Unknown,
+                raw_type: "unknown".into(),
+                payload: serde_json::json!({}),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn report_stamp_is_stale_for_missing_stamp() {
+        let dir = tempdir().expect("tempdir");
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+        let cfg = AppConfig::default();
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(FakeFileSystem::default()),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(FakeTerminal::default()),
+        };
+        let stale = report_stamp_is_stale(
+            &runtime,
+            &cfg,
+            &scope.working_dir.join("report.md.stamp"),
+            &scope,
+        )
+        .expect("stale");
+        assert!(stale);
+    }
+
+    #[test]
+    fn report_stamp_is_stale_when_ttl_exceeded_or_head_commit_changes() {
+        let dir = tempdir().expect("tempdir");
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+
+        let stamp = dir.path().join("report.md.stamp");
+        let fs = FakeFileSystem::default();
+        fs.write_string(&stamp, "0")
+            .expect("seed stamp");
+        let mut cfg = AppConfig::default();
+        cfg.quality_report.stale_after_days = 0;
+        cfg.quality_report.stale_if_head_commit_differs = false;
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000))),
+            file_system: Arc::new(fs),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(FakeTerminal::default()),
+        };
+        assert!(report_stamp_is_stale(&runtime, &cfg, &stamp, &scope).expect("stale by ttl"));
+
+        let fs = FakeFileSystem::default();
+        fs.write_string(&stamp, "9_900").expect("seed fresh stamp");
+        let mut cfg = AppConfig::default();
+        cfg.quality_report.stale_after_days = 1;
+        cfg.quality_report.stale_if_head_commit_differs = true;
+        let profile = RepoIntelligenceProfile {
+            meta: repo_intelligence::RepoMeta {
+                schema_version: 1,
+                created_at: "0".to_string(),
+                head_sha: "abc".to_string(),
+                working_dir: dir.path().display().to_string(),
+                repo_root: dir.path().display().to_string(),
+                discovery_used: false,
+            },
+            detected_agent: repo_intelligence::DetectedAgentProfile {
+                primary: "codex".to_string(),
+                claude_signals: Vec::new(),
+                codex_signals: Vec::new(),
+                agents_md_present: false,
+                user_confirmed: false,
+            },
+            discovery: DiscoveryAssessment::unknown(),
+            user_validated: repo_intelligence::UserValidated {
+                agent_steering_correction: String::new(),
+                external_docs_surface: String::new(),
+                external_docs_accessible: false,
+                guardrails_correction: String::new(),
+                validation_command: String::new(),
+                coverage_grade_override: String::new(),
+                additional_context: String::new(),
+                preferred_parallelism: None,
+                corrections_made: 0,
+                validated_at: "0".to_string(),
+            },
+            agent_readiness: repo_intelligence::AgentReadiness {
+                agent_steering_score: 2,
+                knowledge_accessible_score: 2,
+                mechanical_guardrails_score: 2,
+                local_feedback_loop_score: 2,
+                coverage_signal_score: 2,
+                readiness_score: 82,
+                readiness_grade: "B".to_string(),
+                primary_gap: "coverage_signal".to_string(),
+            },
+        };
+        let profile_path = triage::profile_path(&scope, &cfg);
+        fs.write_string(&profile_path, &toml::to_string(&profile).expect("toml")).expect("write profile");
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "different\n".to_string(),
+            stderr: String::new(),
+        }));
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000))),
+            file_system: Arc::new(fs),
+            process_runner: Arc::new(runner),
+            terminal: Arc::new(FakeTerminal::default()),
+        };
+        assert!(report_stamp_is_stale(&runtime, &cfg, &stamp, &scope).expect("mismatch head"));
     }
 }

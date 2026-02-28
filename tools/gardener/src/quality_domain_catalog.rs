@@ -77,3 +77,72 @@ fn collect_source_domains(path: &Path, names: &mut BTreeSet<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_source_domains, discover_domains, QualityDomain};
+    use std::fs;
+
+    #[test]
+    fn discover_domains_defaults_to_infrastructure_if_no_src_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let domains = discover_domains(temp.path());
+        assert_eq!(
+            domains,
+            vec![QualityDomain {
+                name: "infrastructure".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn collect_source_domains_maps_known_files_to_domain_labels() {
+        let mut names = std::collections::BTreeSet::new();
+        let missing = tempfile::tempdir().expect("tempdir");
+        collect_source_domains(missing.path(), &mut names);
+        assert_eq!(names.len(), 0);
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("agent"))
+            .expect("create source directory");
+        fs::write(src.join("agent").join("protocol.rs"), "let x = 1;")
+            .expect("write source");
+        fs::write(src.join("tui.rs"), "fn main() {}").expect("write source");
+        fs::write(src.join("triage.rs"), "fn main() {}").expect("write source");
+        fs::write(src.join("bad.txt"), "skip").expect("write source");
+
+        let mut names = std::collections::BTreeSet::new();
+        collect_source_domains(&src, &mut names);
+        let domains: Vec<_> = names.into_iter().collect();
+        assert_eq!(
+            domains,
+            vec![
+                "agent-adapters".to_string(),
+                "triage".to_string(),
+                "tui".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn discover_domains_includes_infrastructure_plus_detected_domains() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let src = temp.path().join("src");
+        fs::create_dir_all(src.join("worker").join("nested")).expect("create source dir");
+        fs::create_dir_all(src.join("quality")).expect("create quality dir");
+        fs::write(src.join("worker").join("worker_pool.rs"), "fn one() {}").expect("write file");
+        fs::write(src.join("quality").join("grades.rs"), "fn two() {}").expect("write file");
+
+        let domains = discover_domains(temp.path());
+        let names: Vec<_> = domains.into_iter().map(|d| d.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "infrastructure".to_string(),
+                "quality-grades".to_string(),
+                "worker-pool".to_string()
+            ]
+        );
+    }
+}

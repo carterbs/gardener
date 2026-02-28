@@ -639,4 +639,102 @@ mod tests {
             .expect("checked");
         assert!(detached);
     }
+
+    #[test]
+    fn verify_ancestor_tracks_expected_results() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        assert!(
+            GitClient::new(&runner, "/repo")
+                .verify_ancestor("abc", "main")
+                .expect("ancestor"),
+        );
+
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "not ancestor".to_string(),
+        }));
+        assert!(
+            !GitClient::new(&runner, "/repo")
+                .verify_ancestor("abc", "main")
+                .expect("ancestor"),
+        );
+    }
+
+    #[test]
+    fn commit_all_runs_add_before_commit() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "M file.txt\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        GitClient::new(&runner, "/repo")
+            .commit_all("commit changes")
+            .expect("commit");
+        assert_eq!(runner.spawned().len(), 3);
+    }
+
+    #[test]
+    fn commit_all_skips_clean_tree() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "\n".to_string(),
+            stderr: String::new(),
+        }));
+        GitClient::new(&runner, "/repo")
+            .commit_all("noop")
+            .expect("skip clean commit");
+        assert_eq!(runner.spawned().len(), 1);
+    }
+
+    #[test]
+    fn run_validation_command_reports_failure() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "failed validation".to_string(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .run_validation_command("npm run validate")
+            .expect_err("validation failed");
+        assert!(err.to_string().contains("post-merge validation command failed"));
+    }
+
+    #[test]
+    fn rebase_local_recovery_paths_are_exercised() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "oops".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .rebase_onto_local("main")
+            .expect_err("rebase local failed");
+        assert!(err.to_string().contains("rebase onto main failed"));
+    }
 }

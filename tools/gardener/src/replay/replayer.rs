@@ -418,3 +418,270 @@ pub fn replay_session(
         all_passed,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplayProcessRunner, SessionRecording};
+    use crate::runtime::ProcessRunner;
+    use crate::replay::recording::{
+        AgentTurnRecord, BacklogMutationRecord, BacklogSnapshotRecord, ProcessCallRecord,
+        ProcessRequestRecord, RecordEntry, SessionStartRecord,
+    };
+    use std::path::Path;
+
+    fn write_recording(path: &Path, entries: Vec<RecordEntry>) {
+        let payload = entries
+            .into_iter()
+            .map(|entry| serde_json::to_string(&entry).expect("serialize"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, payload).expect("write recording");
+    }
+
+    #[test]
+    fn load_requires_session_start_entry() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("missing_session.jsonl");
+        write_recording(
+            &path,
+            vec![RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
+                tasks: Vec::new(),
+            })],
+        );
+        let err = match SessionRecording::load(&path) {
+            Ok(_) => panic!("expected missing session start to fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.to_string(), "process error: recording has no SessionStart entry");
+    }
+
+    #[test]
+    fn session_recording_filters_ids_and_records_by_worker() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("replay.jsonl");
+        let entries = vec![
+            RecordEntry::SessionStart(SessionStartRecord {
+                run_id: "run-1".to_string(),
+                recorded_at_unix_ns: 1,
+                gardener_version: "0.0.0".to_string(),
+                config_snapshot: serde_json::json!({}),
+            }),
+            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
+                tasks: Vec::new(),
+            }),
+            RecordEntry::ProcessCall(ProcessCallRecord {
+                seq: 1,
+                timestamp_ns: 1,
+                worker_id: "worker-a".to_string(),
+                thread_id: "main".to_string(),
+                request: ProcessRequestRecord {
+                    program: "echo".to_string(),
+                    args: vec!["alpha".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                },
+                result: crate::replay::recording::ProcessOutputRecord::from_output(
+                    0,
+                    "stdout line\n".to_string(),
+                    String::new(),
+                ),
+                duration_ns: 10,
+            }),
+            RecordEntry::ProcessCall(ProcessCallRecord {
+                seq: 2,
+                timestamp_ns: 2,
+                worker_id: "worker-b".to_string(),
+                thread_id: "main".to_string(),
+                request: ProcessRequestRecord {
+                    program: "ls".to_string(),
+                    args: vec![".".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                },
+                result: crate::replay::recording::ProcessOutputRecord::from_output(
+                    0,
+                    "beta".to_string(),
+                    String::new(),
+                ),
+                duration_ns: 20,
+            }),
+            RecordEntry::AgentTurn(AgentTurnRecord {
+                seq: 3,
+                timestamp_ns: 3,
+                worker_id: "worker-a".to_string(),
+                state: "doing".to_string(),
+                terminal: "success".to_string(),
+                payload: serde_json::json!({ "terminal": "success" }),
+                diagnostic_count: 0,
+            }),
+            RecordEntry::BacklogMutation(BacklogMutationRecord {
+                seq: 4,
+                timestamp_ns: 4,
+                worker_id: "worker-a".to_string(),
+                operation: "claim_next".to_string(),
+                task_id: "task-1".to_string(),
+                result_ok: true,
+            }),
+            RecordEntry::BacklogMutation(BacklogMutationRecord {
+                seq: 5,
+                timestamp_ns: 5,
+                worker_id: "worker-b".to_string(),
+                operation: "release_lease".to_string(),
+                task_id: "task-2".to_string(),
+                result_ok: true,
+            }),
+        ];
+        write_recording(&path, entries);
+
+        let recording = SessionRecording::load(&path).expect("load recording");
+        assert_eq!(recording.worker_ids(), vec!["worker-a".to_string(), "worker-b".to_string()]);
+        assert_eq!(recording.process_calls_for("worker-a").len(), 1);
+        assert_eq!(recording.backlog_mutations().len(), 2);
+        assert_eq!(recording.agent_turns_for("worker-a").len(), 1);
+    }
+
+    #[test]
+    fn replay_process_runner_matches_expected_request_sequence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("replay-matcher.jsonl");
+        let entries = vec![
+            RecordEntry::SessionStart(SessionStartRecord {
+                run_id: "run-1".to_string(),
+                recorded_at_unix_ns: 1,
+                gardener_version: "0.0.0".to_string(),
+                config_snapshot: serde_json::json!({}),
+            }),
+            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
+                tasks: Vec::new(),
+            }),
+            RecordEntry::ProcessCall(ProcessCallRecord {
+                seq: 1,
+                timestamp_ns: 1,
+                worker_id: "worker-a".to_string(),
+                thread_id: "main".to_string(),
+                request: ProcessRequestRecord {
+                    program: "echo".to_string(),
+                    args: vec!["first".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                },
+                result: crate::replay::recording::ProcessOutputRecord::from_output(
+                    0,
+                    "hello\nworld\n".to_string(),
+                    String::new(),
+                ),
+                duration_ns: 10,
+            }),
+            RecordEntry::ProcessCall(ProcessCallRecord {
+                seq: 2,
+                timestamp_ns: 2,
+                worker_id: "worker-a".to_string(),
+                thread_id: "main".to_string(),
+                request: ProcessRequestRecord {
+                    program: "printf".to_string(),
+                    args: vec!["second".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                },
+                result: crate::replay::recording::ProcessOutputRecord::from_output(
+                    0,
+                    String::new(),
+                    "stderr".to_string(),
+                ),
+                duration_ns: 20,
+            }),
+            RecordEntry::ProcessCall(ProcessCallRecord {
+                seq: 3,
+                timestamp_ns: 3,
+                worker_id: "worker-b".to_string(),
+                thread_id: "main".to_string(),
+                request: ProcessRequestRecord {
+                    program: "git".to_string(),
+                    args: vec!["status".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                },
+                result: crate::replay::recording::ProcessOutputRecord::from_output(
+                    0,
+                    "ok".to_string(),
+                    String::new(),
+                ),
+                duration_ns: 30,
+            }),
+        ];
+        write_recording(&path, entries);
+        let recording = SessionRecording::load(&path).expect("load recording");
+
+        let runner = ReplayProcessRunner::from_recording(&recording, "worker-a");
+        let mut lines = Vec::new();
+        let handle = runner
+                .spawn(crate::runtime::ProcessRequest {
+                program: "echo".to_string(),
+                args: vec!["first".to_string()],
+                cwd: Some("/tmp".into()),
+            })
+            .expect("spawn");
+        let output = runner
+            .wait_with_line_stream(
+                handle,
+                &mut |line: &str| lines.push(line.to_string()),
+                &mut |_line| {},
+            )
+            .expect("stream");
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stderr, String::new());
+        assert_eq!(lines, vec!["hello".to_string(), "hello\nworld".to_string()]);
+
+        let mismatches = runner.verify_request_alignment();
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn replay_process_runner_detects_program_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("replay-mismatch.jsonl");
+        let entries = vec![
+            RecordEntry::SessionStart(SessionStartRecord {
+                run_id: "run-1".to_string(),
+                recorded_at_unix_ns: 1,
+                gardener_version: "0.0.0".to_string(),
+                config_snapshot: serde_json::json!({}),
+            }),
+            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
+                tasks: Vec::new(),
+            }),
+            RecordEntry::ProcessCall(ProcessCallRecord {
+                seq: 1,
+                timestamp_ns: 1,
+                worker_id: "worker-a".to_string(),
+                thread_id: "main".to_string(),
+                request: ProcessRequestRecord {
+                    program: "echo".to_string(),
+                    args: vec!["first".to_string()],
+                    cwd: Some("/tmp".to_string()),
+                },
+                result: crate::replay::recording::ProcessOutputRecord::from_output(
+                    0,
+                    String::new(),
+                    String::new(),
+                ),
+                duration_ns: 10,
+            }),
+        ];
+        write_recording(&path, entries);
+        let recording = SessionRecording::load(&path).expect("load recording");
+
+        let runner = ReplayProcessRunner::from_recording(&recording, "worker-a");
+        assert!(
+            runner
+                .spawn(crate::runtime::ProcessRequest {
+                    program: "printf".to_string(),
+                    args: vec!["oops".to_string()],
+                    cwd: None,
+                })
+                .is_ok()
+        );
+        runner
+            .wait(0)
+            .expect("consume expected output");
+        let mismatches = runner.verify_request_alignment();
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0].position, 0);
+        assert_eq!(mismatches[0].expected_program, "echo");
+    }
+}

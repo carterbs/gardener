@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 50 * 1024 * 1024;
 pub const DEFAULT_RUN_LOG_RELATIVE_PATH: &str = ".cache/gardener/otel-logs.jsonl";
+const PROMPT_LINE_LIMIT: usize = 220;
 
 #[derive(Debug, Clone)]
 pub struct JsonlLogger {
@@ -165,6 +166,55 @@ pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
     let _ = logger.append_json(&line);
 }
 
+pub fn current_run_log_path() -> Option<PathBuf> {
+    let logger_slot = run_logger_slot().lock().expect("run logger lock");
+    logger_slot.as_ref().map(|logger| logger.path.clone())
+}
+
+pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let Some(path) = current_run_log_path() else {
+        return Vec::new();
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut lines = text
+        .lines()
+        .filter_map(|line| {
+            let value = serde_json::from_str::<Value>(line).ok()?;
+            if !worker_log_is_for_worker(&value, worker_id) {
+                return None;
+            }
+            let event_type = value
+                .get("event_type")
+                .and_then(Value::as_str)
+                .unwrap_or("event");
+            let payload = value
+                .get("payload")
+                .map(serde_json::to_string)
+                .unwrap_or_else(|| Ok("{}".to_string()))
+                .unwrap_or_else(|_| "<invalid payload>".to_string())
+                .replace('\n', "\\n");
+            Some(format!(
+                "{event_type}: {}",
+                truncate_utf8(&payload, PROMPT_LINE_LIMIT)
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    if lines.len() <= max_lines {
+        return lines;
+    }
+    lines.split_off(lines.len() - max_lines).into_iter().collect()
+}
+
 fn kv_attr(key: &str, value: &str) -> Value {
     json!({
         "key": key,
@@ -205,9 +255,30 @@ fn truncate_json(value: Value, max_bytes: usize) -> Value {
     if rendered.len() <= max_bytes {
         return value;
     }
-    let mut truncated = rendered;
-    truncated.truncate(max_bytes.saturating_sub(3));
-    Value::String(format!("{truncated}..."))
+    let truncated_payload = truncate_utf8(&rendered, max_bytes);
+    Value::String(truncated_payload)
+}
+
+fn worker_log_is_for_worker(value: &Value, worker_id: &str) -> bool {
+    match value
+        .get("payload")
+        .and_then(|payload| payload.get("worker_id"))
+        .and_then(Value::as_str)
+    {
+        Some(logged) => logged == worker_id,
+        None => false,
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut cutoff = max_bytes.saturating_sub(3);
+    while !value.is_char_boundary(cutoff) {
+        cutoff = cutoff.saturating_sub(1);
+    }
+    format!("{}...", &value[..cutoff])
 }
 
 fn random_hex(bytes: usize) -> String {

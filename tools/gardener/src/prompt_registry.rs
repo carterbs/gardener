@@ -23,7 +23,7 @@ impl PromptRegistry {
         templates.insert(WorkerState::Doing, doing_template());
         templates.insert(WorkerState::Gitting, gitting_template_pr());
         templates.insert(WorkerState::Reviewing, reviewing_template());
-        templates.insert(WorkerState::Merging, merging_template());
+        templates.insert(WorkerState::Merging, merging_template_local());
 
         Self { templates }
     }
@@ -35,6 +35,15 @@ impl PromptRegistry {
             GitOutputMode::PullRequest => gitting_template_pr(),
         };
         self.templates.insert(WorkerState::Gitting, template);
+        self
+    }
+
+    pub fn with_merging_mode(mut self, mode: &GitOutputMode) -> Self {
+        let template = match mode {
+            GitOutputMode::PullRequest => merging_template_pr(),
+            GitOutputMode::CommitOnly | GitOutputMode::Push => merging_template_local(),
+        };
+        self.templates.insert(WorkerState::Merging, template);
         self
     }
 
@@ -122,11 +131,23 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
-fn merging_template() -> PromptTemplate {
+fn merging_template_local() -> PromptTemplate {
     PromptTemplate {
-        version: "v1-merging",
-        body: r#"Intent: merge after validation passes; report merge status.
-Guardrails: include deterministic merge_sha when merged=true.
+        version: "v1-merging-local",
+        body: r#"Intent: merge the current worktree branch into main on the local repo and report the resulting merge commit SHA.
+Run: from the repo root (not the worktree), run git merge --no-ff <current-branch> and capture the resulting commit SHA with git rev-parse HEAD.
+Guardrails: do not push; do not open a pull request; do not modify source files; include the deterministic merge_sha when merged=true.
+Output schema must be JSON envelope with payload fields: merged, merge_sha.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+fn merging_template_pr() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-merging-pr",
+        body: r#"Intent: merge the open GitHub pull request for the current branch and report the resulting merge commit SHA.
+Run: use gh pr merge --merge --auto or gh pr merge <pr-number> --merge to merge the PR, then capture the merge commit SHA.
+Guardrails: do not perform a local git merge; do not modify source files; include the deterministic merge_sha when merged=true.
 Output schema must be JSON envelope with payload fields: merged, merge_sha.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }

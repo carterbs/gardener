@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
+const RESIZE_SENTINEL_KEY: char = '\0';
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRequest {
     pub program: String,
@@ -162,26 +164,26 @@ fn start_key_listener_if_needed() {
             let Ok(event) = crossterm::event::read() else {
                 continue;
             };
-            let crossterm::event::Event::Key(key) = event else {
-                continue;
-            };
-            match key.code {
-                crossterm::event::KeyCode::Char('c')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
-                    enqueue_key('q');
-                    request_interrupt();
-                }
-                crossterm::event::KeyCode::Enter => {
-                    enqueue_key('\n');
-                }
-                crossterm::event::KeyCode::Char(c) => {
-                    enqueue_key(c);
-                    if c == 'q' {
+            match event {
+                crossterm::event::Event::Key(key) => match key.code {
+                    crossterm::event::KeyCode::Char('c')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        enqueue_key('q');
                         request_interrupt();
                     }
+                    crossterm::event::KeyCode::Char(c) => {
+                        enqueue_key(c);
+                        if c == 'q' {
+                            request_interrupt();
+                        }
+                    }
+                    _ => {}
+                },
+                crossterm::event::Event::Resize(_, _) => {
+                    enqueue_key(RESIZE_SENTINEL_KEY);
                 }
                 _ => {}
             }
@@ -687,10 +689,10 @@ impl Terminal for ProductionTerminal {
                 {
                     Ok(Some('q'))
                 }
-                crossterm::event::KeyCode::Enter => Ok(Some('\n')),
                 crossterm::event::KeyCode::Char(c) => Ok(Some(c)),
                 _ => Ok(None),
             },
+            crossterm::event::Event::Resize(_, _) => Ok(Some(RESIZE_SENTINEL_KEY)),
             _ => Ok(None),
         }
     }

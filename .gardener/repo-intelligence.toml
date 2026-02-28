@@ -1,18 +1,15 @@
 [meta]
 schema_version = 1
-created_at = "1772225075"
-head_sha = "b40b3c347899a88a13ff01d4fbe42f4f5e409c2b"
-working_dir = "/Users/brad.carter/go/src/github.com/DataDog/gardener/."
-repo_root = "/Users/brad.carter/go/src/github.com/DataDog/gardener"
+created_at = "1772242801"
+head_sha = "38979179b0df5196e451a8d7c807cbcc59febcae"
+working_dir = "/Users/bradcarter/Documents/Dev/gardener/."
+repo_root = "/Users/bradcarter/Documents/Dev/gardener"
 discovery_used = false
 
 [detected_agent]
 primary = "codex"
-claude_signals = [
-    "/Users/brad.carter/go/src/github.com/DataDog/gardener:.claude",
-    "/Users/brad.carter/go/src/github.com/DataDog/gardener:AGENTS.md",
-]
-codex_signals = ["/Users/brad.carter/go/src/github.com/DataDog/gardener:AGENTS.md"]
+claude_signals = ["/Users/bradcarter/Documents/Dev/gardener:AGENTS.md"]
+codex_signals = ["/Users/bradcarter/Documents/Dev/gardener:AGENTS.md"]
 agents_md_present = true
 user_confirmed = true
 
@@ -61,9 +58,9 @@ guardrails_correction = "unknown: discovery unavailable"
 validation_command = "cargo test -p gardener --all-targets"
 coverage_grade_override = "unknown"
 additional_context = ""
-preferred_parallelism = 31
+preferred_parallelism = 1
 corrections_made = 0
-validated_at = "1772225075"
+validated_at = "1772242801"
 
 [agent_readiness]
 agent_steering_score = 2

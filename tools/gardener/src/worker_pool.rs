@@ -4,7 +4,7 @@ use crate::errors::GardenerError;
 use crate::hotkeys::{
     action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
 };
-use crate::logging::{append_run_log, structured_fallback_line};
+use crate::logging::{append_run_log, recent_worker_log_lines, structured_fallback_line};
 use crate::priority::Priority;
 use crate::runtime::Terminal;
 use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
@@ -17,6 +17,10 @@ use crate::tui::{
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
 use serde_json::json;
+use std::sync::mpsc;
+use std::time::Duration;
+
+const WORKER_POOL_ID: &str = "worker_pool";
 
 pub fn run_worker_pool_fsm(
     runtime: &ProductionRuntime,
@@ -33,6 +37,7 @@ pub fn run_worker_pool_fsm(
         "info",
         "worker_pool.started",
         json!({
+            "worker_id": WORKER_POOL_ID,
             "target": target,
             "configured_parallelism": cfg.orchestrator.parallelism,
             "task_override": task_override
@@ -42,7 +47,7 @@ pub fn run_worker_pool_fsm(
     let mut report_visible = false;
     let hb = cfg.scheduler.heartbeat_interval_seconds;
     let lt = cfg.scheduler.lease_timeout_seconds;
-    let parallelism = (cfg.orchestrator.parallelism.max(1) as usize).min(target.max(1));
+    let parallelism = cfg.orchestrator.parallelism.max(1) as usize;
     let mut workers = (0..parallelism)
         .map(|idx| WorkerRow {
             worker_id: format!("worker-{}", idx + 1),
@@ -54,6 +59,8 @@ pub fn run_worker_pool_fsm(
             session_age_secs: 0,
             lease_held: false,
             session_missing: false,
+            command_details: Vec::new(),
+            commands_expanded: false,
         })
         .collect::<Vec<_>>();
     let mut completed = 0usize;
@@ -75,31 +82,13 @@ pub fn run_worker_pool_fsm(
         if report_visible {
             continue;
         }
+        let mut claimed = Vec::new();
         let mut claimed_any = false;
-        for idx in 0..workers.len() {
-            if handle_hotkeys(
-                runtime,
-                scope,
-                cfg,
-                store,
-                &workers,
-                operator_hotkeys,
-                terminal,
-                &mut report_visible,
-            )? {
-                return Ok(completed);
-            }
-            if report_visible {
-                break;
-            }
-            if completed >= target {
-                break;
-            }
-
+        let available_slots = parallelism.min(target.saturating_sub(completed));
+        for idx in 0..available_slots {
             let worker_id = workers[idx].worker_id.clone();
-            let claimed =
-                store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
-            let Some(task) = claimed else {
+            let claimed_task = store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
+            let Some(task) = claimed_task else {
                 workers[idx].state = "idle".to_string();
                 workers[idx].task_title = "idle".to_string();
                 workers[idx].tool_line = "waiting for claim".to_string();
@@ -124,152 +113,191 @@ pub fn run_worker_pool_fsm(
             workers[idx].breadcrumb = "claim>doing".to_string();
             workers[idx].lease_held = true;
             render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+            claimed.push((idx, task));
+        }
 
-            let mut quit_requested = false;
-            let mut turn_result: Option<Result<crate::worker::WorkerRunSummary, GardenerError>> =
-                None;
-            std::thread::scope(|scope_guard| {
-                let (tx, rx) = std::sync::mpsc::channel();
-                let worker_id = worker_id.clone();
+        if !claimed_any {
+            break;
+        }
+
+        let mut active = claimed.len();
+        let mut shutdown_error: Option<(String, String, String)> = None;
+        let mut quit_requested = false;
+        let (tx, rx): (
+            mpsc::Sender<(
+                usize,
+                String,
+                Result<crate::worker::WorkerRunSummary, GardenerError>,
+            )>,
+            mpsc::Receiver<(
+                usize,
+                String,
+                Result<crate::worker::WorkerRunSummary, GardenerError>,
+            )>,
+        ) = mpsc::channel();
+        let runtime_scope = scope.clone();
+
+        std::thread::scope(|scope_guard| -> Result<(), GardenerError> {
+            for (idx, task) in claimed {
+                let tx = tx.clone();
+                let worker_id = workers[idx].worker_id.clone();
                 let task_id = task.task_id.clone();
                 let task_summary = task_override.unwrap_or(task.title.as_str()).to_string();
                 let attempt_count = task.attempt_count;
+                let cfg = cfg.clone();
+                let process_runner = runtime.process_runner.clone();
+                let worker_scope = runtime_scope.clone();
                 scope_guard.spawn(move || {
                     let result = execute_task(
-                        cfg,
-                        runtime.process_runner.as_ref(),
-                        scope,
+                        &cfg,
+                        process_runner.as_ref(),
+                        &worker_scope,
                         &worker_id,
                         &task_id,
                         &task_summary,
                         attempt_count,
                     );
-                    let _ = tx.send(result);
+                    let _ = tx.send((idx, task_id, result));
                 });
+            }
+            drop(tx);
 
-                loop {
-                    match rx.recv_timeout(std::time::Duration::from_millis(25)) {
-                        Ok(result) => {
-                            turn_result = Some(result);
-                            break;
-                        }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            if handle_hotkeys(
-                                runtime,
-                                scope,
-                                cfg,
-                                store,
-                                &workers,
-                                operator_hotkeys,
-                                terminal,
-                                &mut report_visible,
-                            )
-                            .unwrap_or(false)
-                            {
-                                request_interrupt();
-                                quit_requested = true;
+            while active > 0 {
+                if handle_hotkeys(
+                    runtime,
+                    &runtime_scope,
+                    cfg,
+                    store,
+                    &workers,
+                    operator_hotkeys,
+                    terminal,
+                    &mut report_visible,
+                )? {
+                    request_interrupt();
+                    quit_requested = true;
+                }
+
+                match rx.recv_timeout(Duration::from_millis(25)) {
+                    Ok((idx, task_id, turn_result)) => {
+                        active = active.saturating_sub(1);
+                        let worker_id = workers[idx].worker_id.clone();
+                        if shutdown_error.is_none() {
+                            let summary = match turn_result {
+                                Ok(summary) => summary,
+                                Err(GardenerError::Process(message))
+                                    if message.contains("user interrupt requested") =>
+                                {
+                                    quit_requested = true;
+                                    continue;
+                                }
+                                Err(err) => {
+                                    let msg = err.to_string();
+                                    append_run_log(
+                                        "error",
+                                        "worker.task.process_error",
+                                        json!({
+                                            "worker_id": worker_id,
+                                            "task_id": task_id,
+                                            "error": msg
+                                        }),
+                                    );
+                                    shutdown_error = Some((worker_id, task_id, msg));
+                                    request_interrupt();
+                                    continue;
+                                }
+                            };
+                            for event in summary.logs {
+                                workers[idx].state = event.state.as_str().to_string();
+                                workers[idx].tool_line = format!("prompt {}", event.prompt_version);
+                                workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                                append_run_log(
+                                    "debug",
+                                    "worker.turn.state",
+                                    json!({
+                                        "worker_id": worker_id,
+                                        "state": event.state.as_str(),
+                                        "prompt_version": event.prompt_version,
+                                        "context_manifest_hash": event.context_manifest_hash
+                                    }),
+                                );
+                                render(
+                                    terminal,
+                                    &workers,
+                                    &dashboard_snapshot(store)?,
+                                    hb,
+                                    lt,
+                                )?;
                             }
+
+                            if summary.final_state == crate::types::WorkerState::Complete {
+                                let _ = store.mark_complete(&task_id, &worker_id)?;
+                                completed = completed.saturating_add(1);
+                                workers[idx].state = "complete".to_string();
+                                workers[idx].tool_line = format!("completed {}", task_id);
+                                workers[idx].lease_held = false;
+                                append_run_log(
+                                    "info",
+                                    "worker.task.completed",
+                                    json!({
+                                        "worker_id": worker_id,
+                                        "task_id": task_id,
+                                        "completed": completed
+                                    }),
+                                );
+                            } else {
+                                workers[idx].state = "failed".to_string();
+                                workers[idx].tool_line = format!("failed {}", task_id);
+                                workers[idx].lease_held = false;
+                                append_run_log(
+                                    "error",
+                                    "worker.task.failed",
+                                    json!({
+                                        "worker_id": worker_id,
+                                        "task_id": task_id,
+                                        "final_state": summary.final_state.as_str()
+                                    }),
+                                );
+                                if let Some(reason) = &summary.failure_reason {
+                                    shutdown_error = Some((
+                                        worker_id,
+                                        task_id,
+                                        reason.clone(),
+                                    ));
+                                    request_interrupt();
+                                } else {
+                                    // No fatal reason — release the lease so this task is available
+                                    // for retry and the backlog count stays accurate.
+                                    let _ = store.release_lease(&task_id, &worker_id)?;
+                                }
+                            }
+                        } else {
+                            request_interrupt();
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                            turn_result = Some(Err(GardenerError::Process(
-                                "worker turn channel disconnected".to_string(),
-                            )));
-                            break;
-                        }
+                        render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        active = 0;
                     }
                 }
-            });
-            let summary = match turn_result.expect("worker result set by scoped worker thread") {
-                Ok(summary) => summary,
-                Err(GardenerError::Process(message))
-                    if message.contains("user interrupt requested") =>
-                {
-                    return Ok(completed);
-                }
-                Err(err) => {
-                    let msg = err.to_string();
-                    append_run_log(
-                        "error",
-                        "worker.task.process_error",
-                        json!({
-                            "worker_id": worker_id,
-                            "task_id": task.task_id,
-                            "error": msg
-                        }),
-                    );
-                    terminal.draw_shutdown_screen("Error", &msg)?;
-                    wait_for_quit(terminal)?;
-                    return Ok(completed);
-                }
-            };
-            if quit_requested {
-                return Ok(completed);
             }
-            for event in summary.logs {
-                workers[idx].state = event.state.as_str().to_string();
-                workers[idx].tool_line = format!("prompt {}", event.prompt_version);
-                workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
-                append_run_log(
-                    "debug",
-                    "worker.turn.state",
-                    json!({
-                        "worker_id": worker_id,
-                        "state": event.state.as_str(),
-                        "prompt_version": event.prompt_version,
-                        "context_manifest_hash": event.context_manifest_hash
-                    }),
-                );
-                render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
-            }
+            Ok(())
+        })?;
 
-            if summary.final_state == crate::types::WorkerState::Complete {
-                let _ = store.mark_complete(&task.task_id, &worker_id)?;
-                completed = completed.saturating_add(1);
-                workers[idx].state = "complete".to_string();
-                workers[idx].tool_line = format!("completed {}", task.task_id);
-                workers[idx].lease_held = false;
-                append_run_log(
-                    "info",
-                    "worker.task.completed",
-                    json!({
-                        "worker_id": worker_id,
-                        "task_id": task.task_id,
-                        "completed": completed
-                    }),
-                );
-            } else {
-                workers[idx].state = "failed".to_string();
-                workers[idx].tool_line = format!("failed {}", task.task_id);
-                workers[idx].lease_held = false;
-                append_run_log(
-                    "error",
-                    "worker.task.failed",
-                    json!({
-                        "worker_id": worker_id,
-                        "task_id": task.task_id,
-                        "final_state": summary.final_state.as_str()
-                    }),
-                );
-                if let Some(reason) = &summary.failure_reason {
-                    terminal.draw_shutdown_screen("Worker Error", reason)?;
-                    wait_for_quit(terminal)?;
-                    return Ok(completed);
-                }
-                // No fatal reason — release the lease so this task is available
-                // for retry and the backlog count stays accurate.
-                let _ = store.release_lease(&task.task_id, &worker_id)?;
-            }
-            render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+        if let Some((worker_id, task_id, reason)) = shutdown_error {
+            terminal.draw_shutdown_screen("Error", &worker_failure_prompt(&worker_id, &task_id, &reason))?;
+            wait_for_quit(terminal)?;
+            return Ok(completed);
         }
-
-        if !claimed_any {
-            break;
+        if quit_requested {
+            return Ok(completed);
         }
     }
     append_run_log(
         "info",
         "worker_pool.completed",
         json!({
+            "worker_id": WORKER_POOL_ID,
             "completed": completed,
             "target": target
         }),
@@ -328,9 +356,18 @@ fn handle_hotkeys(
     }
     let mut redraw_dashboard = false;
     if let Some(key) = terminal.poll_key(10)? {
+        if key == '\0' {
+            redraw_dashboard = true;
+        }
         match hotkey_action(key, operator_hotkeys) {
             Some(AppHotkeyAction::Quit) => {
-                append_run_log("warn", "hotkey.quit", json!({}));
+                append_run_log(
+                    "warn",
+                    "hotkey.quit",
+                    json!({
+                        "worker_id": WORKER_POOL_ID
+                    }),
+                );
                 request_interrupt();
                 return Ok(true);
             }
@@ -346,6 +383,7 @@ fn handle_hotkeys(
                     "info",
                     "hotkey.retry",
                     json!({
+                        "worker_id": WORKER_POOL_ID,
                         "released": released
                     }),
                 );
@@ -362,6 +400,7 @@ fn handle_hotkeys(
                     "info",
                     "hotkey.release_lease",
                     json!({
+                        "worker_id": WORKER_POOL_ID,
                         "released": released
                     }),
                 );
@@ -390,6 +429,7 @@ fn handle_hotkeys(
                     "warn",
                     "hotkey.park_escalate",
                     json!({
+                        "worker_id": WORKER_POOL_ID,
                         "active_workers": active,
                         "task_id": task.task_id
                     }),
@@ -501,6 +541,7 @@ fn render(
         "debug",
         "dashboard.snapshot",
         json!({
+            "worker_id": WORKER_POOL_ID,
             "workers": workers.len(),
             "ready": snapshot.stats.ready,
             "active": snapshot.stats.active,
@@ -532,6 +573,18 @@ fn render(
 
 fn short_task_id(task_id: &str) -> &str {
     task_id.get(0..6).unwrap_or(task_id)
+}
+
+fn worker_failure_prompt(worker_id: &str, task_id: &str, reason: &str) -> String {
+    let recent_lines = recent_worker_log_lines(worker_id, 15);
+    let recent_log_summary = if recent_lines.is_empty() {
+        "No recent worker log lines were available.".to_string()
+    } else {
+        recent_lines.join("\n")
+    };
+    format!(
+        "Worker failure on task {task_id}\n\nError:\n{reason}\n\nLast 15 logs for {worker_id}:\n{recent_log_summary}\n\nPrompt to pass to an agent:\nInvestigate this failure, identify the exact root cause, and provide a remediation step-by-step.\nUse the context above, especially the jsonl worker logs, as the primary evidence."
+    )
 }
 
 fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::PathBuf {

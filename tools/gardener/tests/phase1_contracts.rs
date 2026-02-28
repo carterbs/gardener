@@ -100,6 +100,7 @@ fn cli_help_contract() {
         "--prune-only",
         "--backlog-only",
         "--quality-grades-only",
+        "--validate",
         "--validation-command",
         "--agent",
         "--retriage",
@@ -182,6 +183,16 @@ fn run_with_runtime_paths_and_errors() {
     eprintln!("quality result: {quality_result:?}");
     assert_eq!(quality_result.unwrap(), 0);
 
+    let validate = vec![
+        "gardener".into(),
+        "--validate".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime);
+    eprintln!("validate result: {validate_result:?}");
+    assert_eq!(validate_result.unwrap(), 0);
+
     let normal = vec!["gardener".into(), "--config".into(), "/config.toml".into()];
     let normal_result = gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime);
     eprintln!("normal result: {normal_result:?}");
@@ -212,6 +223,46 @@ fn run_with_runtime_paths_and_errors() {
     let err =
         gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).unwrap_err();
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
+}
+
+#[test]
+fn run_with_runtime_validate_flag_runs_configured_validation_command() {
+    let fs = FakeFileSystem::with_file("/config.toml", "[execution]\ntest_mode = true\n");
+    let process = FakeProcessRunner::default();
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 7,
+        stdout: String::new(),
+        stderr: "failed\n".to_string(),
+    }));
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process.clone()),
+        terminal: Arc::new(FakeTerminal::new(true)),
+    };
+
+    let validate = vec![
+        "gardener".into(),
+        "--validate".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime);
+    assert_eq!(validate_result.unwrap(), 7);
+
+    let spawned = process.spawned();
+    assert_eq!(spawned.len(), 2);
+    assert_eq!(spawned[1].program, "sh");
+    assert_eq!(
+        spawned[1].args,
+        vec!["-lc".to_string(), "npm run validate".to_string()]
+    );
+    assert_eq!(spawned[1].cwd, Some(PathBuf::from("/repo")));
 }
 
 #[test]

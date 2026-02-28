@@ -15,7 +15,7 @@ use crate::types::RuntimeScope;
 use crate::worktree_audit::reconcile_worktrees;
 use serde_json::json;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
@@ -165,6 +165,19 @@ where
                 .to_string(),
         ));
     }
+
+    // Backup the database before any store opens.
+    let db_path = backlog_db_path(cfg, scope);
+    let _ = backup_db_if_exists(&db_path);
+
+    // Open the store at most once, only when needed.
+    let needs_store = cfg.startup.validate_on_boot || (run_seeding && !cfg.execution.test_mode);
+    let store = if needs_store {
+        Some(BacklogStore::open(&db_path)?)
+    } else {
+        None
+    };
+
     let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
     append_run_log(
         "debug",
@@ -241,8 +254,10 @@ where
             runtime
                 .terminal
                 .write_line("WARN startup validation failed; enqueueing P0 recovery task")?;
-            let db_path = backlog_db_path(cfg, scope);
-            let store = BacklogStore::open(db_path)?;
+            // Safety: store is Some because validate_on_boot implies needs_store.
+            let store = store.as_ref().ok_or_else(|| {
+                GardenerError::Database("store not initialized".to_string())
+            })?;
             store.upsert_task(NewTask {
                 kind: TaskKind::Maintenance,
                 title: "Recovery: startup validation failed".to_string(),
@@ -265,10 +280,13 @@ where
         }
     }
 
-    let db_path = backlog_db_path(cfg, scope);
     let mut seeded_tasks_upserted = 0usize;
+    // Safety: store is Some when run_seeding && !test_mode (implies needs_store).
     let existing_active_backlog_count = if run_seeding && !cfg.execution.test_mode {
-        BacklogStore::open(&db_path)?.count_active_tasks()?
+        store
+            .as_ref()
+            .ok_or_else(|| GardenerError::Database("store not initialized".to_string()))?
+            .count_active_tasks()?
     } else {
         0
     };
@@ -277,6 +295,10 @@ where
         cfg.execution.test_mode,
         existing_active_backlog_count,
     ) {
+        // Safety: store is Some because should_seed_backlog requires !test_mode && run_seeding.
+        let store = store.as_ref().ok_or_else(|| {
+            GardenerError::Database("store not initialized".to_string())
+        })?;
         append_run_log(
             "info",
             "startup.seeding.started",
@@ -304,7 +326,7 @@ where
                 cfg.seeding.backend, cfg.seeding.model
             ))?;
         }
-        let seed_generation = seed_generation(&db_path, runtime)?;
+        let seed_generation = seed_generation(store)?;
         let seeded = match run_seed_with_heartbeat(
             runtime,
             scope,
@@ -359,7 +381,6 @@ where
                 "Persisting {} seeded task(s) to backlog store",
                 seeded.len()
             ))?;
-            let store = BacklogStore::open(&db_path)?;
             for task in seeded {
                 let scope_key = if task.domain.trim().is_empty() {
                     profile.agent_readiness.primary_gap.clone()
@@ -403,7 +424,6 @@ where
                 "No seeded tasks produced; generating {} fallback bootstrap task(s)",
                 fallback_target
             ))?;
-            let store = BacklogStore::open(&db_path)?;
             for task in fallback_seed_tasks(
                 &quality_doc,
                 &profile.agent_readiness.primary_gap,
@@ -483,16 +503,46 @@ where
     })
 }
 
+pub fn backup_db_if_exists(path: &Path) -> Result<Option<PathBuf>, GardenerError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let meta = std::fs::metadata(path).map_err(|e| GardenerError::Database(e.to_string()))?;
+    if meta.len() == 0 {
+        return Ok(None);
+    }
+
+    let bak_path = path.with_extension("sqlite.bak");
+    std::fs::copy(path, &bak_path).map_err(|e| GardenerError::Database(e.to_string()))?;
+
+    // Also copy WAL and SHM sidecar files if they exist.
+    for ext in &["sqlite-wal", "sqlite-shm"] {
+        let sidecar = path.with_extension(ext);
+        if sidecar.exists() {
+            let sidecar_bak = bak_path.with_extension(format!("bak-{}", ext.strip_prefix("sqlite-").unwrap_or(ext)));
+            let _ = std::fs::copy(&sidecar, &sidecar_bak);
+        }
+    }
+
+    append_run_log(
+        "info",
+        "startup.backup.created",
+        json!({
+            "source": path.display().to_string(),
+            "backup": bak_path.display().to_string(),
+            "size_bytes": meta.len(),
+        }),
+    );
+
+    Ok(Some(bak_path))
+}
+
 fn should_seed_backlog(run_seeding: bool, test_mode: bool, existing_backlog_count: usize) -> bool {
     run_seeding && !test_mode && existing_backlog_count == 0
 }
 
-fn seed_generation(
-    db_path: &std::path::Path,
-    runtime: &crate::runtime::ProductionRuntime,
-) -> Result<usize, GardenerError> {
-    let _ = runtime;
-    let store = BacklogStore::open(db_path)?;
+fn seed_generation(store: &BacklogStore) -> Result<usize, GardenerError> {
+    append_run_log("debug", "startup.seed_generation.started", json!({}));
     let highest = store
         .list_tasks()?
         .into_iter()
@@ -872,7 +922,7 @@ fn report_stamp_is_stale(
 
 #[cfg(test)]
 mod tests {
-    use super::{fallback_seed_tasks, should_seed_backlog};
+    use super::{backup_db_if_exists, fallback_seed_tasks, should_seed_backlog};
 
     #[test]
     fn fallback_seed_tasks_generate_multiple_unique_items() {
@@ -893,5 +943,40 @@ mod tests {
         assert!(!should_seed_backlog(true, false, 1));
         assert!(!should_seed_backlog(false, false, 0));
         assert!(!should_seed_backlog(true, true, 0));
+    }
+
+    #[test]
+    fn backup_db_if_exists_copies_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = dir.path().join("backlog.sqlite");
+
+        // Create a valid SQLite DB via BacklogStore::open, then drop it.
+        {
+            let _store =
+                crate::backlog_store::BacklogStore::open(&db).expect("create valid db");
+        }
+
+        let meta_before = std::fs::metadata(&db).expect("metadata");
+        let bak = backup_db_if_exists(&db).expect("backup").expect("Some");
+        assert!(bak.exists());
+        let meta_bak = std::fs::metadata(&bak).expect("bak metadata");
+        assert_eq!(meta_before.len(), meta_bak.len());
+    }
+
+    #[test]
+    fn backup_db_if_exists_skips_missing_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = dir.path().join("does-not-exist.sqlite");
+        let result = backup_db_if_exists(&db).expect("no error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn backup_db_if_exists_skips_zero_byte() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db = dir.path().join("backlog.sqlite");
+        std::fs::write(&db, b"").expect("create zero-byte file");
+        let result = backup_db_if_exists(&db).expect("no error");
+        assert!(result.is_none());
     }
 }

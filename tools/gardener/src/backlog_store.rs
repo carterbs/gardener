@@ -120,13 +120,34 @@ enum WriteCmd {
 }
 
 pub struct BacklogStore {
-    write_tx: mpsc::Sender<WriteCmd>,
+    write_tx: Option<mpsc::Sender<WriteCmd>>,
     read_pool: ReadPool,
-    _writer_join: thread::JoinHandle<()>,
+    writer_join: Option<thread::JoinHandle<()>>,
     db_path: PathBuf,
 }
 
+impl Drop for BacklogStore {
+    fn drop(&mut self) {
+        // Close the sender first so the writer loop exits.
+        drop(self.write_tx.take());
+        // Then join the writer thread to flush any in-flight writes.
+        if let Some(handle) = self.worker_join_handle() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl BacklogStore {
+    fn worker_join_handle(&mut self) -> Option<thread::JoinHandle<()>> {
+        self.writer_join.take()
+    }
+
+    fn sender(&self) -> StoreResult<&mpsc::Sender<WriteCmd>> {
+        self.write_tx
+            .as_ref()
+            .ok_or_else(|| GardenerError::Database("store is closed".to_string()))
+    }
+
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();
         append_run_log(
@@ -138,8 +159,35 @@ impl BacklogStore {
             std::fs::create_dir_all(parent).map_err(|e| GardenerError::Database(e.to_string()))?;
         }
 
+        let existed_before_open = path.exists();
+
+        // Reject zero-byte files — they indicate prior corruption.
+        if existed_before_open {
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| GardenerError::Database(e.to_string()))?;
+            if meta.len() == 0 {
+                return Err(GardenerError::Database(format!(
+                    "backlog database is 0 bytes (corrupt): {}",
+                    path.display()
+                )));
+            }
+        }
+
         let mut write_conn = Connection::open(&path).map_err(db_err)?;
         configure_write_connection(&write_conn)?;
+
+        // Run quick_check on existing databases to catch corruption early.
+        if existed_before_open {
+            let integrity: String = write_conn
+                .pragma_query_value(None, "quick_check", |row| row.get(0))
+                .map_err(db_err)?;
+            if integrity != "ok" {
+                return Err(GardenerError::Database(format!(
+                    "backlog database failed integrity check: {integrity}"
+                )));
+            }
+        }
+
         run_migrations(&mut write_conn)?;
 
         let (write_tx, mut write_rx) = mpsc::channel(128);
@@ -148,8 +196,12 @@ impl BacklogStore {
                 match cmd {
                     WriteCmd::Upsert { task, now, reply } => {
                         let result = upsert_task(&write_conn, &task, now).and_then(|_| {
-                            fetch_task(&write_conn, &compute_task_id_from_new_task(&task))
-                                .map(|maybe| maybe.expect("row exists after upsert"))
+                            fetch_task(&write_conn, &compute_task_id_from_new_task(&task))?
+                                .ok_or_else(|| {
+                                    GardenerError::Database(
+                                        "row missing after upsert".to_string(),
+                                    )
+                                })
                         });
                         let _ = reply.send(result);
                     }
@@ -200,9 +252,9 @@ impl BacklogStore {
 
         let read_pool = ReadPool::open(&path, READ_POOL_SIZE)?;
         let store = Self {
-            write_tx,
+            write_tx: Some(write_tx),
             read_pool,
-            _writer_join: writer_join,
+            writer_join: Some(writer_join),
             db_path: path.clone(),
         };
 
@@ -246,7 +298,7 @@ impl BacklogStore {
             }),
         );
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.write_tx
+        self.sender()?
             .blocking_send(WriteCmd::Upsert {
                 task,
                 now,
@@ -290,7 +342,7 @@ impl BacklogStore {
             }),
         );
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.write_tx
+        self.sender()?
             .blocking_send(WriteCmd::ClaimNext {
                 lease_owner: lease_owner.to_string(),
                 lease_expires_at,
@@ -341,7 +393,7 @@ impl BacklogStore {
 
     pub fn mark_in_progress(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.write_tx
+        self.sender()?
             .blocking_send(WriteCmd::MarkInProgress {
                 task_id: task_id.to_string(),
                 lease_owner: lease_owner.to_string(),
@@ -380,7 +432,7 @@ impl BacklogStore {
 
     pub fn mark_complete(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.write_tx
+        self.sender()?
             .blocking_send(WriteCmd::MarkComplete {
                 task_id: task_id.to_string(),
                 lease_owner: lease_owner.to_string(),
@@ -419,7 +471,7 @@ impl BacklogStore {
 
     pub fn release_lease(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.write_tx
+        self.sender()?
             .blocking_send(WriteCmd::ReleaseLease {
                 task_id: task_id.to_string(),
                 lease_owner: lease_owner.to_string(),
@@ -458,7 +510,7 @@ impl BacklogStore {
 
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.write_tx
+        self.sender()?
             .blocking_send(WriteCmd::RecoverStale {
                 now,
                 reply: reply_tx,
@@ -598,7 +650,7 @@ impl ReadPool {
 fn configure_write_connection(conn: &Connection) -> StoreResult<()> {
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(db_err)?;
-    conn.pragma_update(None, "synchronous", "NORMAL")
+    conn.pragma_update(None, "synchronous", "FULL")
         .map_err(db_err)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(db_err)?;
@@ -1361,5 +1413,48 @@ mod tests {
         assert_eq!(p0, 0);
         assert_eq!(p1, 1);
         assert_eq!(p2, 1);
+    }
+
+    #[test]
+    fn drop_flushes_pending_writes() {
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("backlog.sqlite");
+        {
+            let store = BacklogStore::open(&db).expect("open store");
+            store
+                .upsert_task(task("survive-drop", Priority::P1))
+                .expect("upsert");
+            // store is dropped here — Drop impl should flush the write
+        }
+        let reopened = BacklogStore::open(&db).expect("reopen");
+        let tasks = reopened.list_tasks().expect("list");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "survive-drop");
+    }
+
+    #[test]
+    fn open_rejects_zero_byte_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("backlog.sqlite");
+        std::fs::write(&db, b"").expect("create zero-byte file");
+        match BacklogStore::open(&db) {
+            Err(crate::errors::GardenerError::Database(msg)) => {
+                assert!(msg.contains("0 bytes"), "unexpected message: {msg}");
+            }
+            Err(e) => panic!("expected Database error, got: {e}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn open_rejects_corrupt_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let db = dir.path().join("backlog.sqlite");
+        std::fs::write(&db, b"this is not a sqlite database at all").expect("write garbage");
+        match BacklogStore::open(&db) {
+            Err(crate::errors::GardenerError::Database(_)) => {}
+            Err(e) => panic!("expected Database error, got: {e}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }

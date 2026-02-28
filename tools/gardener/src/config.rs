@@ -500,9 +500,22 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
     }
 
-    if let Some(execution) = partial.execution {
-        if let Some(value) = execution.permissions_mode {
-            cfg.execution.permissions_mode = value;
+        if let Some(execution) = partial.execution {
+            if let Some(value) = execution.permissions_mode {
+                cfg.execution.permissions_mode = value;
+            }
+            if let Some(value) = execution.worker_mode {
+                cfg.execution.worker_mode = value;
+            }
+            if let Some(value) = execution.test_mode {
+                cfg.execution.test_mode = value;
+            }
+            if let Some(value) = execution.git_output_mode {
+                cfg.execution.git_output_mode = value;
+            }
+            if let Some(value) = execution.merge_mode {
+                cfg.execution.merge_mode = value;
+            }
         }
         if let Some(value) = execution.worker_mode {
             cfg.execution.worker_mode = value;
@@ -549,6 +562,9 @@ fn apply_cli_overrides(cfg: &mut AppConfig, overrides: &CliOverrides) {
     }
     if let Some(validation_command) = &overrides.validation_command {
         cfg.validation.command = validation_command.clone();
+    }
+    if let Some(merge_mode) = overrides.merge_mode {
+        cfg.execution.merge_mode = merge_mode;
     }
 }
 

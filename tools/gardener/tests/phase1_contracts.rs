@@ -112,6 +112,7 @@ fn cli_help_contract() {
         "--validate",
         "--validation-command",
         "--agent",
+        "--merge-mode",
         "--retriage",
         "--triage-only",
         "--sync-only",
@@ -214,6 +215,15 @@ fn run_with_runtime_paths_and_errors() {
 
     let invalid = vec!["gardener".into(), "--agent".into(), "invalid".into()];
     let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime).expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Cli(_)));
+    let invalid_merge_mode = vec!["gardener".into(), "--merge-mode".into(), "invalid".into()];
+    let err = gardener::run_with_runtime(
+        &invalid_merge_mode,
+        &[],
+        Path::new("/cwd"),
+        &runtime,
+    )
+    .unwrap_err();
     assert!(matches!(err, GardenerError::Cli(_)));
 
     let retriage = vec!["gardener".into(), "--retriage".into()];
@@ -320,6 +330,9 @@ command = "npm run validate:file"
 
 [agent]
 default = "claude"
+
+[execution]
+merge_mode = "local"
 "#;
     let fs = FakeFileSystem::with_file("/cfg.toml", config_toml);
     let process_runner = FakeProcessRunner::default();
@@ -341,6 +354,7 @@ default = "claude"
     assert_eq!(cfg.orchestrator.parallelism, 9);
     assert_eq!(cfg.validation.command, "npm run validate:cli");
     assert_eq!(cfg.agent.default, Some(AgentKind::Codex));
+    assert_eq!(cfg.execution.merge_mode, MergeCompletionMode::Local);
 
     let mut cfg2 = AppConfig::default();
     cfg2.agent.default = Some(AgentKind::Claude);
@@ -438,7 +452,18 @@ test_mode = true
     assert_eq!(cfg.execution.permissions_mode, "custom");
     assert_eq!(cfg.execution.worker_mode, "normal");
     assert!(cfg.execution.test_mode);
+    assert_eq!(cfg.execution.merge_mode, MergeCompletionMode::PrPerCompletion);
     assert_eq!(scope.repo_root, None);
+
+    let overrides = CliOverrides {
+        config_path: Some(PathBuf::from("/cfg.toml")),
+        merge_mode: Some(MergeCompletionMode::Local),
+        ..CliOverrides::default()
+    };
+    let cfg = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner)
+        .expect("load config with CLI override")
+        .0;
+    assert_eq!(cfg.execution.merge_mode, MergeCompletionMode::Local);
 
     let bad_parallel = FakeFileSystem::with_file("/bad1.toml", "[orchestrator]\nparallelism = 0\n");
     let err = load_config(

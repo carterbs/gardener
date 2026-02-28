@@ -10,6 +10,8 @@ use gardener::replay::recording::{
 use gardener::replay::replayer::{
     ReplayAgentAdapter, ReplayProcessRunner, SessionRecording,
 };
+use gardener::agent::codex::CodexAdapter;
+use gardener::agent::{AdapterContext, AgentAdapter};
 use gardener::protocol::AgentTerminal;
 use gardener::runtime::{FakeProcessRunner, ProcessOutput, ProcessRequest};
 use gardener::types::AgentKind;
@@ -459,4 +461,57 @@ fn recording_overhead_acceptable() {
     }
     // If we get here without panicking, the overhead is acceptable.
     // The real benchmark would compare timing, but that's env-dependent.
+}
+
+// ── production failure replay ─────────────────────────────────────────────────
+
+/// Session replay for:
+///   run.id:  55c2c192701db506764301c5bf93acc1
+///   worker:  worker-2
+///   task:    manual:quality:auto-1772289029000
+///   error:   "process error: missing turn.completed or turn.failed event"
+///
+/// The recording was reconstructed from otel-logs.jsonl.  The codex process
+/// emitted four `\n`-terminated JSON objects in a single OS read() chunk.
+/// `ReplayProcessRunner::wait_with_line_stream` delivers recorded stdout using
+/// the same chunk-streaming logic as `ProductionProcessRunner`, faithfully
+/// reproducing the `append_and_flush_lines` bug where each successive line
+/// callback receives `&line_buffer[..end]` instead of `&line_buffer[cursor..end]`.
+///
+/// As a result `turn.completed` appears only inside a multi-object "line" that
+/// fails JSON parsing, so `CodexAdapter` never adds it to `raw_events` and
+/// returns `Err("missing turn.completed or turn.failed event")`.
+#[test]
+fn session_replay_reproduces_missing_terminal_event_bug() {
+    let recording_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/recording_55c2c192701db506764301c5bf93acc1.jsonl");
+    let recording = SessionRecording::load(&recording_path)
+        .expect("load production failure recording");
+
+    assert_eq!(recording.header.run_id, "55c2c192701db506764301c5bf93acc1");
+
+    let runner = ReplayProcessRunner::from_recording(&recording, "worker-2");
+
+    let ctx = AdapterContext {
+        worker_id: "worker-2".to_string(),
+        session_id: "55c2c192701db506764301c5bf93acc1".to_string(),
+        sandbox_id: String::new(),
+        model: "codex-1".to_string(),
+        cwd: std::path::PathBuf::from("/tmp"),
+        prompt_version: "v1".to_string(),
+        context_manifest_hash: String::new(),
+        output_schema: None,
+        output_file: Some(std::path::PathBuf::from("/tmp/codex-last-message.json")),
+        permissive_mode: false,
+        max_turns: None,
+    };
+
+    let err = CodexAdapter
+        .execute(&runner, &ctx, "prompt", None)
+        .expect_err("should reproduce the production error");
+
+    assert!(
+        err.to_string().contains("missing turn.completed or turn.failed event"),
+        "expected production error, got: {err}"
+    );
 }

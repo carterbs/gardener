@@ -208,6 +208,44 @@ impl ProcessRunner for ReplayProcessRunner {
     fn kill(&self, _handle: u64) -> Result<(), GardenerError> {
         Ok(())
     }
+
+    /// Deliver the recorded stdout through the same chunk-based line-splitting
+    /// logic as `ProductionProcessRunner`, so that replays faithfully reproduce
+    /// the production streaming behaviour — including any existing bugs in
+    /// `append_and_flush_lines` (e.g. `[..end]` vs `[cursor..end]`).
+    fn wait_with_line_stream(
+        &self,
+        handle: u64,
+        on_stdout_line: &mut dyn FnMut(&str),
+        on_stderr_line: &mut dyn FnMut(&str),
+    ) -> Result<ProcessOutput, GardenerError> {
+        let output = self.wait(handle)?;
+        // Treat the entire recorded stdout as a single OS-read chunk,
+        // matching the worst-case production scenario where all output
+        // arrives in one read() call before the process exits.
+        let bytes = output.stdout.as_bytes();
+        let mut line_buffer: Vec<u8> = Vec::new();
+        line_buffer.extend_from_slice(bytes);
+        let mut cursor = 0usize;
+        while let Some(pos) = line_buffer[cursor..].iter().position(|b| *b == b'\n') {
+            let end = cursor + pos;
+            // Mirrors append_and_flush_lines in runtime/mod.rs verbatim.
+            let line = String::from_utf8_lossy(&line_buffer[..end]);
+            on_stdout_line(line.trim_end_matches('\r'));
+            cursor = end + 1;
+        }
+        if cursor > 0 {
+            line_buffer.drain(..cursor);
+        }
+        if !line_buffer.is_empty() {
+            let line = String::from_utf8_lossy(&line_buffer);
+            on_stdout_line(line.trim_end_matches('\r'));
+        }
+        for line in output.stderr.lines() {
+            on_stderr_line(line);
+        }
+        Ok(output)
+    }
 }
 
 // ── ReplayAgentAdapter ────────────────────────────────────────────────────────

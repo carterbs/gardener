@@ -107,7 +107,15 @@ pub fn execute_task(
     if cfg.execution.test_mode {
         return execute_task_simulated(cfg, worker_id, task_id, task_summary);
     }
-    execute_task_live(cfg, process_runner, scope, worker_id, task_id, task_summary, attempt_count)
+    execute_task_live(
+        cfg,
+        process_runner,
+        scope,
+        worker_id,
+        task_id,
+        task_summary,
+        attempt_count,
+    )
 }
 
 fn execute_task_live(
@@ -405,7 +413,8 @@ fn execute_task_live(
                 logs,
                 teardown: None,
                 failure_reason: Some(
-                    "gitting agent exited cleanly but left uncommitted changes in worktree".to_string(),
+                    "gitting agent exited cleanly but left uncommitted changes in worktree"
+                        .to_string(),
                 ),
             });
         }
@@ -699,9 +708,9 @@ fn execute_task_live(
             "branch": branch
         }),
     );
-    let _merge_guard = merge_phase_lock().lock().map_err(|_| {
-        GardenerError::Process("worker merging lock poisoned".to_string())
-    })?;
+    let _merge_guard = merge_phase_lock()
+        .lock()
+        .map_err(|_| GardenerError::Process("worker merging lock poisoned".to_string()))?;
     append_run_log(
         "info",
         "worker.merging.lock.acquired",
@@ -760,11 +769,42 @@ fn execute_task_live(
         // Git-based recovery: the agent's JSON output is unreliable. Check whether
         // the branch actually landed on main before giving up.
         let repo_root_git = GitClient::new(process_runner, repo_root);
-        let branch_merged = repo_root_git
-            .verify_ancestor(&branch, "main")
-            .unwrap_or(false);
+        let branch_merged = match repo_root_git.verify_ancestor(&branch, "main") {
+            Ok(is_merged) => is_merged,
+            Err(verify_err) => {
+                append_run_log(
+                    "warn",
+                    "worker.merging.recovery.branch_ancestor_check_failed",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "task_id": task_id,
+                        "branch": branch,
+                        "error": verify_err.to_string()
+                    }),
+                );
+                false
+            }
+        };
         let recovered_sha = if branch_merged {
             repo_root_git.head_sha().unwrap_or(None)
+        } else if let Some(candidate_sha) = merge_output.merge_sha.as_deref() {
+            match repo_root_git.verify_ancestor(candidate_sha, "main") {
+                Ok(true) => Some(candidate_sha.to_string()),
+                Ok(false) => None,
+                Err(verify_err) => {
+                    append_run_log(
+                        "warn",
+                        "worker.merging.recovery.sha_ancestor_check_failed",
+                        json!({
+                            "worker_id": identity.worker_id,
+                            "task_id": task_id,
+                            "merge_sha": candidate_sha,
+                            "error": verify_err.to_string()
+                        }),
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -1355,6 +1395,23 @@ fn parse_reviewing_output(payload: &serde_json::Value) -> ReviewingOutput {
 }
 
 fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
+    let direct = parse_merge_output_object(payload);
+    if direct.merged {
+        return direct;
+    }
+
+    if let Some(enveloped_text) = find_enveloped_json_text(payload) {
+        if let Ok(parsed) =
+            parse_typed_payload::<MergingOutput>(enveloped_text, WorkerState::Merging)
+        {
+            return parsed;
+        }
+    }
+
+    direct
+}
+
+fn parse_merge_output_object(payload: &serde_json::Value) -> MergingOutput {
     MergingOutput {
         merged: payload
             .get("merged")
@@ -1364,6 +1421,35 @@ fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
             .get("merge_sha")
             .and_then(serde_json::Value::as_str)
             .map(ToString::to_string),
+    }
+}
+
+fn find_enveloped_json_text(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.contains(START_MARKER) && text.contains(END_MARKER) {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(found) = find_enveloped_json_text(item) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values() {
+                if let Some(found) = find_enveloped_json_text(value) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1604,8 +1690,15 @@ fn sanitize_for_branch(task_id: &str) -> String {
 
 fn worktree_slug_for_task(task_id: &str) -> String {
     let base = sanitize_for_branch(task_id);
-    let base = if base.is_empty() { "task".to_string() } else { base };
-    let prefix = base.chars().take(WORKTREE_TASK_SLUG_PREFIX_CHARS).collect::<String>();
+    let base = if base.is_empty() {
+        "task".to_string()
+    } else {
+        base
+    };
+    let prefix = base
+        .chars()
+        .take(WORKTREE_TASK_SLUG_PREFIX_CHARS)
+        .collect::<String>();
     let suffix = worktree_slug_suffix(task_id);
     format!("{prefix}-{suffix}")
 }
@@ -1679,12 +1772,10 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_task, review_artifact_path, sanitize_for_branch, verify_gitting_output,
-        parse_merge_output, parse_conflict_resolution_output, parse_reviewing_output,
-        parse_understand_output, verify_merge_output, extract_failure_reason,
-        worktree_branch_for, worktree_path_for,
-        worktree_slug_for_task,
-        worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
+        execute_task, extract_failure_reason, parse_conflict_resolution_output, parse_merge_output,
+        parse_reviewing_output, parse_understand_output, review_artifact_path, sanitize_for_branch,
+        verify_gitting_output, verify_merge_output, worktree_branch_for, worktree_path_for,
+        worktree_slug_for_task, worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::fsm::{GittingOutput, MergingOutput};
@@ -1750,28 +1841,37 @@ mod tests {
 
     #[test]
     fn git_verification_invariants_are_enforced() {
-        let err = verify_gitting_output("worker-1", &GittingOutput {
-            branch: String::new(),
-            pr_number: 1,
-            pr_url: "x".to_string(),
-        })
+        let err = verify_gitting_output(
+            "worker-1",
+            &GittingOutput {
+                branch: String::new(),
+                pr_number: 1,
+                pr_url: "x".to_string(),
+            },
+        )
         .expect_err("must fail");
         assert!(format!("{err}").contains("gitting verification failed"));
 
-        let err = verify_merge_output("worker-1", &MergingOutput {
-            merged: true,
-            merge_sha: None,
-        })
+        let err = verify_merge_output(
+            "worker-1",
+            &MergingOutput {
+                merged: true,
+                merge_sha: None,
+            },
+        )
         .expect_err("must fail");
         assert!(format!("{err}").contains("merge_sha required"));
     }
 
     #[test]
     fn merge_verification_requires_explicit_success_flag() {
-        let err = verify_merge_output("worker-1", &MergingOutput {
-            merged: false,
-            merge_sha: Some("deadbeef".to_string()),
-        })
+        let err = verify_merge_output(
+            "worker-1",
+            &MergingOutput {
+                merged: false,
+                merge_sha: Some("deadbeef".to_string()),
+            },
+        )
         .expect_err("must fail");
         assert!(format!("{err}").contains("merged must be true"));
     }
@@ -1780,6 +1880,35 @@ mod tests {
     fn merge_output_default_is_not_merged() {
         let output = parse_merge_output(&json!({"merge_sha":"deadbeef"}));
         assert!(!output.merged);
+        assert_eq!(output.merge_sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn merge_output_parses_envelope_from_result_text() {
+        let payload = json!({
+            "result": format!(
+                "ok\n{}{{\"schema_version\":1,\"state\":\"merging\",\"payload\":{{\"merged\":true,\"merge_sha\":\"cafebabe\"}}}}{}\n",
+                super::START_MARKER,
+                super::END_MARKER
+            )
+        });
+        let output = parse_merge_output(&payload);
+        assert!(output.merged);
+        assert_eq!(output.merge_sha.as_deref(), Some("cafebabe"));
+    }
+
+    #[test]
+    fn merge_output_envelope_beats_incomplete_top_level_payload() {
+        let payload = json!({
+            "merged": false,
+            "result": format!(
+                "{}{{\"schema_version\":1,\"state\":\"merging\",\"payload\":{{\"merged\":true,\"merge_sha\":\"deadbeef\"}}}}{}",
+                super::START_MARKER,
+                super::END_MARKER
+            )
+        });
+        let output = parse_merge_output(&payload);
+        assert!(output.merged);
         assert_eq!(output.merge_sha.as_deref(), Some("deadbeef"));
     }
 
@@ -1829,7 +1958,10 @@ mod tests {
         );
         assert_eq!(
             branch,
-            format!("gardener/worker-1-{}", worktree_slug_for_task("manual:tui:GARD-03"))
+            format!(
+                "gardener/worker-1-{}",
+                worktree_slug_for_task("manual:tui:GARD-03")
+            )
         );
 
         let path = worktree_path_for(
@@ -1837,7 +1969,9 @@ mod tests {
             "worker-1",
             "manual:tui:GARD-03",
         );
-        let dir_name = path.file_name().expect("worktree path should have file name");
+        let dir_name = path
+            .file_name()
+            .expect("worktree path should have file name");
         let dir_name = dir_name
             .to_str()
             .expect("worktree path should be valid UTF-8");
@@ -1859,9 +1993,7 @@ mod tests {
             second.rsplit('-').next().unwrap_or_default(),
             worktree_slug_suffix("manual:tui:GARD-11")
         );
-        assert!(
-            first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 16
-        );
+        assert!(first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 16);
         let branch = worktree_branch_for("worker-1", "manual:tui:GARD-01");
         assert_eq!(branch.len(), "gardener/worker-1-".len() + first.len());
     }
@@ -1916,7 +2048,9 @@ mod tests {
 
     #[test]
     fn extract_failure_reason_parses_nested_detail_field() {
-        let detail = extract_failure_reason(&serde_json::json!({"message":"{\"detail\":\"merge conflicted\"}"}));
+        let detail = extract_failure_reason(
+            &serde_json::json!({"message":"{\"detail\":\"merge conflicted\"}"}),
+        );
         assert_eq!(detail.as_deref(), Some("merge conflicted"));
 
         let plain = extract_failure_reason(&serde_json::json!({"reason":"hook failed"}));

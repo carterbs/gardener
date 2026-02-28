@@ -42,6 +42,13 @@ fn default_config() -> AppConfig {
     AppConfig::default()
 }
 
+fn default_profile_path() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join(".gardener")
+        .join("repo")
+        .join("repo-intelligence.toml")
+}
+
 fn profile_with_head_sha(head_sha: &str) -> String {
     include_str!("fixtures/triage/expected-profiles/phase03-profile.toml")
         .replace("head_sha = \"unknown\"", &format!("head_sha = \"{head_sha}\""))
@@ -62,7 +69,7 @@ fn triage_needed_unknown_sha_profile_is_never_retriggered() {
     }));
 
     let fs = FakeFileSystem::with_file(
-        "/repo/.gardener/repo-intelligence.toml",
+        default_profile_path(),
         profile_with_head_sha("unknown"),
     );
     let runtime = ProductionRuntime {
@@ -94,7 +101,7 @@ fn triage_needed_git_revparse_failure_uses_unknown_sha() {
     }));
 
     let fs = FakeFileSystem::with_file(
-        "/repo/.gardener/repo-intelligence.toml",
+        default_profile_path(),
         profile_with_head_sha("abc123"),
     );
     let runtime = ProductionRuntime {
@@ -127,7 +134,7 @@ fn triage_needed_commits_since_failure_defaults_not_stale() {
     }));
 
     let fs = FakeFileSystem::with_file(
-        "/repo/.gardener/repo-intelligence.toml",
+        default_profile_path(),
         profile_with_head_sha("abc123"),
     );
     let runtime = ProductionRuntime {
@@ -145,7 +152,7 @@ fn triage_needed_commits_since_failure_defaults_not_stale() {
 #[test]
 fn profile_with_schema_version_99_is_silently_accepted() {
     let fs = FakeFileSystem::with_file(
-        "/repo/.gardener/repo-intelligence.toml",
+        default_profile_path(),
         include_str!("fixtures/triage/expected-profiles/phase03-profile.toml")
             .replace("schema_version = 1", "schema_version = 99"),
     );
@@ -157,7 +164,7 @@ fn profile_with_schema_version_99_is_silently_accepted() {
     };
     let profile = read_profile(
         runtime.file_system.as_ref(),
-        &PathBuf::from("/repo/.gardener/repo-intelligence.toml"),
+        &default_profile_path(),
     )
     .expect("profile parse should succeed");
     assert_eq!(profile.meta.schema_version, 99);

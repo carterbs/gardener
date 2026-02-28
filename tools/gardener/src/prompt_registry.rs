@@ -79,9 +79,8 @@ fn understand_template() -> PromptTemplate {
 ## Steps
 
 1. Read the task description from [task_packet] carefully.
-2. Consider the repo context from [repo_context] to understand what area of the codebase this touches.
-3. Classify based on the primary intent of the work, not secondary side effects.
-4. Write concise reasoning (1-3 sentences) explaining your classification.
+2. Classify based on the primary intent of the work, not secondary side effects.
+3. Write concise reasoning (1-3 sentences) explaining your classification.
 
 Guardrails: deterministic classification with concise reasoning. Do not modify any files.
 Output schema must be JSON envelope with payload fields: task_type, reasoning.
@@ -241,7 +240,31 @@ fn reviewing_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-reviewing",
         body: r#"Intent: review implementation quality and return approve|needs_changes with suggestions.
-Guardrails: suggestions must be actionable and scoped.
+
+You are an independent reviewer. Your job is to ensure the implementation is correct, well-tested, and follows project conventions.
+
+## Steps
+
+1. Read the task description from [task_packet] to understand what was requested.
+2. Read the plan and prior context from [knowledge_context] to understand what was intended.
+3. Examine the diff — read every changed file and understand the full scope of modifications.
+4. Run the project's test and lint commands to verify the implementation passes.
+5. Evaluate the implementation against the criteria below.
+
+## Evaluation criteria
+
+- **Correctness**: Does the code do what the task requested? Are there edge cases that are mishandled or silently ignored?
+- **Tests**: Are new code paths tested? Are the tests meaningful — do they verify behavior, not just that code runs without crashing? Is coverage adequate for the scope of the change?
+- **Conventions**: Does the code follow project naming, file structure, and architecture conventions?
+- **Scope**: Are the changes focused on the task, or does the implementation include unrelated refactors, speculative features, or unnecessary abstractions?
+- **Quality**: Is the code clear and maintainable? Are there obvious simplifications? Would a human reviewer flag anything as over-engineered or under-documented?
+
+## Verdict
+
+- If the implementation meets all criteria: verdict = "approve", suggestions = [].
+- If there are issues: verdict = "needs_changes", suggestions = a list of specific, actionable findings. Each suggestion should name the file and describe what needs to change and why. Do not give vague feedback like "improve tests" — say exactly which cases are missing.
+
+Guardrails: do not modify any files. Suggestions must be actionable and scoped to the current change.
 Output schema must be JSON envelope with payload fields: verdict, suggestions.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
@@ -251,7 +274,19 @@ fn merging_template_local() -> PromptTemplate {
     PromptTemplate {
         version: "v1-merging-local",
         body: r#"Intent: merge the current worktree branch into main on the local repo and report the resulting merge commit SHA.
-Run: from the repo root (not the worktree), run git merge --no-ff <current-branch> and capture the resulting commit SHA with git rev-parse HEAD.
+
+## Steps
+
+1. Confirm the current branch and worktree state with git status.
+2. From the repo root (not the worktree), run: git merge --no-ff <current-branch>
+3. If merge conflicts occur, resolve them carefully — keep behavior from both sides where appropriate.
+4. Capture the resulting commit SHA with: git rev-parse HEAD
+5. Verify the merge completed cleanly with git status.
+
+## On failure
+
+If the merge cannot complete (unresolvable conflicts, dirty worktree, etc.), set merged=false, merge_sha="" and explain the failure in the summary.
+
 Guardrails: do not push; do not open a pull request; do not modify source files; include the deterministic merge_sha when merged=true.
 Output schema must be JSON envelope with payload fields: merged, merge_sha.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
@@ -262,7 +297,19 @@ fn merging_template_pr() -> PromptTemplate {
     PromptTemplate {
         version: "v1-merging-pr",
         body: r#"Intent: merge the open GitHub pull request for the current branch and report the resulting merge commit SHA.
-Run: use gh pr merge --merge --auto or gh pr merge <pr-number> --merge to merge the PR, then capture the merge commit SHA.
+
+## Steps
+
+1. Confirm the current branch and PR state with: git status && gh pr view --json state,mergeable,mergeStateStatus
+2. If the PR is not in a mergeable state, explain why and set merged=false.
+3. Merge the PR: gh pr merge --merge --auto or gh pr merge <pr-number> --merge
+4. Capture the merge commit SHA from the merge result.
+5. Verify the merge completed: gh pr view <pr-number> --json state,mergedAt
+
+## On failure
+
+If the merge cannot complete (CI failing, merge conflicts, review requirements not met), set merged=false, merge_sha="" and explain the failure in the summary.
+
 Guardrails: do not perform a local git merge; do not modify source files; include the deterministic merge_sha when merged=true.
 Output schema must be JSON envelope with payload fields: merged, merge_sha.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,

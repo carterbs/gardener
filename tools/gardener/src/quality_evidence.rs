@@ -160,7 +160,7 @@ fn collect_integration_files(root: &Path, files: &mut Vec<String>, domain: &str)
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !stem.contains(&needle) && !stem.contains(&domain) {
+        if !stem.contains(&needle) && !stem.contains(domain) {
             continue;
         }
         if let Some(rel) = path.to_str() {

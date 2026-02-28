@@ -1,4 +1,4 @@
-#![warn(clippy::unwrap_used, clippy::redundant_clone)]
+#![deny(clippy::unwrap_used, clippy::redundant_clone)]
 
 pub mod agent;
 pub mod backlog_snapshot;
@@ -585,42 +585,6 @@ fn env_to_map(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> EnvMap {
     map
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{config, repo_intelligence, runtime, triage_discovery};
-    use std::path::Path;
-
-    fn sample_profile(preferred_parallelism: Option<u32>) -> repo_intelligence::RepoIntelligenceProfile {
-        let clock = runtime::FakeClock::default();
-        let mut profile = repo_intelligence::build_profile(
-            &clock,
-            Path::new("/tmp"),
-            Path::new("/tmp"),
-            "deadbeef".to_string(),
-            triage_discovery::DiscoveryAssessment::unknown(),
-            false,
-            None,
-            vec![],
-            vec![],
-            "npm run validate".to_string(),
-            false,
-        );
-        profile.user_validated.preferred_parallelism = preferred_parallelism;
-        profile
-    }
-
-    #[test]
-    fn profile_parallelism_does_not_override_cli_parallelism() {
-        let mut cfg = config::AppConfig::default();
-        cfg.orchestrator.parallelism = 4;
-        let profile = sample_profile(Some(8));
-
-        super::apply_profile_runtime_preferences(&mut cfg, Some(&profile), Some(4));
-
-        assert_eq!(cfg.orchestrator.parallelism, 4);
-    }
-}
-
 fn persist_agent_default(
     fs: &dyn runtime::FileSystem,
     path: &std::path::Path,
@@ -652,4 +616,40 @@ fn persist_agent_default(
     let output =
         toml::to_string_pretty(&value).map_err(|e| GardenerError::ConfigParse(e.to_string()))?;
     fs.write_string(path, &output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{config, repo_intelligence, runtime, triage_discovery};
+    use std::path::Path;
+
+    fn sample_profile(preferred_parallelism: Option<u32>) -> repo_intelligence::RepoIntelligenceProfile {
+        let clock = runtime::FakeClock::default();
+        let mut profile = repo_intelligence::build_profile(repo_intelligence::BuildProfileInput {
+            clock: &clock,
+            working_dir: Path::new("/tmp"),
+            repo_root: Path::new("/tmp"),
+            head_sha: "deadbeef".to_string(),
+            discovery: triage_discovery::DiscoveryAssessment::unknown(),
+            discovery_used: false,
+            primary_agent: None,
+            claude_signals: Vec::new(),
+            codex_signals: Vec::new(),
+            validation_command: "npm run validate".to_string(),
+            agents_md_present: false,
+        });
+        profile.user_validated.preferred_parallelism = preferred_parallelism;
+        profile
+    }
+
+    #[test]
+    fn profile_parallelism_does_not_override_cli_parallelism() {
+        let mut cfg = config::AppConfig::default();
+        cfg.orchestrator.parallelism = 4;
+        let profile = sample_profile(Some(8));
+
+        super::apply_profile_runtime_preferences(&mut cfg, Some(&profile), Some(4));
+
+        assert_eq!(cfg.orchestrator.parallelism, 4);
+    }
 }

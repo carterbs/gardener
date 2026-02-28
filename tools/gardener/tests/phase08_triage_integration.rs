@@ -32,6 +32,13 @@ fn default_config() -> AppConfig {
     AppConfig::default()
 }
 
+fn default_profile_path() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join(".gardener")
+        .join("repo")
+        .join("repo-intelligence.toml")
+}
+
 // --- Triage Decision Tests ---
 
 #[test]
@@ -52,7 +59,7 @@ fn triage_needed_when_profile_missing() {
 
 #[test]
 fn triage_needed_when_force_retriage() {
-    let profile_path = "/repo/.gardener/repo-intelligence.toml";
+    let profile_path = default_profile_path();
     let profile_toml = include_str!("fixtures/triage/expected-profiles/phase03-profile.toml");
     let fs = FakeFileSystem::with_file(profile_path, profile_toml);
     let process = FakeProcessRunner::default();

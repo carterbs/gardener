@@ -188,19 +188,36 @@ pub fn commits_since_profile_head(
     Ok(count)
 }
 
+pub struct BuildProfileInput<'a> {
+    pub clock: &'a dyn Clock,
+    pub working_dir: &'a Path,
+    pub repo_root: &'a Path,
+    pub head_sha: String,
+    pub discovery: DiscoveryAssessment,
+    pub discovery_used: bool,
+    pub primary_agent: Option<AgentKind>,
+    pub claude_signals: Vec<String>,
+    pub codex_signals: Vec<String>,
+    pub validation_command: String,
+    pub agents_md_present: bool,
+}
+
 pub fn build_profile(
-    clock: &dyn Clock,
-    working_dir: &Path,
-    repo_root: &Path,
-    head_sha: String,
-    discovery: DiscoveryAssessment,
-    discovery_used: bool,
-    primary_agent: Option<AgentKind>,
-    claude_signals: Vec<String>,
-    codex_signals: Vec<String>,
-    validation_command: String,
-    agents_md_present: bool,
+    input: BuildProfileInput<'_>,
 ) -> RepoIntelligenceProfile {
+    let BuildProfileInput {
+        clock,
+        working_dir,
+        repo_root,
+        head_sha,
+        discovery,
+        discovery_used,
+        primary_agent,
+        claude_signals,
+        codex_signals,
+        validation_command,
+        agents_md_present,
+    } = input;
     append_run_log(
         "info",
         "repo_intelligence.build_profile.started",

@@ -7,6 +7,7 @@ fi
 
 CUSTOM_LINTERS=(
   "scripts/check-skills-sync.sh"
+  "scripts/check-no-warnings.sh"
 )
 
 for linter in "${CUSTOM_LINTERS[@]}"; do
@@ -17,5 +18,5 @@ done
 echo "Running project validation command: cargo test -p gardener --all-targets"
 cargo test -p gardener --all-targets
 
-echo "Running project validation command: cargo clippy -p gardener --all-targets -- -W clippy::unwrap_used -W clippy::redundant_clone"
-cargo clippy -p gardener --all-targets -- -W clippy::unwrap_used -W clippy::redundant_clone
+echo "Running project validation command: scripts/check-no-warnings.sh"
+scripts/check-no-warnings.sh

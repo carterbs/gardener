@@ -11,6 +11,7 @@ use crate::triage_discovery::{run_discovery, DiscoveryAssessment};
 use crate::triage_interview::run_interview;
 use crate::types::{AgentKind, RuntimeScope};
 use serde_json::json;
+use std::env;
 use std::path::PathBuf;
 
 fn push_triage_update(
@@ -40,10 +41,35 @@ pub enum TriageDecision {
     NotNeeded,
 }
 
+fn default_repo_intelligence_path(scope: &RuntimeScope) -> PathBuf {
+    let repo_name = scope
+        .repo_root
+        .as_ref()
+        .or(Some(&scope.working_dir))
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repo");
+
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join(".gardener").join(repo_name))
+        .unwrap_or_else(|| {
+            scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&scope.working_dir)
+                .join(".gardener")
+        })
+        .join("repo-intelligence.toml")
+}
+
 pub fn profile_path(scope: &RuntimeScope, cfg: &AppConfig) -> PathBuf {
     let configured = PathBuf::from(&cfg.triage.output_path);
     if configured.is_absolute() {
         configured
+    } else if cfg.triage.output_path == ".gardener/repo-intelligence.toml" {
+        default_repo_intelligence_path(scope)
     } else {
         scope
             .repo_root
@@ -129,13 +155,14 @@ pub fn run_triage(
 ) -> Result<RepoIntelligenceProfile, GardenerError> {
     let mut activity = Vec::new();
     let mut artifacts = Vec::new();
+    let resolved_profile_path = profile_path(scope, cfg);
     append_run_log(
         "info",
         "triage.started",
         json!({
             "working_dir": scope.working_dir.display().to_string(),
             "agent_override": agent_override.map(|a| a.as_str()),
-            "output_path": cfg.triage.output_path
+            "output_path": resolved_profile_path.display().to_string(),
         }),
     );
     push_triage_update(
@@ -156,7 +183,7 @@ pub fn run_triage(
         );
         return Err(GardenerError::Cli(format!(
             "Triage requires a human and cannot run non-interactively ({reason:?}).\nNo repo intelligence profile was found at {}.\nTo complete setup, run in a terminal:\n  gardener --triage-only",
-            cfg.triage.output_path
+            resolved_profile_path.display()
         )));
     }
 
@@ -169,7 +196,7 @@ pub fn run_triage(
         None,
     )?;
     let detected = detect_agent(runtime.file_system.as_ref(), &scope.working_dir, repo_root);
-    let chosen_agent = agent_override.unwrap_or_else(|| match detected.detected {
+    let chosen_agent = agent_override.unwrap_or(match detected.detected {
         DetectedAgent::Claude => AgentKind::Claude,
         _ => AgentKind::Codex,
     });
@@ -300,20 +327,20 @@ pub fn run_triage(
     )?;
 
     let agents_md = detected.agents_md_present;
-    let mut profile = build_profile(
-        runtime.clock.as_ref(),
-        &scope.working_dir,
+    let mut profile = build_profile(crate::repo_intelligence::BuildProfileInput {
+        clock: runtime.clock.as_ref(),
+        working_dir: &scope.working_dir,
         repo_root,
-        current_head_sha(runtime.process_runner.as_ref(), &scope.working_dir)
+        head_sha: current_head_sha(runtime.process_runner.as_ref(), &scope.working_dir)
             .unwrap_or_else(|_| "unknown".to_string()),
         discovery,
         discovery_used,
-        Some(chosen_agent),
-        detected.claude_signals,
-        detected.codex_signals,
-        interview.validation_command,
-        agents_md,
-    );
+        primary_agent: Some(chosen_agent),
+        claude_signals: detected.claude_signals,
+        codex_signals: detected.codex_signals,
+        validation_command: interview.validation_command,
+        agents_md_present: agents_md,
+    });
     profile.user_validated.additional_context = interview.additional_context;
     profile.user_validated.external_docs_accessible = interview.external_docs_accessible;
     profile.user_validated.preferred_parallelism = interview.preferred_parallelism;
@@ -321,7 +348,7 @@ pub fn run_triage(
     profile.user_validated.external_docs_surface = interview.external_docs_surface;
     profile.user_validated.guardrails_correction = interview.guardrails_correction;
     profile.user_validated.coverage_grade_override = interview.coverage_grade_override;
-    let path = profile_path(scope, cfg);
+    let path = resolved_profile_path;
     write_profile(runtime.file_system.as_ref(), &path, &profile)?;
     push_triage_update(
         runtime,
@@ -377,16 +404,17 @@ pub fn ensure_profile_for_run(
         }
         TriageDecision::Needed => {
             if is_non_interactive(env, runtime.terminal.as_ref()).is_some() {
+                let path = profile_path(scope, cfg);
                 append_run_log(
                     "error",
                     "triage.ensure_profile.blocked_non_interactive",
                     json!({
-                        "output_path": cfg.triage.output_path
+                        "output_path": path.display().to_string()
                     }),
                 );
                 return Err(GardenerError::Cli(format!(
                     "Triage requires a human and cannot run non-interactively.\n\nNo repo intelligence profile was found at {}.\nTriage gathers context that Gardener cannot determine automatically.\n\nTo complete setup, run in a terminal:\n  gardener --triage-only\n\nThen re-run your agent or pipeline.",
-                    cfg.triage.output_path
+                    path.display()
                 )));
             }
             run_triage(runtime, scope, cfg, env, agent_override).map(Some)

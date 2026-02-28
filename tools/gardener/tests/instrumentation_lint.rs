@@ -176,11 +176,11 @@ fn remove_test_modules(source: &str) -> String {
             if let Some(next_line) = lines.peek() {
                 if next_line.trim_start().starts_with("mod tests") {
                     let mut brace_depth = 0isize;
-                    while let Some(test_line) = lines.next() {
-                        for ch in test_line.chars() {
-                            if ch == '{' {
-                                brace_depth += 1;
-                            } else if ch == '}' {
+    for test_line in lines.by_ref() {
+        for ch in test_line.chars() {
+            if ch == '{' {
+                brace_depth += 1;
+            } else if ch == '}' {
                                 brace_depth -= 1;
                             }
                         }

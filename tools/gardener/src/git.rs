@@ -403,7 +403,7 @@ mod tests {
         }));
         let err = GitClient::new(&runner, "/repo")
             .rebase_onto_main("main")
-            .unwrap_err();
+            .expect_err("rebase onto main should fail with simulated conflict");
         assert!(err.to_string().contains("rebase onto origin/main failed"));
         let spawned = runner.spawned();
         assert!(spawned[2].args.contains(&"--abort".to_string()));
@@ -419,7 +419,7 @@ mod tests {
         }));
         assert!(GitClient::new(&runner, "/repo")
             .worktree_is_clean()
-            .unwrap());
+            .expect("worktree_is_clean should succeed"));
     }
 
     #[test]
@@ -432,7 +432,7 @@ mod tests {
         }));
         assert!(!GitClient::new(&runner, "/repo")
             .worktree_is_clean()
-            .unwrap());
+            .expect("worktree_is_clean should succeed"));
     }
 
     #[test]

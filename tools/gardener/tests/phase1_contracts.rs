@@ -18,11 +18,21 @@ use std::time::{Duration, UNIX_EPOCH};
 
 const TEST_REPO_ROOT: &str = "/tmp/gardener-phase1-contracts";
 
+fn default_profile_path(git_root: Option<&str>) -> PathBuf {
+    let repo_root = PathBuf::from(git_root.unwrap_or("/repo"));
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join(".gardener")
+        .join(repo_name)
+        .join("repo-intelligence.toml")
+}
+
 fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> ProductionRuntime {
     let fs = FakeFileSystem::with_file("/config.toml", config_text);
-    let profile_path = PathBuf::from(git_root.unwrap_or("/repo"))
-        .join(".gardener")
-        .join("repo-intelligence.toml");
+    let profile_path = default_profile_path(git_root);
     fs.write_string(
         profile_path.as_path(),
         include_str!("fixtures/triage/expected-profiles/phase03-profile.toml"),
@@ -67,7 +77,7 @@ impl Terminal for FailingTerminal {
 fn runtime_with_failing_terminal() -> ProductionRuntime {
     let fs = FakeFileSystem::with_file("/config.toml", "");
     fs.write_string(
-        Path::new("/repo/.gardener/repo-intelligence.toml"),
+        &default_profile_path(Some("/repo")),
         include_str!("fixtures/triage/expected-profiles/phase03-profile.toml"),
     )
     .expect("seed profile");

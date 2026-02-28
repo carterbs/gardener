@@ -999,6 +999,7 @@ pub fn system_time_unix() -> i64 {
 mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1008,12 +1009,18 @@ mod tests {
     use crate::priority::Priority;
     use crate::task_identity::{compute_task_id, TaskIdentity, TaskKind};
 
+    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn temp_store() -> BacklogStore {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        let db_dir = std::env::temp_dir().join(format!("gardener-backlog-{nonce}"));
+        let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let db_dir = std::env::temp_dir().join(format!(
+            "gardener-backlog-{}-{nonce}-{counter}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&db_dir).expect("mkdir");
         let db = db_dir.join("backlog.sqlite");
         BacklogStore::open(&db).expect("open store")

@@ -317,9 +317,7 @@ fn triage_stage_progress(activity: &[String]) -> usize {
     let mut current_stage = 0usize;
     for entry in activity {
         let lower = entry.to_ascii_lowercase();
-        if lower.contains("persisted triage profile") {
-            current_stage = 3;
-        } else if lower.contains("interview complete") {
+        if lower.contains("persisted triage profile") || lower.contains("interview complete") {
             current_stage = 3;
         } else if lower.contains("discovery assessment complete")
             || lower.contains("running repository discovery assessment")
@@ -775,7 +773,7 @@ fn draw_dashboard_frame(
         let max_backlog_rows = remaining.saturating_sub(minimum_worker_rows);
         let minimum_backlog_rows = if app_state.backlog.is_empty() {
             0
-        } else if remaining >= minimum_worker_rows + 1 {
+        } else if remaining > minimum_worker_rows {
             1
         } else {
             0
@@ -2230,7 +2228,7 @@ mod tests {
         let w1_before = workers[1].commands_expanded;
         let _ = scroll_workers_down();
         assert!(toggle_selected_worker_command_detail(&mut workers));
-        assert_eq!(workers[0].commands_expanded, true);
+        assert!(workers[0].commands_expanded);
         assert_ne!(workers[1].commands_expanded, w1_before);
     }
 

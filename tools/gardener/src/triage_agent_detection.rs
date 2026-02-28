@@ -44,11 +44,12 @@ pub fn is_non_interactive(env: &EnvMap, terminal: &dyn Terminal) -> Option<NonIn
     None
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DetectedAgent {
     Claude,
     Codex,
     Both,
+    #[default]
     Unknown,
 }
 
@@ -58,12 +59,6 @@ pub struct AgentDetection {
     pub claude_signals: Vec<String>,
     pub codex_signals: Vec<String>,
     pub agents_md_present: bool,
-}
-
-impl Default for DetectedAgent {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 pub fn detect_agent(fs: &dyn FileSystem, working_dir: &Path, repo_root: &Path) -> AgentDetection {

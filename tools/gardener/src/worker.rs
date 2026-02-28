@@ -22,6 +22,7 @@ use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -146,19 +147,19 @@ fn execute_task_live(
         );
     }
 
-    let understand_result = run_agent_turn(
+    let understand_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
         scope,
-        &worktree_path,
-        &factory,
-        &registry,
-        &learning_loop,
-        &identity,
-        WorkerState::Understand,
+        worktree_path: &worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &learning_loop,
+        identity: &identity,
+        state: WorkerState::Understand,
         task_summary,
         attempt_count,
-    )?;
+    })?;
     logs.push(understand_result.log_event);
     if understand_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&understand_result.payload);
@@ -195,19 +196,19 @@ fn execute_task_live(
     fsm.apply_understand(&understand)?;
 
     if fsm.state == WorkerState::Planning {
-        let planning_result = run_agent_turn(
+        let planning_result = run_agent_turn(TurnContext {
             cfg,
             process_runner,
             scope,
-            &worktree_path,
-            &factory,
-            &registry,
-            &learning_loop,
-            &identity,
-            WorkerState::Planning,
+            worktree_path: &worktree_path,
+            factory: &factory,
+            registry: &registry,
+            learning_loop: &learning_loop,
+            identity: &identity,
+            state: WorkerState::Planning,
             task_summary,
             attempt_count,
-        )?;
+        })?;
         logs.push(planning_result.log_event);
         if planning_result.terminal == AgentTerminal::Failure {
             let failure_reason = extract_failure_reason(&planning_result.payload);
@@ -231,19 +232,19 @@ fn execute_task_live(
         fsm.transition(WorkerState::Doing)?;
     }
 
-    let doing_result = run_agent_turn(
+    let doing_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
         scope,
-        &worktree_path,
-        &factory,
-        &registry,
-        &learning_loop,
-        &identity,
-        WorkerState::Doing,
+        worktree_path: &worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &learning_loop,
+        identity: &identity,
+        state: WorkerState::Doing,
         task_summary,
         attempt_count,
-    )?;
+    })?;
     logs.push(doing_result.log_event);
     if doing_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&doing_result.payload);
@@ -285,19 +286,19 @@ fn execute_task_live(
     }
 
     fsm.transition(WorkerState::Gitting)?;
-    let gitting_result = run_agent_turn(
+    let gitting_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
         scope,
-        &worktree_path,
-        &factory,
-        &registry,
-        &learning_loop,
-        &identity,
-        WorkerState::Gitting,
+        worktree_path: &worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &learning_loop,
+        identity: &identity,
+        state: WorkerState::Gitting,
         task_summary,
         attempt_count,
-    )?;
+    })?;
     logs.push(gitting_result.log_event);
     if gitting_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&gitting_result.payload);
@@ -333,19 +334,19 @@ fn execute_task_live(
         if cfg.execution.git_output_mode == GitOutputMode::CommitOnly {
             let recovery_registry =
                 PromptRegistry::v1().with_gitting_mode(&cfg.execution.git_output_mode);
-            let gitting_recovery_result = run_agent_turn(
+            let gitting_recovery_result = run_agent_turn(TurnContext {
                 cfg,
                 process_runner,
                 scope,
-                &worktree_path,
-                &factory,
-                &recovery_registry,
-                &learning_loop,
-                &identity,
-                WorkerState::Gitting,
+                worktree_path: &worktree_path,
+                factory: &factory,
+                registry: &recovery_registry,
+                learning_loop: &learning_loop,
+                identity: &identity,
+                state: WorkerState::Gitting,
                 task_summary,
-                attempt_count + 1,
-            )?;
+                attempt_count: attempt_count + 1,
+            })?;
             logs.push(gitting_recovery_result.log_event);
             if gitting_recovery_result.terminal == AgentTerminal::Failure {
                 let failure_reason = extract_failure_reason(&gitting_recovery_result.payload);
@@ -402,19 +403,19 @@ fn execute_task_live(
     }
 
     fsm.transition(WorkerState::Reviewing)?;
-    let reviewing_result = run_agent_turn(
+    let reviewing_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
         scope,
-        &worktree_path,
-        &factory,
-        &registry,
-        &learning_loop,
-        &identity,
-        WorkerState::Reviewing,
+        worktree_path: &worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &learning_loop,
+        identity: &identity,
+        state: WorkerState::Reviewing,
         task_summary,
         attempt_count,
-    )?;
+    })?;
     logs.push(reviewing_result.log_event);
     if reviewing_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&reviewing_result.payload);
@@ -508,19 +509,19 @@ fn execute_task_live(
         });
     }
 
-    let merging_result = run_agent_turn(
+    let merging_result = run_agent_turn(TurnContext {
         cfg,
         process_runner,
         scope,
-        &worktree_path,
-        &factory,
-        &registry,
-        &learning_loop,
-        &identity,
-        WorkerState::Merging,
+        worktree_path: &worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &learning_loop,
+        identity: &identity,
+        state: WorkerState::Merging,
         task_summary,
         attempt_count,
-    )?;
+    })?;
     logs.push(merging_result.log_event);
     if merging_result.terminal == AgentTerminal::Failure {
         let failure_reason = extract_failure_reason(&merging_result.payload);
@@ -766,19 +767,34 @@ struct TurnResult {
     log_event: WorkerLogEvent,
 }
 
-fn run_agent_turn(
-    cfg: &AppConfig,
-    process_runner: &dyn ProcessRunner,
-    scope: &RuntimeScope,
-    worktree_path: &Path,
-    factory: &AdapterFactory,
-    registry: &PromptRegistry,
-    learning_loop: &LearningLoop,
-    identity: &WorkerIdentity,
+struct TurnContext<'a> {
+    cfg: &'a AppConfig,
+    process_runner: &'a dyn ProcessRunner,
+    scope: &'a RuntimeScope,
+    worktree_path: &'a Path,
+    factory: &'a AdapterFactory,
+    registry: &'a PromptRegistry,
+    learning_loop: &'a LearningLoop,
+    identity: &'a WorkerIdentity,
     state: WorkerState,
-    task_summary: &str,
+    task_summary: &'a str,
     attempt_count: i64,
-) -> Result<TurnResult, GardenerError> {
+}
+
+fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError> {
+    let TurnContext {
+        cfg,
+        process_runner,
+        scope,
+        worktree_path,
+        factory,
+        registry,
+        learning_loop,
+        identity,
+        state,
+        task_summary,
+        attempt_count,
+    } = context;
     let prepared = prepare_prompt(
         cfg,
         registry,
@@ -1210,9 +1226,11 @@ fn worktree_branch_for(worker_id: &str, task_id: &str) -> String {
 }
 
 fn worktree_path_for(repo_root: &Path, worker_id: &str, task_id: &str) -> PathBuf {
-    repo_root
-        .join(".worktrees")
-        .join(format!("{worker_id}-{}", worktree_slug_for_task(task_id)))
+    let base = env::var("HOME").map_or_else(
+        |_| repo_root.to_path_buf(),
+        |_home| PathBuf::from("/tmp/gardener-worktrees"),
+    );
+    base.join(format!("{worker_id}-{}", worktree_slug_for_task(task_id)))
 }
 
 /// Returns a git-safe slug derived from the task ID.
@@ -1430,7 +1448,10 @@ mod tests {
             "worker-1",
             "manual:tui:GARD-03",
         );
-        let dir_name = path.file_name().unwrap().to_str().unwrap();
+        let dir_name = path.file_name().expect("worktree path should have file name");
+        let dir_name = dir_name
+            .to_str()
+            .expect("worktree path should be valid UTF-8");
         assert!(
             !dir_name.contains(':'),
             "path component must not contain colon: {dir_name}"
@@ -1442,10 +1463,13 @@ mod tests {
         let first = worktree_slug_for_task("manual:tui:GARD-01");
         let second = worktree_slug_for_task("manual:tui:GARD-11");
         assert_ne!(first, second);
-        let first_suffix = first.rsplitn(2, '-').next().unwrap_or_default();
+        let first_suffix = first.rsplit('-').next().unwrap_or_default();
         assert_eq!(first_suffix, worktree_slug_suffix("manual:tui:GARD-01"));
         assert_eq!(first_suffix.len(), 16);
-        assert_eq!(second.rsplitn(2, '-').next().unwrap_or_default(), worktree_slug_suffix("manual:tui:GARD-11"));
+        assert_eq!(
+            second.rsplit('-').next().unwrap_or_default(),
+            worktree_slug_suffix("manual:tui:GARD-11")
+        );
         assert!(
             first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 16
         );

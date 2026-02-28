@@ -74,7 +74,7 @@ impl<'a> WorktreeClient<'a> {
                         "branch": branch
                     }),
                 );
-                let _ = self.sync_git_hooks(path);
+                self.sync_git_hooks(path);
                 return Ok(());
             }
 
@@ -190,7 +190,7 @@ impl<'a> WorktreeClient<'a> {
                             "branch": branch
                         }),
                     );
-                    let _ = self.sync_git_hooks(path);
+                    self.sync_git_hooks(path);
                     return Ok(());
                 }
                 append_run_log(
@@ -227,7 +227,7 @@ impl<'a> WorktreeClient<'a> {
                 "branch": branch
             }),
         );
-        let _ = self.sync_git_hooks(path);
+        self.sync_git_hooks(path);
         Ok(())
     }
 

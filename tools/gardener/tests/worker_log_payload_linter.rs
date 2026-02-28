@@ -68,7 +68,7 @@ fn extract_append_run_log_calls(source: &str) -> Vec<(usize, String)> {
     while let Some(offset) = source[cursor..].find(WORKER_LOG_CALL) {
         let call_start = cursor + offset;
         let abs_call_start = call_start;
-        let call_end = match extract_call_end(&source.as_bytes(), call_start + call_len - 1) {
+        let call_end = match extract_call_end(source.as_bytes(), call_start + call_len - 1) {
             Some(end) => end,
             None => break,
         };
@@ -179,12 +179,8 @@ fn extract_call_end(bytes: &[u8], open_paren_pos: usize) -> Option<usize> {
 
 fn split_call_args(call: &str) -> Option<Vec<String>> {
     let call = call.trim();
-    let Some(open_paren) = call.find('(') else {
-        return None;
-    };
-    let Some(close_paren) = call.rfind(')') else {
-        return None;
-    };
+    let open_paren = call.find('(')?;
+    let close_paren = call.rfind(')')?;
     if close_paren <= open_paren + 1 {
         return Some(Vec::new());
     }

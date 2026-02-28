@@ -17,6 +17,13 @@ fn fixture(path: &str) -> PathBuf {
     ))
 }
 
+fn default_profile_path() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join(".gardener")
+        .join("repo")
+        .join("repo-intelligence.toml")
+}
+
 fn basic_runtime_for_toml(config_path: &Path, config: &str, tty: bool) -> ProductionRuntime {
     let fs = FakeFileSystem::with_file(config_path, config);
     let process = FakeProcessRunner::default();
@@ -155,7 +162,7 @@ discovery_max_turns = 12
     let profile = run_triage(&runtime, &scope, &cfg, &env, Some(AgentKind::Codex)).expect("triage");
     assert_eq!(profile.meta.schema_version, 1);
 
-    let path = scope.working_dir.join(".gardener/repo-intelligence.toml");
+    let path = default_profile_path();
     let loaded = read_profile(runtime.file_system.as_ref(), &path).expect("profile read");
     assert_eq!(loaded.meta.schema_version, 1);
 

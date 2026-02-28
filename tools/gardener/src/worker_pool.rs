@@ -22,6 +22,23 @@ use std::time::Duration;
 
 const WORKER_POOL_ID: &str = "worker_pool";
 
+type WorkerResultMessage = (
+    usize,
+    String,
+    Result<crate::worker::WorkerRunSummary, GardenerError>,
+);
+
+struct HotkeyState<'a> {
+    runtime: &'a ProductionRuntime,
+    scope: &'a RuntimeScope,
+    cfg: &'a AppConfig,
+    store: &'a BacklogStore,
+    workers: &'a mut [WorkerRow],
+    operator_hotkeys: bool,
+    terminal: &'a dyn Terminal,
+    report_visible: &'a mut bool,
+}
+
 pub fn run_worker_pool_fsm(
     runtime: &ProductionRuntime,
     scope: &RuntimeScope,
@@ -68,16 +85,16 @@ pub fn run_worker_pool_fsm(
     render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
     while completed < target {
-        if handle_hotkeys(
+        if handle_hotkeys(&mut HotkeyState {
             runtime,
             scope,
             cfg,
             store,
-            &mut workers,
+            workers: &mut workers,
             operator_hotkeys,
             terminal,
-            &mut report_visible,
-        )? {
+            report_visible: &mut report_visible,
+        })? {
             return Ok(completed);
         }
         if report_visible {
@@ -124,18 +141,8 @@ pub fn run_worker_pool_fsm(
         let mut active = claimed.len();
         let mut shutdown_error: Option<(String, String, String)> = None;
         let mut quit_requested = false;
-        let (tx, rx): (
-            mpsc::Sender<(
-                usize,
-                String,
-                Result<crate::worker::WorkerRunSummary, GardenerError>,
-            )>,
-            mpsc::Receiver<(
-                usize,
-                String,
-                Result<crate::worker::WorkerRunSummary, GardenerError>,
-            )>,
-        ) = mpsc::channel();
+        let (tx, rx): (mpsc::Sender<WorkerResultMessage>, mpsc::Receiver<WorkerResultMessage>) =
+            mpsc::channel();
         let runtime_scope = scope.clone();
 
         std::thread::scope(|scope_guard| -> Result<(), GardenerError> {
@@ -164,16 +171,16 @@ pub fn run_worker_pool_fsm(
             drop(tx);
 
             while active > 0 {
-                if handle_hotkeys(
+                if handle_hotkeys(&mut HotkeyState {
                     runtime,
-                    &runtime_scope,
+                    scope: &runtime_scope,
                     cfg,
                     store,
-                    &mut workers,
+                    workers: &mut workers,
                     operator_hotkeys,
                     terminal,
-                    &mut report_visible,
-                )? {
+                    report_visible: &mut report_visible,
+                })? {
                     request_interrupt();
                     quit_requested = true;
                 }
@@ -376,16 +383,16 @@ fn wait_for_quit(terminal: &dyn Terminal) -> Result<(), GardenerError> {
     }
 }
 
-fn handle_hotkeys(
-    runtime: &ProductionRuntime,
-    scope: &RuntimeScope,
-    cfg: &AppConfig,
-    store: &BacklogStore,
-    workers: &mut [WorkerRow],
-    operator_hotkeys: bool,
-    terminal: &dyn Terminal,
-    report_visible: &mut bool,
-) -> Result<bool, GardenerError> {
+fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
+    let runtime = state.runtime;
+    let scope = state.scope;
+    let cfg = state.cfg;
+    let store = state.store;
+    let workers = &mut *state.workers;
+    let operator_hotkeys = state.operator_hotkeys;
+    let terminal = state.terminal;
+    let report_visible = &mut *state.report_visible;
+
     if !terminal.stdin_is_tty() {
         return Ok(false);
     }

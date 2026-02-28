@@ -514,6 +514,7 @@ fn draw_boot_stage(
         ready: 0,
         active: 0,
         failed: 0,
+        unresolved: 0,
         p0: 0,
         p1: 0,
         p2: 0,

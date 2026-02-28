@@ -55,6 +55,12 @@ impl PromptRegistry {
         self
     }
 
+    pub fn with_conflict_resolution(mut self) -> Self {
+        self.templates
+            .insert(WorkerState::Merging, conflict_resolution_template());
+        self
+    }
+
     pub fn template_for(&self, state: WorkerState) -> Result<&PromptTemplate, GardenerError> {
         self.templates.get(&state).ok_or_else(|| {
             GardenerError::InvalidConfig(format!("missing prompt template for state {state:?}"))
@@ -320,6 +326,36 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
+fn conflict_resolution_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-conflict-resolution",
+        body: r#"Intent: resolve rebase conflicts from pre-merge and choose the correct outcome.
+
+## Steps
+
+1. Identify all conflicted files:
+   - `git diff --name-only --diff-filter=U`
+2. For each conflicted file:
+   - Review upstream context: `git log main --oneline -5 -- <file>`
+   - Reconcile with `[task_packet]` and decide the task-appropriate resolution.
+3. Choose exactly one outcome:
+   - **resolved**: fix conflicts, `git add -A`, and `git rebase --continue`
+   - **skipped**: `git rebase --skip` if this branch is now redundant
+   - **unresolvable**: `git rebase --abort`
+4. If resolved, run `./scripts/run-validate.sh` and ensure it passes.
+5. Return JSON with:
+   - `resolution`: `"resolved"` | `"skipped"` | `"unresolvable"`
+   - `reason`: short rationale
+   - `merge_sha`: commit SHA when `resolution == resolved`
+
+Guardrails:
+- Keep output strictly to one JSON envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>.
+- Do not modify source files beyond conflict resolution.
+
+Output schema must be JSON envelope with payload fields: resolution, reason, merge_sha."#,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PromptRegistry;
@@ -342,6 +378,16 @@ mod tests {
             .template_for(WorkerState::Doing)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-doing");
+    }
+
+    #[test]
+    fn with_conflict_resolution_swaps_merging_template() {
+        let registry = PromptRegistry::v1().with_conflict_resolution();
+        let tpl = registry
+            .template_for(WorkerState::Merging)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-conflict-resolution");
+        assert!(tpl.body.contains("resolution"));
     }
 
     #[test]

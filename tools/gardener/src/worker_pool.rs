@@ -305,12 +305,31 @@ pub fn run_worker_pool_fsm(
                                         "final_state": summary.final_state.as_str()
                                     }),
                                 );
-                                if let Some(reason) = &summary.failure_reason {
-                                    shutdown_error = Some((worker_id, task_id, reason.clone()));
-                                    request_interrupt();
+                                if summary.final_state == crate::types::WorkerState::Failed
+                                    && summary.failure_reason.is_none()
+                                {
+                                    let unresolved = store.mark_unresolved(&task_id, &worker_id)?;
+                                    append_run_log(
+                                        "warn",
+                                        "worker.task.unresolved",
+                                        json!({
+                                            "worker_id": worker_id,
+                                            "task_id": task_id,
+                                            "marked_unresolved": unresolved,
+                                        }),
+                                    );
+                                    let unresolved_message = if unresolved {
+                                        format!("unresolved {}", task_id)
+                                    } else {
+                                        failed_message.clone()
+                                    };
+                                    workers[idx].state = "unresolved".to_string();
+                                    workers[idx].tool_line = unresolved_message.clone();
+                                    workers[idx].breadcrumb = "unresolved".to_string();
+                                    append_worker_command(&mut workers[idx], &unresolved_message);
+                                } else if let Some(reason) = summary.failure_reason {
+                                    shutdown_error = Some((worker_id.clone(), task_id.clone(), reason));
                                 } else {
-                                    // No fatal reason — release the lease so this task is available
-                                    // for retry and the backlog count stays accurate.
                                     let _ = store.release_lease(&task_id, &worker_id)?;
                                 }
                             }
@@ -624,6 +643,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
         ready: 0,
         active: 0,
         failed: 0,
+        unresolved: 0,
         p0: 0,
         p1: 0,
         p2: 0,
@@ -643,6 +663,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
                 ));
             }
             crate::backlog_store::TaskStatus::Failed => stats.failed += 1,
+            crate::backlog_store::TaskStatus::Unresolved => stats.unresolved += 1,
             crate::backlog_store::TaskStatus::Complete => {}
         }
         if matches!(task.status, crate::backlog_store::TaskStatus::Ready) {
@@ -678,6 +699,7 @@ fn render(
             "ready": snapshot.stats.ready,
             "active": snapshot.stats.active,
             "failed": snapshot.stats.failed,
+            "unresolved": snapshot.stats.unresolved,
             "backlog_in_progress": snapshot.backlog.in_progress.len(),
             "backlog_queued": snapshot.backlog.queued.len(),
             "tty": terminal.stdin_is_tty()

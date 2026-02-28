@@ -7,7 +7,7 @@ use crate::fsm::{
     DoingOutput, FsmSnapshot, GittingOutput, MergingOutput, ReviewVerdict, ReviewingOutput,
     UnderstandOutput, MAX_REVIEW_LOOPS,
 };
-use crate::git::GitClient;
+use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
@@ -509,28 +509,176 @@ fn execute_task_live(
         });
     }
 
-    // Pre-merge rebase: bring the worktree branch up to date with main so the
-    // subsequent merge is clean (or at worst fast-forward).  If the rebase has
-    // conflicts we abort and fail — the retry path already handles rebase via
-    // the doing_template_retry_rebase prompt.
-    if let Err(err) = git.rebase_onto_local("main") {
-        append_run_log(
-            "error",
-            "worker.merging.pre_rebase_failed",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "error": err.to_string()
-            }),
-        );
-        return Ok(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason: Some(format!("pre-merge rebase failed: {err}")),
-        });
+    // Pre-merge rebase: bring the worktree branch up to date with main before
+    // creating the merge commit.
+    match git.try_rebase_onto_local("main") {
+        Ok(RebaseResult::Clean) => {}
+        Ok(RebaseResult::Conflict { stderr }) => {
+            append_run_log(
+                "warn",
+                "worker.merging.pre_rebase_conflict",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "stderr": stderr
+                }),
+            );
+            let conflict_registry = registry.clone().with_conflict_resolution();
+            let conflict_result = run_agent_turn(TurnContext {
+                cfg,
+                process_runner,
+                scope,
+                worktree_path: &worktree_path,
+                factory: &factory,
+                registry: &conflict_registry,
+                learning_loop: &learning_loop,
+                identity: &identity,
+                state: WorkerState::Merging,
+                task_summary,
+                attempt_count,
+            })?;
+            logs.push(conflict_result.log_event);
+            if conflict_result.terminal == AgentTerminal::Failure {
+                let failure_reason = extract_failure_reason(&conflict_result.payload);
+                append_run_log(
+                    "error",
+                    "worker.task.terminal_failure",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "state": "merging_conflict_resolution"
+                    }),
+                );
+                return Ok(WorkerRunSummary {
+                    worker_id: identity.worker_id,
+                    session_id: identity.session.session_id,
+                    final_state: WorkerState::Failed,
+                    logs,
+                    teardown: None,
+                    failure_reason,
+                });
+            }
+
+            let conflict_output = parse_conflict_resolution_output(&conflict_result.payload);
+            append_run_log(
+                "info",
+                "worker.merging.pre_rebase_conflict_resolution",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "resolution": conflict_output.resolution,
+                    "reason": conflict_output.reason
+                }),
+            );
+            match conflict_output.resolution.as_str() {
+                "resolved" => {}
+                "skipped" => {
+                    let skipped_sha = conflict_output.merge_sha.unwrap_or_default();
+                    let worktree_cleaned = worktree_client
+                        .cleanup_on_completion(&worktree_path)
+                        .map(|_| true)
+                        .unwrap_or(false);
+                    let merge_sha = if skipped_sha.is_empty() {
+                        None
+                    } else {
+                        Some(skipped_sha)
+                    };
+                    let teardown = TeardownReport {
+                        merge_verified: false,
+                        session_torn_down: true,
+                        sandbox_torn_down: true,
+                        worktree_cleaned,
+                        state_cleared: true,
+                    };
+                    append_run_log(
+                        "info",
+                        "worker.merging.skipped_on_conflict",
+                        json!({
+                            "worker_id": identity.worker_id,
+                            "task_id": task_id,
+                            "merge_sha": merge_sha
+                        }),
+                    );
+                    return Ok(WorkerRunSummary {
+                        worker_id: identity.worker_id,
+                        session_id: identity.session.session_id,
+                        final_state: WorkerState::Complete,
+                        logs,
+                        teardown: Some(teardown),
+                        failure_reason: None,
+                    });
+                }
+                "unresolvable" => {
+                    if let Err(err) = git.abort_rebase() {
+                        append_run_log(
+                            "error",
+                            "worker.merging.pre_rebase_abort_failed",
+                            json!({
+                                "worker_id": identity.worker_id,
+                                "task_id": task_id,
+                                "error": err.to_string(),
+                            }),
+                        );
+                        return Ok(WorkerRunSummary {
+                            worker_id: identity.worker_id,
+                            session_id: identity.session.session_id,
+                            final_state: WorkerState::Failed,
+                            logs,
+                            teardown: None,
+                            failure_reason: Some(format!("pre-merge rebase abort failed: {err}")),
+                        });
+                    }
+                    append_run_log(
+                        "info",
+                        "worker.merging.pre_rebase_unresolvable",
+                        json!({
+                            "worker_id": identity.worker_id,
+                            "task_id": task_id,
+                            "reason": conflict_output.reason
+                        }),
+                    );
+                    return Ok(WorkerRunSummary {
+                        worker_id: identity.worker_id,
+                        session_id: identity.session.session_id,
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason: None,
+                    });
+                }
+                _ => {
+                    return Ok(WorkerRunSummary {
+                        worker_id: identity.worker_id,
+                        session_id: identity.session.session_id,
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason: Some(format!(
+                            "invalid conflict resolution: {}",
+                            conflict_output.resolution
+                        )),
+                    });
+                }
+            }
+        }
+        Err(err) => {
+            append_run_log(
+                "error",
+                "worker.merging.pre_rebase_failed",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "error": err.to_string()
+                }),
+            );
+            return Ok(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Failed,
+                logs,
+                teardown: None,
+                failure_reason: Some(format!("pre-merge rebase failed: {err}")),
+            });
+        }
     }
 
     let merging_result = run_agent_turn(TurnContext {
@@ -1122,6 +1270,44 @@ fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConflictResolutionOutput {
+    resolution: String,
+    reason: String,
+    merge_sha: Option<String>,
+}
+
+fn parse_conflict_resolution_output(payload: &serde_json::Value) -> ConflictResolutionOutput {
+    let raw_resolution = payload
+        .get("resolution")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let resolution = match raw_resolution.as_str() {
+        "resolved" => "resolved".to_string(),
+        "skipped" => "skipped".to_string(),
+        "unresolvable" => "unresolvable".to_string(),
+        _ => "invalid".to_string(),
+    };
+    let reason = payload
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("missing reason")
+        .trim()
+        .to_string();
+    let merge_sha = payload
+        .get("merge_sha")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .filter(|value| !value.trim().is_empty());
+    ConflictResolutionOutput {
+        resolution,
+        reason,
+        merge_sha,
+    }
+}
+
 fn log_and_persist_review_output(
     scope: &RuntimeScope,
     task_id: &str,
@@ -1496,6 +1682,22 @@ mod tests {
         let output = parse_merge_output(&json!({"merge_sha":"deadbeef"}));
         assert!(!output.merged);
         assert_eq!(output.merge_sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_conflict_resolution_output_is_normalized() {
+        let output = parse_conflict_resolution_output(
+            &json!({"resolution":"Resolved","reason":"main drift","merge_sha":"abc123"}),
+        );
+        assert_eq!(output.resolution, "resolved");
+        assert_eq!(output.reason, "main drift");
+        assert_eq!(output.merge_sha.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_conflict_resolution_output_catches_invalid_resolution() {
+        let output = parse_conflict_resolution_output(&json!({"resolution":"maybe","reason":"x"}));
+        assert_eq!(output.resolution, "invalid");
     }
 
     #[test]

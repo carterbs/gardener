@@ -24,6 +24,7 @@ pub enum TaskStatus {
     InProgress,
     Complete,
     Failed,
+    Unresolved,
 }
 
 impl TaskStatus {
@@ -34,6 +35,7 @@ impl TaskStatus {
             Self::InProgress => "in_progress",
             Self::Complete => "complete",
             Self::Failed => "failed",
+            Self::Unresolved => "unresolved",
         }
     }
 
@@ -44,6 +46,7 @@ impl TaskStatus {
             "in_progress" => Some(Self::InProgress),
             "complete" => Some(Self::Complete),
             "failed" => Some(Self::Failed),
+            "unresolved" => Some(Self::Unresolved),
             _ => None,
         }
     }
@@ -112,6 +115,12 @@ enum WriteCmd {
         reply: oneshot::Sender<StoreResult<usize>>,
     },
     ReleaseLease {
+        task_id: String,
+        lease_owner: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    MarkUnresolved {
         task_id: String,
         lease_owner: String,
         now: i64,
@@ -243,10 +252,19 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                        let result = release_lease(&write_conn, &task_id, &lease_owner, now);
-                        let _ = reply.send(result);
-                    }
-                }
+                let result = release_lease(&write_conn, &task_id, &lease_owner, now);
+                let _ = reply.send(result);
+            }
+            WriteCmd::MarkUnresolved {
+                task_id,
+                lease_owner,
+                now,
+                reply,
+            } => {
+                let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
+                let _ = reply.send(result);
+            }
+        }
             }
         });
 
@@ -508,6 +526,45 @@ impl BacklogStore {
         result
     }
 
+    pub fn mark_unresolved(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::MarkUnresolved {
+                task_id: task_id.to_string(),
+                lease_owner: lease_owner.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.unresolved",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.unresolved.rejected",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.unresolved.failed",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
@@ -661,6 +718,7 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
     let migrations = [
         (1_i64, include_str!("../migrations/0001_backlog.sql")),
         (2_i64, include_str!("../migrations/0002_backlog.sql")),
+        (3_i64, include_str!("../migrations/0003_backlog.sql")),
     ];
 
     conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); COMMIT;")
@@ -912,6 +970,31 @@ fn release_lease(
         .execute(
             "UPDATE backlog_tasks
              SET status = 'ready', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
+             WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress')",
+            params![now, task_id, lease_owner],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn mark_unresolved(
+    conn: &Connection,
+    task_id: &str,
+    lease_owner: &str,
+    now: i64,
+) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.mark_unresolved.started",
+        json!({
+            "task_id": task_id,
+            "lease_owner": lease_owner,
+        }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'unresolved', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
              WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress')",
             params![now, task_id, lease_owner],
         )
@@ -1259,6 +1342,33 @@ mod tests {
     }
 
     #[test]
+    fn mark_unresolved_requires_owner_match() {
+        let (store, _dir) = temp_store();
+        let row = store
+            .upsert_task(task("unresolved-me", Priority::P1))
+            .expect("seed");
+        let _ = store.claim_next("worker-a", 60).expect("claim");
+
+        let denied = store
+            .mark_unresolved(&row.task_id, "worker-b")
+            .expect("mismatch");
+        assert!(!denied);
+
+        let allowed = store
+            .mark_unresolved(&row.task_id, "worker-a")
+            .expect("owner match");
+        assert!(allowed);
+
+        let task = store
+            .get_task(&row.task_id)
+            .expect("fetch")
+            .expect("row");
+        assert_eq!(task.status, TaskStatus::Unresolved);
+        assert_eq!(task.lease_owner, None);
+        assert_eq!(task.lease_expires_at, None);
+    }
+
+    #[test]
     fn task_identity_contract_matches_store_ids() {
         let input = task("Identity Task", Priority::P1);
         let expected = compute_task_id(TaskIdentity {
@@ -1281,7 +1391,9 @@ mod tests {
         assert_eq!(TaskStatus::InProgress.as_str(), "in_progress");
         assert_eq!(TaskStatus::Complete.as_str(), "complete");
         assert_eq!(TaskStatus::Failed.as_str(), "failed");
+        assert_eq!(TaskStatus::Unresolved.as_str(), "unresolved");
         assert_eq!(TaskStatus::from_db("failed"), Some(TaskStatus::Failed));
+        assert_eq!(TaskStatus::from_db("unresolved"), Some(TaskStatus::Unresolved));
         assert_eq!(TaskStatus::from_db("unknown"), None);
 
         let (store, _dir) = temp_store();

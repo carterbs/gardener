@@ -47,6 +47,7 @@ pub struct QueueStats {
     pub ready: usize,
     pub active: usize,
     pub failed: usize,
+    pub unresolved: usize,
     pub p0: usize,
     pub p1: usize,
     pub p2: usize,
@@ -159,7 +160,7 @@ impl WorkerState {
         match state {
             "reviewing" => Self::Reviewing,
             "complete" => Self::Complete,
-            "failed" => Self::Failed,
+            "failed" | "unresolved" => Self::Failed,
             "idle" => Self::Idle,
             _ => Self::Doing,
         }
@@ -885,6 +886,8 @@ fn draw_dashboard_frame(
         Span::raw(format!("{}  ", stats.active)),
         Span::styled("failed ", Style::default().fg(Color::Red)),
         Span::raw(format!("{}   ", stats.failed)),
+        Span::styled("unresolved ", Style::default().fg(Color::Rgb(214, 112, 214))),
+        Span::raw(format!("{}   ", stats.unresolved)),
         Span::styled(
             "P0",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1753,7 +1756,7 @@ fn worker_command_stream(commands: &[CommandEntry]) -> String {
 fn normalize_worker_state<'a>(state: &'a str) -> &'a str {
     match state {
         "init" | "boot" | "planning" | "backlog_sync" | "working" | "seeding" => "understand",
-        "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "idle" => state,
+        "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "unresolved" | "idle" => state,
         _ => "unknown",
     }
 }
@@ -2139,6 +2142,7 @@ mod tests {
                 ready: 1,
                 active: 1,
                 failed: 0,
+                unresolved: 0,
                 p0: 1,
                 p1: 0,
                 p2: 0,
@@ -2174,6 +2178,7 @@ mod tests {
                 ready: 1,
                 active: 1,
                 failed: 0,
+                unresolved: 0,
                 p0: 1,
                 p1: 2,
                 p2: 2,
@@ -2212,6 +2217,7 @@ mod tests {
                 ready: 1,
                 active: 1,
                 failed: 0,
+                unresolved: 0,
                 p0: 0,
                 p1: 1,
                 p2: 0,
@@ -2228,6 +2234,7 @@ mod tests {
                 ready: 1,
                 active: 1,
                 failed: 0,
+                unresolved: 0,
                 p0: 0,
                 p1: 1,
                 p2: 0,
@@ -2253,6 +2260,7 @@ mod tests {
                 ready: 0,
                 active: 1,
                 failed: 0,
+                unresolved: 0,
                 p0: 1,
                 p1: 0,
                 p2: 0,
@@ -2353,6 +2361,7 @@ mod tests {
                 ready: 0,
                 active: 2,
                 failed: 0,
+                unresolved: 0,
                 p0: 0,
                 p1: 2,
                 p2: 0,
@@ -2446,6 +2455,7 @@ mod tests {
             ready: 0,
             active: workers.len(),
             failed: 0,
+            unresolved: 0,
             p0: 0,
             p1: workers.len(),
             p2: 0,

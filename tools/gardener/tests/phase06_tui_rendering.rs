@@ -13,7 +13,6 @@ fn make_worker(id: &str, state: &str, title: &str) -> WorkerRow {
         lease_held: true,
         session_missing: false,
         command_details: Vec::new(),
-        commands_expanded: false,
     }
 }
 
@@ -22,6 +21,7 @@ fn zero_stats() -> QueueStats {
         ready: 0,
         active: 0,
         failed: 0,
+        unresolved: 0,
         p0: 0,
         p1: 0,
         p2: 0,
@@ -57,6 +57,7 @@ fn dashboard_header_shows_queue_stats() {
         ready: 2,
         active: 1,
         failed: 0,
+        unresolved: 0,
         p0: 1,
         p1: 1,
         p2: 0,
@@ -94,6 +95,7 @@ fn dashboard_keeps_three_workers_visible_in_short_viewports_without_backlog() {
         ready: 0,
         active: 3,
         failed: 0,
+        unresolved: 0,
         p0: 0,
         p1: 3,
         p2: 0,
@@ -116,7 +118,6 @@ fn dashboard_problems_panel_on_zombie_worker() {
         lease_held: true,
         session_missing: true,
         command_details: Vec::new(),
-        commands_expanded: false,
     };
     let frame = render_dashboard(&[zombie], &zero_stats(), &empty_backlog(), 120, 30);
     assert!(
@@ -139,7 +140,15 @@ fn dashboard_backlog_priority_badges() {
     };
     let frame = render_dashboard(
         &[make_worker("w-01", "doing", "task")],
-        &QueueStats { ready: 1, active: 1, failed: 0, p0: 1, p1: 1, p2: 0 },
+        &QueueStats {
+            ready: 1,
+            active: 1,
+            failed: 0,
+            unresolved: 0,
+            p0: 1,
+            p1: 1,
+            p2: 0,
+        },
         &backlog,
         120,
         30,

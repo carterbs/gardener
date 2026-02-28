@@ -10,6 +10,12 @@ pub enum MergeMode {
     MergeToMain,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebaseResult {
+    Clean,
+    Conflict { stderr: String },
+}
+
 pub struct GitClient<'a> {
     runner: &'a dyn ProcessRunner,
     cwd: PathBuf,
@@ -301,6 +307,90 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn try_rebase_onto_local(&self, base: &str) -> Result<RebaseResult, GardenerError> {
+        append_run_log(
+            "info",
+            "git.rebase_local.try.started",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base": base
+            }),
+        );
+        let rebase = self.run(["git", "rebase", base])?;
+        if rebase.exit_code == 0 {
+            append_run_log(
+                "info",
+                "git.rebase_local.try.succeeded",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "base": base
+                }),
+            );
+            return Ok(RebaseResult::Clean);
+        }
+
+        let stderr = rebase.stderr.clone();
+        if is_rebase_conflict(&stderr) {
+            append_run_log(
+                "warn",
+                "git.rebase_local.try.conflict",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "base": base,
+                    "stderr": stderr,
+                }),
+            );
+            return Ok(RebaseResult::Conflict { stderr });
+        }
+
+        append_run_log(
+            "warn",
+            "git.rebase_local.try.failed",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base": base,
+                "exit_code": rebase.exit_code,
+                "stderr": stderr
+            }),
+        );
+        Err(GardenerError::Process(format!(
+            "rebase onto {base} failed: {stderr}"
+        )))
+    }
+
+    pub fn abort_rebase(&self) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "git.rebase_local.abort.started",
+            json!({
+                "cwd": self.cwd.display().to_string()
+            }),
+        );
+        let out = self.run(["git", "rebase", "--abort"])?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.rebase_local.abort.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "rebase abort failed: {}",
+                out.stderr
+            )));
+        }
+        append_run_log(
+            "info",
+            "git.rebase_local.abort.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string()
+            }),
+        );
+        Ok(())
+    }
+
     pub fn run_validation_command(&self, command: &str) -> Result<(), GardenerError> {
         append_run_log(
             "info",
@@ -365,9 +455,15 @@ impl<'a> GitClient<'a> {
     }
 }
 
+fn is_rebase_conflict(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("conflict") || lower.contains("unmerged files")
+}
+
 #[cfg(test)]
 mod tests {
     use super::GitClient;
+    use super::RebaseResult;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
 
     #[test]
@@ -444,6 +540,54 @@ mod tests {
         assert!(err.to_string().contains("rebase onto origin/main failed"));
         let spawned = runner.spawned();
         assert!(spawned[2].args.contains(&"--abort".to_string()));
+    }
+
+    #[test]
+    fn try_rebase_onto_local_reports_conflict() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "CONFLICT (content): Merge conflict in src/lib.rs".to_string(),
+        }));
+        let result = GitClient::new(&runner, "/repo")
+            .try_rebase_onto_local("main")
+            .expect("try rebase should return conflict");
+        match result {
+            RebaseResult::Conflict { stderr } => {
+                assert!(stderr.contains("CONFLICT"));
+            }
+            _ => panic!("expected conflict result"),
+        }
+    }
+
+    #[test]
+    fn try_rebase_onto_local_fails_on_unexpected_error() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "could not read ".to_string(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .try_rebase_onto_local("main")
+            .expect_err("try rebase should fail");
+        assert!(err.to_string().contains("rebase onto main failed"));
+    }
+
+    #[test]
+    fn abort_rebase_executes_rebase_abort() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        GitClient::new(&runner, "/repo")
+            .abort_rebase()
+            .expect("abort rebase");
+        let spawned = runner.spawned();
+        assert!(spawned[0].args.contains(&"--abort".to_string()));
     }
 
     #[test]

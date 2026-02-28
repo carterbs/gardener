@@ -14,7 +14,6 @@ fn make_worker(id: &str, state: &str, title: &str) -> WorkerRow {
         lease_held: true,
         session_missing: false,
         command_details: Vec::new(),
-        commands_expanded: false,
     }
 }
 
@@ -23,6 +22,7 @@ fn zero_stats() -> QueueStats {
         ready: 0,
         active: 0,
         failed: 0,
+        unresolved: 0,
         p0: 0,
         p1: 0,
         p2: 0,

@@ -1,5 +1,6 @@
 .cache/
 .DS_STORE
+.claude/worktrees/
 .worktrees/
 target/
 docs/quality-grades.md.stamp

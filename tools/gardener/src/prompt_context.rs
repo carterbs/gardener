@@ -42,7 +42,6 @@ pub struct PromptPacket {
 pub fn build_prompt_packet(
     state: WorkerState,
     mut items: Vec<PromptContextItem>,
-    token_budget: usize,
 ) -> Result<PromptPacket, GardenerError> {
     items.sort_by(|a, b| {
         b.rank
@@ -52,17 +51,7 @@ pub fn build_prompt_packet(
             .then(a.source_id.cmp(&b.source_id))
     });
 
-    let mut selected = Vec::new();
-    let mut consumed = 0usize;
-
-    for item in items {
-        let tokens = rough_token_count(&item.content);
-        if consumed.saturating_add(tokens) > token_budget {
-            continue;
-        }
-        consumed = consumed.saturating_add(tokens);
-        selected.push(item);
-    }
+    let selected = items;
 
     let by_section = |name: &str| -> String {
         selected
@@ -139,10 +128,6 @@ fn build_manifest(state: WorkerState, selected: &[PromptContextItem]) -> Context
     }
 }
 
-fn rough_token_count(text: &str) -> usize {
-    text.split_whitespace().count().max(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{build_prompt_packet, PromptContextItem};
@@ -190,8 +175,8 @@ mod tests {
             ),
         ];
 
-        let p1 = build_prompt_packet(WorkerState::Doing, items.clone(), 1000).expect("packet");
-        let p2 = build_prompt_packet(WorkerState::Doing, items, 1000).expect("packet");
+        let p1 = build_prompt_packet(WorkerState::Doing, items.clone()).expect("packet");
+        let p2 = build_prompt_packet(WorkerState::Doing, items).expect("packet");
         assert_eq!(
             p1.context_manifest.manifest_hash,
             p2.context_manifest.manifest_hash
@@ -203,17 +188,4 @@ mod tests {
         assert!(!p1.knowledge_context.is_empty());
     }
 
-    #[test]
-    fn token_budget_trimming_can_fail_missing_sections() {
-        let items = vec![
-            ctx("task_packet", "a", "h1", "task", 1, "task"),
-            ctx("repo_context", "b", "h2", "repo", 1, "repo"),
-            ctx("evidence_context", "c", "h3", "evidence", 1, "evidence"),
-            ctx("execution_context", "d", "h4", "exec", 1, "execution"),
-            ctx("knowledge_context", "e", "h5", "knowledge", 1, "knowledge"),
-        ];
-
-        let err = build_prompt_packet(WorkerState::Doing, items, 2).expect_err("must fail");
-        assert!(format!("{err}").contains("missing required packet section"));
-    }
 }

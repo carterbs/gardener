@@ -5,12 +5,13 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 50 * 1024 * 1024;
-pub const DEFAULT_RUN_LOG_RELATIVE_PATH: &str = ".cache/gardener/otel-logs.jsonl";
+pub const DEFAULT_RUN_LOG_RELATIVE_PATH: &str = ".gardener/otel-logs.jsonl";
 const PROMPT_LINE_LIMIT: usize = 220;
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,7 @@ struct RunLogContext {
 
 static RUN_LOGGER: OnceLock<Mutex<Option<JsonlLogger>>> = OnceLock::new();
 static RUN_CONTEXT: OnceLock<Mutex<Option<RunLogContext>>> = OnceLock::new();
+static RUN_LOG_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static RUN_LOG_NONCE: AtomicU64 = AtomicU64::new(1);
 
 fn run_logger_slot() -> &'static Mutex<Option<JsonlLogger>> {
@@ -38,6 +40,10 @@ fn run_logger_slot() -> &'static Mutex<Option<JsonlLogger>> {
 
 fn run_context_slot() -> &'static Mutex<Option<RunLogContext>> {
     RUN_CONTEXT.get_or_init(|| Mutex::new(None))
+}
+
+fn run_log_write_lock() -> &'static Mutex<()> {
+    RUN_LOG_WRITE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 impl JsonlLogger {
@@ -55,15 +61,16 @@ impl JsonlLogger {
             fs::create_dir_all(parent).map_err(|e| GardenerError::Io(e.to_string()))?;
         }
         let line = serde_json::to_string(payload).map_err(|e| GardenerError::Io(e.to_string()))?;
+        let mut line = line;
+        line.push('\n');
 
+        let _guard = run_log_write_lock().lock().expect("run log write lock");
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .map_err(|e| GardenerError::Io(e.to_string()))?;
         file.write_all(line.as_bytes())
-            .map_err(|e| GardenerError::Io(e.to_string()))?;
-        file.write_all(b"\n")
             .map_err(|e| GardenerError::Io(e.to_string()))?;
 
         if let Some(parent) = self.path.parent() {
@@ -75,6 +82,14 @@ impl JsonlLogger {
 }
 
 pub fn default_run_log_path(working_dir: &Path) -> PathBuf {
+    if let Ok(path) = env::var("GARDENER_LOG_PATH") {
+        return PathBuf::from(path);
+    }
+
+    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
+        return PathBuf::from(home).join(DEFAULT_RUN_LOG_RELATIVE_PATH);
+    }
+
     working_dir.join(DEFAULT_RUN_LOG_RELATIVE_PATH)
 }
 
@@ -358,7 +373,7 @@ mod tests {
     #[test]
     fn default_path_points_at_cache_file() {
         let path = default_run_log_path(Path::new("/repo"));
-        assert!(path.ends_with(".cache/gardener/otel-logs.jsonl"));
+        assert!(path.ends_with(".gardener/otel-logs.jsonl"));
     }
 
     #[test]

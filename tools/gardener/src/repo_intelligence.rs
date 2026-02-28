@@ -224,7 +224,7 @@ pub fn build_profile(
         .unwrap_or(0);
     let now = format!("{now_secs}");
 
-    let mut effective_discovery = discovery.clone();
+    let mut effective_discovery = discovery;
     if !discovery_used {
         append_run_log(
             "debug",

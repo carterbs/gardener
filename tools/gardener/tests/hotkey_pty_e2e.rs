@@ -12,6 +12,7 @@ fn upsert_task(store: &BacklogStore, title: &str) {
             kind: TaskKind::Maintenance,
             title: title.to_string(),
             details: "details".to_string(),
+            rationale: String::new(),
             scope_key: "scope".to_string(),
             priority: Priority::P1,
             source: "pty-test".to_string(),
@@ -82,8 +83,8 @@ stale_if_head_commit_differs = true
     )
     .expect("write config");
 
-    let store =
-        BacklogStore::open(dir.path().join(".cache/gardener/backlog.sqlite")).expect("open store");
+    let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+    let store = BacklogStore::open(&db_path).expect("open store");
     for idx in 0..500 {
         upsert_task(&store, &format!("PTY task {idx}"));
     }
@@ -95,7 +96,8 @@ stale_if_head_commit_differs = true
         .arg(dir.path())
         .arg("--quit-after")
         .arg("500")
-        .env("GARDENER_FORCE_TTY", "1");
+        .env("GARDENER_FORCE_TTY", "1")
+        .env("GARDENER_DB_PATH", &db_path);
     (report_path, dir, store, cmd)
 }
 
@@ -227,8 +229,8 @@ max_turns = 12
     )
     .expect("write config");
 
-    let store =
-        BacklogStore::open(dir.path().join(".cache/gardener/backlog.sqlite")).expect("open store");
+    let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+    let store = BacklogStore::open(&db_path).expect("open store");
     upsert_task(&store, "long running task");
 
     let mut cmd = Command::new(&bin);
@@ -239,6 +241,7 @@ max_turns = 12
         .arg("--quit-after")
         .arg("1")
         .env("GARDENER_FORCE_TTY", "1")
+        .env("GARDENER_DB_PATH", &db_path)
         .env(
             "PATH",
             format!(

@@ -1,3 +1,5 @@
+#![warn(clippy::unwrap_used, clippy::redundant_clone)]
+
 pub mod agent;
 pub mod backlog_snapshot;
 pub mod backlog_store;
@@ -55,7 +57,7 @@ use logging::{
 };
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
-use startup::{run_startup_audits, run_startup_audits_with_progress};
+use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
@@ -286,29 +288,24 @@ pub fn run_with_runtime(
 
         if cli.backlog_only {
             runtime.terminal.write_line("phase3 backlog-only")?;
-            let mut cfg_for_startup = cfg.clone();
+            let mut cfg_for_startup = cfg;
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
             return Ok(0);
         }
 
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
-            let mut cfg_for_startup = cfg.clone();
+            let mut cfg_for_startup = cfg;
             let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
             return Ok(0);
         }
 
         if cli.sync_only {
-            let mut cfg_for_startup = cfg.clone();
+            let mut cfg_for_startup = cfg;
             if !cfg_for_startup.execution.test_mode {
                 let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
             }
-            let db_path = startup
-                .scope
-                .repo_root
-                .as_ref()
-                .unwrap_or(&startup.scope.working_dir)
-                .join(".cache/gardener/backlog.sqlite");
+            let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let snapshot_path = startup
                 .scope
                 .working_dir
@@ -339,7 +336,7 @@ pub fn run_with_runtime(
         };
 
         if let Some(target) = cli.target.or(default_quit_after) {
-            let mut cfg_for_startup = cfg.clone();
+            let mut cfg_for_startup = cfg;
             draw_boot_stage(
                 runtime,
                 "INIT",
@@ -417,12 +414,7 @@ pub fn run_with_runtime(
                     |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
                 )?;
             }
-            let db_path = startup
-                .scope
-                .repo_root
-                .as_ref()
-                .unwrap_or(&startup.scope.working_dir)
-                .join(".cache/gardener/backlog.sqlite");
+            let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
             let startup_backlog = store.list_tasks()?;
             let startup_backlog_tasks = startup_backlog

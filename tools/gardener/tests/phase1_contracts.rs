@@ -376,13 +376,13 @@ fn config_exhaustive_overrides_and_validation_paths() {
 lease_timeout_seconds = 111
 heartbeat_interval_seconds = 22
 
-[prompts.token_budget]
-understand = 1
-planning = 2
-doing = 3
-gitting = 4
-reviewing = 5
-merging = 6
+[prompts.turn_budget]
+understand = 10
+planning = 20
+doing = 30
+gitting = 40
+reviewing = 50
+merging = 60
 
 [learning]
 confidence_decay_per_day = 0.5
@@ -412,12 +412,12 @@ test_mode = true
     let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).unwrap();
     assert_eq!(cfg.scheduler.lease_timeout_seconds, 111);
     assert_eq!(cfg.scheduler.heartbeat_interval_seconds, 22);
-    assert_eq!(cfg.prompts.token_budget.understand, 1);
-    assert_eq!(cfg.prompts.token_budget.planning, 2);
-    assert_eq!(cfg.prompts.token_budget.doing, 3);
-    assert_eq!(cfg.prompts.token_budget.gitting, 4);
-    assert_eq!(cfg.prompts.token_budget.reviewing, 5);
-    assert_eq!(cfg.prompts.token_budget.merging, 6);
+    assert_eq!(cfg.prompts.turn_budget.understand, 10);
+    assert_eq!(cfg.prompts.turn_budget.planning, 20);
+    assert_eq!(cfg.prompts.turn_budget.doing, 30);
+    assert_eq!(cfg.prompts.turn_budget.gitting, 40);
+    assert_eq!(cfg.prompts.turn_budget.reviewing, 50);
+    assert_eq!(cfg.prompts.turn_budget.merging, 60);
     assert_eq!(cfg.learning.confidence_decay_per_day, 0.5);
     assert_eq!(cfg.learning.deactivate_below_confidence, 0.7);
     assert_eq!(cfg.seeding.backend, AgentKind::Claude);

@@ -1,7 +1,4 @@
-.cache/*
-!.cache/gardener/
-.cache/gardener/*
-!.cache/gardener/backlog.sqlite
+.cache/
 .DS_STORE
 .worktrees/
 target/

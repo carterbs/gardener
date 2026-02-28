@@ -67,6 +67,7 @@ mod tests {
                 kind: TaskKind::Feature,
                 title: "First task".to_string(),
                 details: String::new(),
+                rationale: String::new(),
                 scope_key: "global".to_string(),
                 priority: Priority::P1,
                 source: "test".to_string(),

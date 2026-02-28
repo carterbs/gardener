@@ -140,7 +140,7 @@ discovery_max_turns = 12
 "#;
     let runtime = basic_runtime_for_toml(&config_path, config, true);
     let overrides = CliOverrides {
-        config_path: Some(config_path.clone()),
+        config_path: Some(config_path),
         ..CliOverrides::default()
     };
     let (cfg, scope) = gardener::config::load_config(

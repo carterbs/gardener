@@ -803,6 +803,7 @@ fn run_agent_turn(
     if let Some(parent) = output_file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| GardenerError::Io(e.to_string()))?;
     }
+    let estimated_prompt_tokens = prepared.rendered.split_whitespace().count();
     append_run_log(
         "info",
         "agent.turn.started",
@@ -813,20 +814,18 @@ fn run_agent_turn(
             "backend": backend.as_str(),
             "model": model,
             "worktree": worktree_path.display().to_string(),
-            "output_file": output_file.display().to_string()
+            "output_file": output_file.display().to_string(),
+            "initial_prompt_est_tokens": estimated_prompt_tokens
         }),
     );
-    let max_turns = match state {
-        WorkerState::Gitting => Some(50),
-        _ => Some(cfg.seeding.max_turns),
-    };
+    let max_turns = Some(max_turns_for_state(cfg, state));
     let step = adapter.execute(
         process_runner,
         &crate::agent::AdapterContext {
             worker_id: identity.worker_id.clone(),
             session_id: identity.session.session_id.clone(),
             sandbox_id: identity.session.sandbox_id.clone(),
-            model: model.clone(),
+            model,
             cwd: worktree_path.to_path_buf(),
             prompt_version: prepared.prompt_version.clone(),
             context_manifest_hash: prepared.context_manifest_hash.clone(),
@@ -881,7 +880,6 @@ fn prepare_prompt(
             "knowledge_entries": learning_loop.entries().len()
         }),
     );
-    let token_budget = token_budget_for_state(cfg, state) as usize;
     let knowledge = to_prompt_lines(
         learning_loop.entries(),
         cfg.learning.deactivate_below_confidence,
@@ -948,7 +946,6 @@ fn prepare_prompt(
                 },
             ),
         ],
-        token_budget,
     )?;
 
     let _parsed = parse_typed_payload::<serde_json::Value>(
@@ -970,8 +967,7 @@ fn prepare_prompt(
             "worker_id": worker_id,
             "state": state.as_str(),
             "prompt_version": prompt_version,
-            "context_manifest_hash": context_manifest_hash,
-            "token_budget": token_budget
+            "context_manifest_hash": context_manifest_hash
         }),
     );
     Ok(PreparedPrompt {
@@ -1274,18 +1270,18 @@ fn ctx_item(
     }
 }
 
-fn token_budget_for_state(cfg: &AppConfig, state: WorkerState) -> u32 {
+fn max_turns_for_state(cfg: &AppConfig, state: WorkerState) -> u32 {
     match state {
-        WorkerState::Understand => cfg.prompts.token_budget.understand,
-        WorkerState::Planning => cfg.prompts.token_budget.planning,
-        WorkerState::Doing => cfg.prompts.token_budget.doing,
-        WorkerState::Gitting => cfg.prompts.token_budget.gitting,
-        WorkerState::Reviewing => cfg.prompts.token_budget.reviewing,
-        WorkerState::Merging => cfg.prompts.token_budget.merging,
+        WorkerState::Understand => cfg.prompts.turn_budget.understand,
+        WorkerState::Planning => cfg.prompts.turn_budget.planning,
+        WorkerState::Doing => cfg.prompts.turn_budget.doing,
+        WorkerState::Gitting => cfg.prompts.turn_budget.gitting,
+        WorkerState::Reviewing => cfg.prompts.turn_budget.reviewing,
+        WorkerState::Merging => cfg.prompts.turn_budget.merging,
         WorkerState::Seeding
         | WorkerState::Complete
         | WorkerState::Failed
-        | WorkerState::Parked => cfg.prompts.token_budget.doing,
+        | WorkerState::Parked => cfg.prompts.turn_budget.doing,
     }
 }
 

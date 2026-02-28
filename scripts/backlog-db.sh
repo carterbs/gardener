@@ -16,7 +16,7 @@ Usage:
     --kind feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision (default: feature)
     --source manual    (default: manual)
     --id TASK_ID       Optional custom task_id (default: manual:<scope>:auto-<unix_ms>)
-    --db PATH          Optional DB path (default: .cache/gardener/backlog.sqlite)
+    --db PATH          Optional DB path (default: ~/.gardener/backlog.sqlite)
 
   scripts/backlog-db.sh help
     Show this help text.
@@ -26,7 +26,10 @@ Environment:
 USAGE
 }
 
-env_db_path="${GARDENER_DB_PATH:-.cache/gardener/backlog.sqlite}"
+env_db_path="${GARDENER_DB_PATH:-${HOME:+$HOME/.gardener/backlog.sqlite}}"
+if [ -z "$env_db_path" ]; then
+  env_db_path=".cache/gardener/backlog.sqlite"
+fi
 
 if [[ $# -eq 0 ]]; then
   usage

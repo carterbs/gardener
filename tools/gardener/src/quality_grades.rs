@@ -22,7 +22,7 @@ pub fn render_quality_grade_document(
         }),
     );
 
-    let domains = discover_domains();
+    let domains = discover_domains(repo_root);
     append_run_log(
         "debug",
         "quality.grades.domains.discovered",

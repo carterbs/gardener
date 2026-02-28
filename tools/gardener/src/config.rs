@@ -83,11 +83,11 @@ pub struct SchedulerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptsConfig {
-    pub token_budget: TokenBudgetConfig,
+    pub turn_budget: TurnBudgetConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TokenBudgetConfig {
+pub struct TurnBudgetConfig {
     pub understand: u32,
     pub planning: u32,
     pub doing: u32,
@@ -171,13 +171,13 @@ impl Default for AppConfig {
                 heartbeat_interval_seconds: 15,
             },
             prompts: PromptsConfig {
-                token_budget: TokenBudgetConfig {
-                    understand: 6000,
-                    planning: 9000,
-                    doing: 12000,
-                    gitting: 4000,
-                    reviewing: 10000,
-                    merging: 5000,
+                turn_budget: TurnBudgetConfig {
+                    understand: 100,
+                    planning: 100,
+                    doing: 100,
+                    gitting: 100,
+                    reviewing: 100,
+                    merging: 100,
                 },
             },
             learning: LearningConfig {
@@ -255,11 +255,11 @@ struct PartialSchedulerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct PartialPromptsConfig {
-    token_budget: Option<PartialTokenBudgetConfig>,
+    turn_budget: Option<PartialTurnBudgetConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct PartialTokenBudgetConfig {
+struct PartialTurnBudgetConfig {
     understand: Option<u32>,
     planning: Option<u32>,
     doing: Option<u32>,
@@ -457,24 +457,24 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
     }
 
     if let Some(prompts) = partial.prompts {
-        if let Some(token_budget) = prompts.token_budget {
-            if let Some(value) = token_budget.understand {
-                cfg.prompts.token_budget.understand = value;
+        if let Some(turn_budget) = prompts.turn_budget {
+            if let Some(value) = turn_budget.understand {
+                cfg.prompts.turn_budget.understand = value;
             }
-            if let Some(value) = token_budget.planning {
-                cfg.prompts.token_budget.planning = value;
+            if let Some(value) = turn_budget.planning {
+                cfg.prompts.turn_budget.planning = value;
             }
-            if let Some(value) = token_budget.doing {
-                cfg.prompts.token_budget.doing = value;
+            if let Some(value) = turn_budget.doing {
+                cfg.prompts.turn_budget.doing = value;
             }
-            if let Some(value) = token_budget.gitting {
-                cfg.prompts.token_budget.gitting = value;
+            if let Some(value) = turn_budget.gitting {
+                cfg.prompts.turn_budget.gitting = value;
             }
-            if let Some(value) = token_budget.reviewing {
-                cfg.prompts.token_budget.reviewing = value;
+            if let Some(value) = turn_budget.reviewing {
+                cfg.prompts.turn_budget.reviewing = value;
             }
-            if let Some(value) = token_budget.merging {
-                cfg.prompts.token_budget.merging = value;
+            if let Some(value) = turn_budget.merging {
+                cfg.prompts.turn_budget.merging = value;
             }
         }
     }

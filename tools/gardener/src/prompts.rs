@@ -14,10 +14,9 @@ pub fn render_state_prompt(
     registry: &PromptRegistry,
     state: WorkerState,
     items: Vec<PromptContextItem>,
-    token_budget: usize,
 ) -> Result<PromptRenderResult, GardenerError> {
     let template = registry.template_for(state)?;
-    let packet = build_prompt_packet(state, items, token_budget)?;
+    let packet = build_prompt_packet(state, items)?;
     let rendered = format!(
         "{}\n\n[task_packet]\n{}\n\n[repo_context]\n{}\n\n[evidence_context]\n{}\n\n[execution_context]\n{}\n\n[knowledge_context]\n{}\n\n[context_manifest_hash]\n{}\n",
         template.body,
@@ -91,7 +90,6 @@ mod tests {
                     content: "knowledge".to_string(),
                 },
             ],
-            100,
         )
         .expect("rendered");
 

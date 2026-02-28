@@ -1,0 +1,2 @@
+ALTER TABLE backlog_tasks
+ADD COLUMN rationale TEXT NOT NULL DEFAULT '';

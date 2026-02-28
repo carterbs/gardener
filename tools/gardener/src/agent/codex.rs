@@ -158,7 +158,7 @@ impl AgentAdapter for CodexAdapter {
                             "kind": kind,
                             "raw_type": raw_type,
                             "command": command,
-                            "payload": event.payload.clone()
+                            "payload": event.payload
                         }),
                     );
                     if let Some(sink) = on_event.as_deref_mut() {

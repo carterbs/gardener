@@ -65,8 +65,25 @@ impl PromptRegistry {
 fn understand_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-understand",
-        body: r#"Intent: categorize task as task|chore|infra|feature|bugfix|refactor.
-Guardrails: deterministic classification with concise reasoning.
+        body: r#"Intent: categorize the incoming task into exactly one of: task|chore|infra|feature|bugfix|refactor.
+
+## Classification guide
+
+- **feature**: new user-facing functionality that did not exist before.
+- **bugfix**: corrects incorrect behavior — something that worked before and broke, or never worked as specified.
+- **refactor**: restructures existing code without changing external behavior. Includes renames, extraction, and architecture changes.
+- **chore**: routine maintenance — dependency updates, config tweaks, CI changes, doc fixes.
+- **infra**: tooling, test infrastructure, linters, build system, dev-loop scaffolding, or observability that supports development but is not user-facing.
+- **task**: catch-all for work that does not fit the above categories.
+
+## Steps
+
+1. Read the task description from [task_packet] carefully.
+2. Consider the repo context from [repo_context] to understand what area of the codebase this touches.
+3. Classify based on the primary intent of the work, not secondary side effects.
+4. Write concise reasoning (1-3 sentences) explaining your classification.
+
+Guardrails: deterministic classification with concise reasoning. Do not modify any files.
 Output schema must be JSON envelope with payload fields: task_type, reasoning.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
@@ -75,7 +92,26 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 fn planning_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-planning",
-        body: r#"Intent: produce a compact execution plan before implementation.
+        body: r#"Intent: produce a detailed execution plan before implementation.
+
+Your job is ONLY to plan — do NOT edit source files, create files, or implement anything.
+
+## Steps
+
+1. Read the task description from [task_packet] thoroughly.
+2. Read relevant source files and project conventions to understand the area this task touches.
+3. Identify every file that will need to be created or modified, with specifics about what changes go where.
+4. Design a test strategy: what tests to write and what they verify.
+5. Note any project conventions that apply (naming, file structure, architecture constraints).
+
+## Plan quality
+
+The plan must be detailed enough that the implementation step can execute it without needing to re-research the codebase. Include:
+- **summary**: a one-line conventional-commit style title (e.g. "feat: add backlog pruning command", "fix: correct state transition on timeout"). Use one of: feat, fix, chore, refactor, test, docs, ci, perf.
+- **milestones**: an ordered list of concrete implementation steps. Each milestone should name the files involved, describe what to build, and call out any non-obvious decisions. Keep milestones small and verifiable — a reviewer should be able to check each one independently.
+
+Do not hand-wave. "Update the handler" is not a milestone. "Add a `prune` match arm to `BacklogCommand::execute` in `src/backlog/commands.rs` that removes entries older than the configured retention window" is.
+
 Guardrails: do not edit files in this state; plan only.
 Output schema must be JSON envelope with payload fields: summary, milestones.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
@@ -86,6 +122,31 @@ fn doing_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-doing",
         body: r#"Intent: implement changes and verify behavior within current task scope.
+
+## Steps
+
+1. Read the task description from [task_packet] and the plan context from [knowledge_context].
+2. Read relevant project conventions and existing source files before writing any code.
+3. Implement changes following the plan. Keep the patch minimal — only touch files that are necessary to complete the task.
+4. Write tests for new functionality. Tests should be meaningful, not just existence checks.
+5. Run the project's test and lint commands to verify your changes pass.
+6. If tests or lints fail, fix the issues before returning.
+
+## Implementation quality
+
+- Follow existing patterns in the codebase. Read neighboring code to match style, naming, and structure.
+- Do not refactor surrounding code unless the task explicitly calls for it.
+- Do not add speculative features, extra configuration, or "nice to have" improvements beyond scope.
+- Keep changes focused. Three similar lines of code are better than a premature abstraction.
+
+## Verification (mandatory)
+
+After implementation, you MUST verify your work actually works:
+- Run tests and confirm they pass.
+- If you built a new command or handler, exercise it and verify the output.
+- If you modified existing behavior, confirm the change is observable.
+- Do not just trust that your code is correct — run it and check.
+
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
@@ -98,15 +159,32 @@ fn doing_template_retry_rebase() -> PromptTemplate {
         version: "v1-doing-retry-rebase",
         body: r#"Intent: rebase onto latest main, resolve any conflicts, then implement changes and verify behavior within current task scope.
 
-Step 1 — Rebase onto main:
-  Run: git fetch origin main && git rebase origin/main
-  If conflicts occur: resolve them using your knowledge of the task context and existing commits, then git add the resolved files and git rebase --continue. Repeat until the rebase completes.
-  If the rebase succeeds cleanly, proceed to step 2.
+## Step 1 — Rebase onto main
 
-Step 2 — Implement:
-  Implement changes and verify behavior within current task scope.
-  Guardrails: max 100 turns, keep patch minimal, include changed files list.
+Run: git fetch origin main && git rebase origin/main
+If conflicts occur: resolve them using your knowledge of the task context and existing commits, then git add the resolved files and git rebase --continue. Repeat until the rebase completes.
+Keep behavior from both sides where appropriate — do not silently drop changes from either branch.
+If the rebase succeeds cleanly, proceed to step 2.
 
+## Step 2 — Implement
+
+1. Read the task description from [task_packet] and the plan context from [knowledge_context].
+2. Read relevant project conventions and existing source files before writing any code.
+3. Implement changes following the plan. Keep the patch minimal — only touch files that are necessary.
+4. Write tests for new functionality. Tests should be meaningful, not just existence checks.
+5. Run the project's test and lint commands to verify your changes pass.
+6. If tests or lints fail, fix the issues before returning.
+
+Follow existing patterns in the codebase. Do not refactor surrounding code unless the task calls for it. Do not add speculative features beyond scope.
+
+## Verification (mandatory)
+
+After implementation, verify your work actually works:
+- Run tests and confirm they pass.
+- If you built a new command or handler, exercise it and verify the output.
+- Do not just trust that your code is correct — run it and check.
+
+Guardrails: max 100 turns, keep patch minimal, include changed files list.
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,

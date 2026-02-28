@@ -1,6 +1,6 @@
 use crate::errors::GardenerError;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Deserializer, Value};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -90,19 +90,29 @@ pub fn map_claude_event(raw: &Value) -> AgentEvent {
 }
 
 pub fn parse_jsonl(input: &str) -> Result<Vec<Value>, GardenerError> {
-    input
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .map_err(|e| GardenerError::Process(format!("invalid jsonl line: {e}")))
-        })
-        .collect()
+    let mut out = Vec::new();
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        out.extend(parse_json_records(line)?);
+    }
+    Ok(out)
+}
+
+pub fn parse_json_records(input: &str) -> Result<Vec<Value>, GardenerError> {
+    let out = Deserializer::from_str(input)
+        .into_iter::<Value>()
+        .collect::<serde_json::Result<Vec<_>>>()
+        .map_err(|err| {
+            GardenerError::Process(format!(
+                "invalid json stream: {err}; input={}",
+                input.chars().take(256).collect::<String>(),
+            ))
+        })?;
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{map_codex_event, parse_jsonl, AgentEventKind};
+    use super::{map_codex_event, parse_jsonl, parse_json_records, AgentEventKind};
     use serde_json::json;
 
     #[test]
@@ -116,6 +126,20 @@ mod tests {
     #[test]
     fn jsonl_parser_rejects_malformed_lines() {
         let err = parse_jsonl("{\"type\":\"thread.started\"}\n{").expect_err("invalid");
-        assert!(format!("{err}").contains("invalid jsonl line"));
+        assert!(format!("{err}").contains("invalid json stream"));
+    }
+
+    #[test]
+    fn parse_json_records_accepts_concatenated_events() {
+        let events = parse_json_records("{\"type\":\"thread.started\"}\n{\"type\":\"turn.completed\"}\n{\"type\":\"tool\"}")
+            .expect("should parse all");
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1]["type"], json!("turn.completed"));
+    }
+
+    #[test]
+    fn parse_json_records_rejects_malformed_stream() {
+        let err = parse_json_records("{\"type\":\"thread.started\"}\n{bad").expect_err("invalid");
+        assert!(format!("{err}").contains("invalid json stream"));
     }
 }

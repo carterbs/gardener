@@ -1,7 +1,7 @@
 use crate::agent::{validate_model, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::protocol::{map_codex_event, AgentEvent, AgentTerminal, StepResult};
+use crate::protocol::{map_codex_event, parse_json_records, AgentEvent, AgentTerminal, StepResult};
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use crate::types::AgentKind;
 use serde_json::{json, Value};
@@ -135,36 +135,41 @@ impl AgentAdapter for CodexAdapter {
         })?;
 
         let mut raw_events = Vec::new();
+        let mut event_sequence = 0_u64;
         let mut stdout_diagnostics = Vec::new();
         let mut stderr_diagnostics = Vec::new();
         let mut on_stdout_line = |line: &str| {
             if line.trim().is_empty() {
                 return;
             }
-            match serde_json::from_str::<Value>(line) {
-                Ok(raw) => {
-                    let event = map_codex_event(&raw);
-                    let kind = format!("{:?}", event.kind);
-                    let raw_type = event.raw_type.clone();
-                    let command = extract_action_command(&event.payload);
-                    append_run_log(
-                        "debug",
-                        "adapter.codex.event",
-                        json!({
-                            "worker_id": context.worker_id,
-                            "session_id": context.session_id,
-                            "backend": "codex",
-                            "model": context.model,
-                            "kind": kind,
-                            "raw_type": raw_type,
-                            "command": command,
-                            "payload": event.payload
-                        }),
-                    );
-                    if let Some(sink) = on_event.as_deref_mut() {
-                        sink(&event);
+            match parse_json_records(line) {
+                Ok(records) => {
+                    for raw in records {
+                        event_sequence += 1;
+                        let event = map_codex_event(&raw);
+                        let kind = format!("{:?}", event.kind);
+                        let raw_type = event.raw_type.clone();
+                        let command = extract_action_command(&event.payload);
+                        append_run_log(
+                            "debug",
+                            "adapter.codex.event",
+                            json!({
+                                "worker_id": context.worker_id,
+                                "session_id": context.session_id,
+                                "backend": "codex",
+                                "model": context.model,
+                                "kind": kind,
+                                "raw_type": raw_type,
+                                "command": command,
+                                "sequence": event_sequence,
+                                "payload": event.payload
+                            }),
+                        );
+                        if let Some(sink) = on_event.as_deref_mut() {
+                            sink(&event);
+                        }
+                        raw_events.push(raw);
                     }
-                    raw_events.push(raw);
                 }
                 Err(err) => {
                     append_run_log(
@@ -233,6 +238,7 @@ impl AgentAdapter for CodexAdapter {
                     "failure_type": failure_type,
                     "failure_reason": failure_reason,
                     "event_count": raw_events.len(),
+                    "event_sequence": event_sequence,
                     "stderr_line_count": diagnostics.len()
                 }),
             );
@@ -258,6 +264,7 @@ impl AgentAdapter for CodexAdapter {
                     "backend": "codex",
                     "model": context.model,
                     "event_count": raw_events.len(),
+                    "event_sequence": event_sequence,
                     "stderr_line_count": diagnostics.len(),
                     "exit_code": output.exit_code
                 }),
@@ -271,26 +278,6 @@ impl AgentAdapter for CodexAdapter {
             });
         }
 
-        if output.exit_code != 0 {
-            let mut reason = output.stderr.trim().to_string();
-            if reason.is_empty() {
-                reason = format!("codex exited with status {}", output.exit_code);
-            }
-            append_run_log(
-                "error",
-                "adapter.codex.turn_process_error",
-                json!({
-                    "worker_id": context.worker_id,
-                    "session_id": context.session_id,
-                    "backend": "codex",
-                    "model": context.model,
-                    "exit_code": output.exit_code,
-                    "error": reason
-                }),
-            );
-            return Err(GardenerError::Process(reason));
-        }
-
         append_run_log(
             "error",
             "adapter.codex.turn_missing_terminal_event",
@@ -300,13 +287,38 @@ impl AgentAdapter for CodexAdapter {
                 "backend": "codex",
                 "model": context.model,
                 "event_count": raw_events.len(),
+                "event_sequence": event_sequence,
                 "stderr_line_count": diagnostics.len(),
                 "exit_code": output.exit_code
             }),
         );
-        Err(GardenerError::Process(
-            "missing turn.completed or turn.failed event".to_string(),
-        ))
+        let synthetic_payload = json!({
+            "type": "turn.failed",
+            "reason": "missing turn.completed or turn.failed event",
+            "event_count": raw_events.len(),
+            "event_sequence": event_sequence,
+            "exit_code": output.exit_code
+        });
+
+        append_run_log(
+            "error",
+            "adapter.codex.turn_synthetic_failure",
+            json!({
+                "worker_id": context.worker_id,
+                "session_id": context.session_id,
+                "backend": "codex",
+                "model": context.model,
+                "reason": synthetic_payload["reason"],
+                "event_sequence": event_sequence,
+                "exit_code": output.exit_code
+            }),
+        );
+        Ok(StepResult {
+            terminal: AgentTerminal::Failure,
+            events,
+            payload: synthetic_payload,
+            diagnostics,
+        })
     }
 }
 
@@ -415,10 +427,30 @@ mod tests {
             stderr: String::new(),
         }));
         let adapter = CodexAdapter;
-        let err = adapter
+        let result = adapter
             .execute(&runner, &context(), "prompt", None)
-            .expect_err("must fail");
-        assert!(format!("{err}").contains("missing turn.completed"));
+            .expect("missing terminal should synthesize failure");
+        assert_eq!(result.terminal, AgentTerminal::Failure);
+        assert_eq!(result.payload["type"], "turn.failed");
+        assert_eq!(result.payload["reason"], "missing turn.completed or turn.failed event");
+    }
+
+    #[test]
+    fn parses_concatenated_records_without_newlines() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"thread.started\"}\n{\"type\":\"turn.completed\",\"result\":{\"ok\":true}}{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"command_execution\",\"status\":\"completed\"}}"
+                .to_string(),
+            stderr: String::new(),
+        }));
+
+        let adapter = CodexAdapter;
+        let result = adapter
+            .execute(&runner, &context(), "prompt", None)
+            .expect("should parse concatenated records");
+        assert_eq!(result.terminal, AgentTerminal::Success);
+        assert_eq!(result.payload["ok"], true);
     }
 
     #[test]

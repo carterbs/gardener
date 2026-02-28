@@ -471,16 +471,11 @@ fn recording_overhead_acceptable() {
 ///   task:    manual:quality:auto-1772289029000
 ///   error:   "process error: missing turn.completed or turn.failed event"
 ///
-/// The recording was reconstructed from otel-logs.jsonl.  The codex process
-/// emitted four `\n`-terminated JSON objects in a single OS read() chunk.
-/// `ReplayProcessRunner::wait_with_line_stream` delivers recorded stdout using
-/// the same chunk-streaming logic as `ProductionProcessRunner`, faithfully
-/// reproducing the `append_and_flush_lines` bug where each successive line
-/// callback receives `&line_buffer[..end]` instead of `&line_buffer[cursor..end]`.
-///
-/// As a result `turn.completed` appears only inside a multi-object "line" that
-/// fails JSON parsing, so `CodexAdapter` never adds it to `raw_events` and
-/// returns `Err("missing turn.completed or turn.failed event")`.
+/// The recording was reconstructed from otel-logs.jsonl. The codex process
+/// emitted multiple JSON objects in a single read() chunk. This regression test
+/// verifies that replay now parses those concatenated objects and recognizes
+/// the terminal `turn.completed` event instead of surfacing
+/// "missing turn.completed or turn.failed event".
 #[test]
 fn session_replay_reproduces_missing_terminal_event_bug() {
     let recording_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -506,12 +501,20 @@ fn session_replay_reproduces_missing_terminal_event_bug() {
         max_turns: None,
     };
 
-    let err = CodexAdapter
+    let step = CodexAdapter
         .execute(&runner, &ctx, "prompt", None)
-        .expect_err("should reproduce the production error");
+        .expect("concatenated replay events should parse as a successful terminal turn");
 
     assert!(
-        err.to_string().contains("missing turn.completed or turn.failed event"),
-        "expected production error, got: {err}"
+        step.terminal == AgentTerminal::Success,
+        "expected success terminal, got: {:?}",
+        step.terminal
+    );
+    assert!(
+        step.events
+            .iter()
+            .any(|event| event.raw_type == "turn.completed"),
+        "expected replay to include turn.completed event, got: {:?}",
+        step.events
     );
 }

@@ -49,7 +49,7 @@ use agent::{probe_and_persist, validate_model};
 use backlog_snapshot::export_markdown_snapshot;
 use backlog_store::BacklogStore;
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
-use config::{load_config, resolve_validation_command, CliOverrides, MergeCompletionMode};
+use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use logging::{
     append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
@@ -102,14 +102,6 @@ pub struct Cli {
 pub enum CliAgent {
     Claude,
     Codex,
-}
-
-fn parse_merge_mode(value: Option<&str>) -> Option<MergeCompletionMode> {
-    value.map(|value| match value {
-        "local" => MergeCompletionMode::Local,
-        "pr_per_completion" | "pr-per-completion" => MergeCompletionMode::PrPerCompletion,
-        _ => unreachable!("merge mode was validated by clap argument parser"),
-    })
 }
 
 impl From<CliAgent> for AgentKind {

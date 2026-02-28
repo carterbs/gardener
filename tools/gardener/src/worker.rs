@@ -1,5 +1,7 @@
 use crate::agent::factory::AdapterFactory;
-use crate::config::{effective_agent_for_state, effective_model_for_state, AppConfig};
+use crate::config::{
+    effective_agent_for_state, effective_model_for_state, AppConfig, GitOutputMode,
+};
 use crate::errors::GardenerError;
 use crate::fsm::{
     DoingOutput, FsmSnapshot, GittingOutput, MergingOutput, ReviewVerdict, ReviewingOutput,
@@ -320,23 +322,83 @@ fn execute_task_live(
     let git = GitClient::new(process_runner, &worktree_path);
     if !git.worktree_is_clean()? {
         append_run_log(
-            "error",
+            "warn",
             "worker.gitting.dirty_worktree",
             json!({
                 "worker_id": identity.worker_id,
                 "worktree": worktree_path.display().to_string()
             }),
         );
-        return Ok(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason: Some(
-                "gitting agent exited cleanly but left uncommitted changes in worktree".to_string(),
-            ),
-        });
+
+        if cfg.execution.git_output_mode == GitOutputMode::CommitOnly {
+            let recovery_registry =
+                PromptRegistry::v1().with_gitting_mode(&cfg.execution.git_output_mode);
+            let gitting_recovery_result = run_agent_turn(
+                cfg,
+                process_runner,
+                scope,
+                &worktree_path,
+                &factory,
+                &recovery_registry,
+                &learning_loop,
+                &identity,
+                WorkerState::Gitting,
+                task_summary,
+                attempt_count + 1,
+            )?;
+            logs.push(gitting_recovery_result.log_event);
+            if gitting_recovery_result.terminal == AgentTerminal::Failure {
+                let failure_reason = extract_failure_reason(&gitting_recovery_result.payload);
+                append_run_log(
+                    "error",
+                    "worker.task.terminal_failure",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "state": "gitting"
+                    }),
+                );
+                return Ok(WorkerRunSummary {
+                    worker_id: identity.worker_id,
+                    session_id: identity.session.session_id,
+                    final_state: WorkerState::Failed,
+                    logs,
+                    teardown: None,
+                    failure_reason,
+                });
+            }
+
+            if !git.worktree_is_clean()? {
+                append_run_log(
+                    "error",
+                    "worker.gitting.dirty_worktree_recovery_failed",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "worktree": worktree_path.display().to_string()
+                    }),
+                );
+                return Ok(WorkerRunSummary {
+                    worker_id: identity.worker_id,
+                    session_id: identity.session.session_id,
+                    final_state: WorkerState::Failed,
+                    logs,
+                    teardown: None,
+                    failure_reason: Some(
+                        "gitting agent exited cleanly but left uncommitted changes in worktree after pre-commit recovery attempt".to_string(),
+                    ),
+                });
+            }
+        } else {
+            return Ok(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Failed,
+                logs,
+                teardown: None,
+                failure_reason: Some(
+                    "gitting agent exited cleanly but left uncommitted changes in worktree".to_string(),
+                ),
+            });
+        }
     }
 
     fsm.transition(WorkerState::Reviewing)?;
@@ -1072,8 +1134,8 @@ fn verify_gitting_output(output: &GittingOutput) -> Result<(), GardenerError> {
     if output.branch.trim().is_empty() || output.pr_number == 0 || output.pr_url.trim().is_empty() {
         return Err(GardenerError::InvalidConfig(
             "gitting verification failed: missing branch/pr metadata".to_string(),
-        ));
-    }
+    ));
+}
     Ok(())
 }
 

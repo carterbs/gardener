@@ -117,10 +117,20 @@ fn gitting_template_commit_only() -> PromptTemplate {
     PromptTemplate {
         version: "v1-gitting-commit-only",
         body: r#"Intent: stage and commit all changes on the current branch.
-Run: git add -A followed by git commit with a clear, conventional-commit style message describing what was implemented.
+Run: git add -A then git commit with a clear, conventional-commit style message describing what was implemented.
+After commit, run git status --porcelain and ensure the output is clean before returning.
+
+If commit fails, assume the failure may be from pre-commit hooks:
+1) inspect the hook error output in detail,
+2) fix the reported files,
+3) run git add -A again,
+4) rerun git commit.
+Do not use --no-verify.
+
+If the tree is still dirty after one recovery attempt, stop and report a failure reason in the envelope metadata so downstream can surface it.
 Guardrails: do not push to remote; do not modify source files.
 Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
-pr_number must be 0 and pr_url must be an empty string.
+pr_number must be a non-zero positive integer; pr_url must be an empty string.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }

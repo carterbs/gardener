@@ -280,7 +280,7 @@ fn merging_template_local() -> PromptTemplate {
 1. Confirm the current branch and worktree state with git status.
 2. From the repo root (not the worktree), run: git merge --no-ff <current-branch>
 3. If merge conflicts occur, resolve them carefully:
-   - Read clippy-lints.toml at the repo root for the canonical lint configuration.
+   - Read workspace lint configuration in the root Cargo.toml ([workspace.lints.clippy]) for canonical lint rules.
    - Keep behavior from both sides where appropriate — do not silently drop changes.
    - After resolving, run: ./scripts/run-validate.sh to verify the resolution is correct.
    - If validation fails, fix the conflict resolution and re-run validation before continuing.

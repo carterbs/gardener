@@ -3,9 +3,8 @@ name = "gardener"
 version = "0.1.0"
 edition = "2021"
 
-[lints.clippy]
-unwrap_used = "warn"
-expect_used = "warn"
+[lints]
+workspace = true
 
 [lib]
 name = "gardener"

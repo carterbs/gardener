@@ -2,5 +2,6 @@
 !.cache/gardener/backlog.sqlite
 .DS_STORE
 .worktrees/
+target/
 docs/quality-grades.md
 docs/quality-grades.md.stamp

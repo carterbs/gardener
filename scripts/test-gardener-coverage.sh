@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
+MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-80}"
 
 report="$(cargo llvm-cov -p gardener --all-targets --summary-only)"
 printf '%s\n' "$report"

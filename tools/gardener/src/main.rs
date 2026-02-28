@@ -1,3 +1,5 @@
+#![warn(clippy::unwrap_used)]
+
 fn main() {
     match gardener::run() {
         Ok(code) => std::process::exit(code),

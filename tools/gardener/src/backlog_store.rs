@@ -55,6 +55,7 @@ pub struct BacklogTask {
     pub kind: TaskKind,
     pub title: String,
     pub details: String,
+    pub rationale: String,
     pub scope_key: String,
     pub priority: Priority,
     pub status: TaskStatus,
@@ -73,6 +74,7 @@ pub struct NewTask {
     pub kind: TaskKind,
     pub title: String,
     pub details: String,
+    pub rationale: String,
     pub scope_key: String,
     pub priority: Priority,
     pub source: String,
@@ -490,7 +492,7 @@ impl BacklogStore {
             let mut statement = conn
                 .prepare(
                     "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated, \
-                            lease_owner, lease_expires_at, source, related_pr, related_branch, attempt_count, created_at \
+                            lease_owner, lease_expires_at, source, related_pr, related_branch, rationale, attempt_count, created_at \
                      FROM backlog_tasks \
                      ORDER BY
                         CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
@@ -545,7 +547,7 @@ impl BacklogStore {
         );
         self.read_pool.with_conn(|conn| {
             let mut statement = conn
-                .prepare("SELECT COUNT(*) FROM backlog_tasks WHERE status <> 'complete'")
+                .prepare("SELECT COUNT(*) FROM backlog_tasks WHERE status NOT IN ('complete', 'failed')")
                 .map_err(db_err)?;
             statement
                 .query_row([], |row| {
@@ -604,7 +606,10 @@ fn configure_write_connection(conn: &Connection) -> StoreResult<()> {
 }
 
 fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
-    let migrations = [(1_i64, include_str!("../migrations/0001_backlog.sql"))];
+    let migrations = [
+        (1_i64, include_str!("../migrations/0001_backlog.sql")),
+        (2_i64, include_str!("../migrations/0002_backlog.sql")),
+    ];
 
     conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); COMMIT;")
         .map_err(db_err)?;
@@ -660,9 +665,9 @@ fn upsert_task(conn: &Connection, task: &NewTask, now: i64) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO backlog_tasks (
             task_id, kind, title, details, scope_key, priority, status, last_updated, lease_owner,
-            lease_expires_at, source, related_pr, related_branch, attempt_count, created_at
+            lease_expires_at, source, related_pr, related_branch, rationale, attempt_count, created_at
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, 'ready', ?7, NULL, NULL, ?8, ?9, ?10, 0, ?11
+            ?1, ?2, ?3, ?4, ?5, ?6, 'ready', ?7, NULL, NULL, ?8, ?9, ?10, ?11, 0, ?12
         )
         ON CONFLICT(task_id) DO UPDATE SET
             title = excluded.title,
@@ -695,7 +700,8 @@ fn upsert_task(conn: &Connection, task: &NewTask, now: i64) -> StoreResult<()> {
             END,
             source = excluded.source,
             related_pr = excluded.related_pr,
-            related_branch = excluded.related_branch",
+            related_branch = excluded.related_branch,
+            rationale = excluded.rationale",
         params![
             task_id,
             task.kind.as_str(),
@@ -707,6 +713,7 @@ fn upsert_task(conn: &Connection, task: &NewTask, now: i64) -> StoreResult<()> {
             task.source,
             task.related_pr,
             task.related_branch,
+            task.rationale,
             now,
         ],
     )
@@ -772,7 +779,7 @@ fn claim_next_in_tx(
                  attempt_count = attempt_count + 1
              WHERE task_id = ?1 AND status = 'ready'
              RETURNING task_id, kind, title, details, scope_key, priority, status, last_updated,
-                       lease_owner, lease_expires_at, source, related_pr, related_branch,
+                       lease_owner, lease_expires_at, source, related_pr, related_branch, rationale,
                        attempt_count, created_at",
         )
         .map_err(db_err)?;
@@ -891,7 +898,7 @@ fn fetch_task(conn: &Connection, task_id: &str) -> StoreResult<Option<BacklogTas
     );
     conn.query_row(
         "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated,
-                lease_owner, lease_expires_at, source, related_pr, related_branch,
+                lease_owner, lease_expires_at, source, related_pr, related_branch, rationale,
                 attempt_count, created_at
          FROM backlog_tasks
          WHERE task_id = ?1",
@@ -922,6 +929,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<BacklogTask> {
         title: row.get(2)?,
         details: row.get(3)?,
         scope_key: row.get(4)?,
+        rationale: row.get(13)?,
         priority: Priority::from_db(&priority).ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
                 5,
@@ -948,8 +956,8 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<BacklogTask> {
         source: row.get(10)?,
         related_pr: row.get(11)?,
         related_branch: row.get(12)?,
-        attempt_count: row.get(13)?,
-        created_at: row.get(14)?,
+        attempt_count: row.get(14)?,
+        created_at: row.get(15)?,
     })
 }
 
@@ -1016,6 +1024,7 @@ mod tests {
             kind: TaskKind::Feature,
             title: title.to_string(),
             details: "details".to_string(),
+            rationale: String::new(),
             scope_key: "domain:core".to_string(),
             priority,
             source: "test".to_string(),
@@ -1241,6 +1250,7 @@ mod tests {
                 kind: TaskKind::Bugfix,
                 title: "b".to_string(),
                 details: String::new(),
+                rationale: String::new(),
                 scope_key: "global".to_string(),
                 priority: Priority::P1,
                 source: "t".to_string(),
@@ -1253,6 +1263,7 @@ mod tests {
                 kind: TaskKind::Maintenance,
                 title: "m".to_string(),
                 details: String::new(),
+                rationale: String::new(),
                 scope_key: "global".to_string(),
                 priority: Priority::P2,
                 source: "t".to_string(),
@@ -1265,6 +1276,7 @@ mod tests {
                 kind: TaskKind::Infra,
                 title: "i".to_string(),
                 details: String::new(),
+                rationale: String::new(),
                 scope_key: "global".to_string(),
                 priority: Priority::P0,
                 source: "t".to_string(),
@@ -1294,21 +1306,21 @@ mod tests {
 
         let conversion_conn = Connection::open_in_memory().expect("open memory");
         let bad_kind = conversion_conn.query_row(
-            "SELECT 'id', 'invalid', 'title', '', 'global', 'P1', 'ready', 1, NULL, NULL, 'src', NULL, NULL, 0, 1",
+            "SELECT 'id', 'invalid', 'title', '', 'global', 'P1', 'ready', 1, NULL, NULL, 'src', NULL, NULL, '', 0, 1",
             [],
             super::row_to_task,
         );
         assert!(bad_kind.is_err());
 
         let bad_priority = conversion_conn.query_row(
-            "SELECT 'id', 'feature', 'title', '', 'global', 'PX', 'ready', 1, NULL, NULL, 'src', NULL, NULL, 0, 1",
+            "SELECT 'id', 'feature', 'title', '', 'global', 'PX', 'ready', 1, NULL, NULL, 'src', NULL, NULL, '', 0, 1",
             [],
             super::row_to_task,
         );
         assert!(bad_priority.is_err());
 
         let bad_status = conversion_conn.query_row(
-            "SELECT 'id', 'feature', 'title', '', 'global', 'P1', 'unknown', 1, NULL, NULL, 'src', NULL, NULL, 0, 1",
+            "SELECT 'id', 'feature', 'title', '', 'global', 'P1', 'unknown', 1, NULL, NULL, 'src', NULL, NULL, '', 0, 1",
             [],
             super::row_to_task,
         );

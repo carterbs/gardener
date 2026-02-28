@@ -1,3 +1,5 @@
+#![warn(clippy::unwrap_used)]
+
 pub mod agent;
 pub mod backlog_snapshot;
 pub mod backlog_store;

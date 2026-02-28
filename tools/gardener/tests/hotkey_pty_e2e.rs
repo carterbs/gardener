@@ -12,6 +12,7 @@ fn upsert_task(store: &BacklogStore, title: &str) {
             kind: TaskKind::Maintenance,
             title: title.to_string(),
             details: "details".to_string(),
+            rationale: String::new(),
             scope_key: "scope".to_string(),
             priority: Priority::P1,
             source: "pty-test".to_string(),

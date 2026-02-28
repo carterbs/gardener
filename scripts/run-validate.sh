@@ -16,3 +16,6 @@ done
 
 echo "Running project validation command: cargo test -p gardener --all-targets"
 cargo test -p gardener --all-targets
+
+echo "Running project validation command: cargo clippy -p gardener --all-targets -- -W clippy::unwrap_used"
+cargo clippy -p gardener --all-targets -- -W clippy::unwrap_used

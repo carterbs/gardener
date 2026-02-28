@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const WORKER_LIST_ROW_HEIGHT: usize = 3;
 const COMPACT_WORKER_LIST_ROW_HEIGHT: usize = 2;
 const RECENT_COMMAND_STREAM_LIMIT: usize = 4;
+const COMMAND_SCROLL_RATE_MS: u128 = 120;
 const WORKER_FLOW_STATES: [&str; 7] = [
     "understand",
     "planning",
@@ -1066,6 +1067,7 @@ fn draw_dashboard_frame(
         workers_panel[1]
             .width
             .saturating_sub(8 + "Commands: ".len() as u16) as usize;
+    let command_scroll_offset = current_command_scroll_offset();
     let worker_items = app_state
         .workers
         .iter()
@@ -1086,7 +1088,7 @@ fn draw_dashboard_frame(
             };
             let flow_line = worker_flow_chain_spans(&row.state);
             let command_stream = worker_command_stream(&row.command_details);
-            let command_stream = truncate_right(&command_stream, command_stream_max_width);
+            let command_stream = command_stream_window(&command_stream, command_stream_max_width, command_scroll_offset);
             let mut flow_spans = Vec::new();
             flow_spans.push(Span::raw("    "));
             flow_spans.push(Span::styled(
@@ -1386,6 +1388,7 @@ thread_local! {
     static WORKERS_VIEWPORT_SELECTED: RefCell<usize> = const { RefCell::new(0) };
     static WORKERS_VIEWPORT_CAPACITY: RefCell<usize> = const { RefCell::new(1) };
     static WORKERS_TOTAL_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    static COMMAND_SCROLL_TICK: RefCell<(usize, u128)> = const { RefCell::new((0, 0)) };
 }
 
 fn now_unix_millis() -> u128 {
@@ -1786,6 +1789,39 @@ fn worker_command_stream(commands: &[CommandEntry]) -> String {
         .map(|entry| format!("{}  {}", entry.timestamp, entry.command))
         .collect::<Vec<_>>()
         .join("  |  ")
+}
+
+fn current_command_scroll_offset() -> usize {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    COMMAND_SCROLL_TICK.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let (offset, last_ms) = *state;
+        if last_ms == 0 {
+            *state = (0, now_ms);
+            return 0;
+        }
+        let elapsed = now_ms.saturating_sub(last_ms);
+        let new_ticks = elapsed / COMMAND_SCROLL_RATE_MS;
+        if new_ticks > 0 {
+            let new_offset = offset.saturating_add(new_ticks as usize);
+            *state = (new_offset, last_ms + new_ticks * COMMAND_SCROLL_RATE_MS);
+        }
+        state.0
+    })
+}
+
+fn command_stream_window(stream: &str, width: usize, offset: usize) -> String {
+    let chars: Vec<char> = stream.chars().collect();
+    let len = chars.len();
+    if len <= width {
+        return stream.to_string();
+    }
+    let max_offset = len.saturating_sub(width);
+    let start = offset.min(max_offset);
+    chars[start..start + width].iter().collect()
 }
 
 fn normalize_worker_state(state: &str) -> &str {

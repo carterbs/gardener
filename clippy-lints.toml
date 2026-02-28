@@ -1,0 +1,29 @@
+# Clippy lint rules applied by run-validate.sh.
+# Each [[lints]] block adds a single flag to one cargo clippy invocation.
+# To add a new lint, append a new [[lints]] block at the end of this file.
+# Separate blocks merge cleanly when multiple workers add rules concurrently.
+#
+# Fields:
+#   name  — the clippy lint (e.g. "clippy::unwrap_used")
+#   level — "warn" (-W) or "deny" (-D)
+#   scope — "all-targets" (includes tests) or "lib-bins" (production code only)
+
+[[lints]]
+name = "clippy::unwrap_used"
+level = "warn"
+scope = "all-targets"
+
+[[lints]]
+name = "clippy::expect_used"
+level = "warn"
+scope = "all-targets"
+
+[[lints]]
+name = "clippy::unwrap_used"
+level = "deny"
+scope = "lib-bins"
+
+[[lints]]
+name = "clippy::expect_used"
+level = "warn"
+scope = "lib-bins"

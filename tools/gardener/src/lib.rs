@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod backlog_snapshot;
 pub mod backlog_store;
+pub mod clippy_lints;
 pub mod config;
 pub mod errors;
 pub mod fsm;

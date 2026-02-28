@@ -277,21 +277,26 @@ fn run_with_runtime_validate_flag_runs_configured_validation_command() {
 }
 
 #[test]
-fn run_validate_script_enforces_expect_used_lint() {
+fn run_validate_reads_from_clippy_lints_toml() {
+    let lint_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("clippy-lints.toml");
+    let config = gardener::clippy_lints::ClippyLintConfig::load(&lint_path)
+        .expect("clippy-lints.toml should be loadable");
+    assert!(
+        !config.lints.is_empty(),
+        "clippy-lints.toml should contain at least one lint rule"
+    );
+
     let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .join("scripts")
         .join("run-validate.sh");
     let script = fs::read_to_string(script_path).expect("run-validate.sh should be readable");
-    let clippy_command = script
-        .lines()
-        .find(|line| line.contains("cargo clippy -p gardener --all-targets"))
-        .expect("run-validate.sh should include a clippy command");
-
-    assert!(clippy_command.contains("-W clippy::unwrap_used"));
-    assert!(clippy_command.contains("-W clippy::expect_used"));
     assert!(script.contains("scripts/check-no-warnings.sh"));
+    assert!(script.contains("clippy-lints.toml"));
 }
 
 #[test]

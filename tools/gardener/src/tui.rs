@@ -764,11 +764,26 @@ fn draw_dashboard_frame(
     let now_rows: u16 = 7;
     let remaining = body_height.saturating_sub(now_rows);
     let backlog_reserve = if app_state.terminal_width >= 120 { 6 } else { 8 };
-    let backlog_rows = if remaining > backlog_reserve {
+    let requested_backlog_rows = if remaining > backlog_reserve {
         remaining - backlog_reserve
     } else {
         1
     };
+    let mut backlog_rows = requested_backlog_rows;
+    if app_state.workers.len() >= 3 {
+        let minimum_worker_rows = (3 * WORKER_LIST_ROW_HEIGHT) as u16;
+        let max_backlog_rows = remaining.saturating_sub(minimum_worker_rows);
+        let minimum_backlog_rows = if app_state.backlog.is_empty() {
+            0
+        } else if remaining >= minimum_worker_rows + 1 {
+            1
+        } else {
+            0
+        };
+        backlog_rows = requested_backlog_rows
+            .min(max_backlog_rows)
+            .max(minimum_backlog_rows);
+    }
     let workers_rows = remaining.saturating_sub(backlog_rows).max(1);
     let body = Layout::default()
         .direction(Direction::Vertical)

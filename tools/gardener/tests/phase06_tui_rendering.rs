@@ -66,6 +66,26 @@ fn dashboard_worker_states_all_render() {
 }
 
 #[test]
+fn dashboard_keeps_three_workers_visible_in_short_viewports_without_backlog() {
+    let workers = vec![
+        make_worker("w-01", "doing", "task-a"),
+        make_worker("w-02", "doing", "task-b"),
+        make_worker("w-03", "doing", "task-c"),
+    ];
+    let frame = render_dashboard(&workers, &QueueStats {
+        ready: 0,
+        active: 3,
+        failed: 0,
+        p0: 0,
+        p1: 3,
+        p2: 0,
+    }, &BacklogView::default(), 80, 19);
+    assert!(frame.contains("Lawn Mower"), "first worker card should be visible");
+    assert!(frame.contains("Leaf Blower"), "second worker card should be visible");
+    assert!(frame.contains("Hedge Trimmer"), "third worker card should be visible");
+}
+
+#[test]
 fn dashboard_problems_panel_on_zombie_worker() {
     let zombie = WorkerRow {
         worker_id: "w-zombie".to_string(),

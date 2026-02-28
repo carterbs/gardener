@@ -99,6 +99,9 @@ pub struct Cli {
     pub triage_only: bool,
     #[arg(long, default_value_t = false)]
     pub sync_only: bool,
+    /// Write a JSONL session recording to this path (also via GARDENER_RECORD_SESSION env var).
+    #[arg(long = "record-session")]
+    pub record_session: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -220,6 +223,28 @@ pub fn run_with_runtime(
             runtime.process_runner.as_ref(),
         )?;
         set_run_working_dir(&scope.working_dir);
+        // Initialize session recorder if --record-session or GARDENER_RECORD_SESSION is set
+        let record_path = cli
+            .record_session
+            .clone()
+            .or_else(|| std::env::var("GARDENER_RECORD_SESSION").ok().map(std::path::PathBuf::from));
+        if let Some(ref path) = record_path {
+            replay::recorder::init_session_recorder(path)?;
+            emit_record(RecordEntry::SessionStart(replay::recording::SessionStartRecord {
+                run_id: run_id.clone(),
+                recorded_at_unix_ns: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+                gardener_version: env!("CARGO_PKG_VERSION").to_string(),
+                config_snapshot: serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null),
+            }));
+            append_run_log(
+                "info",
+                "session.recording.started",
+                json!({ "path": path.display().to_string() }),
+            );
+        }
         append_run_log(
             "info",
             "config.loaded",
@@ -464,6 +489,14 @@ pub fn run_with_runtime(
                     "complete",
                     &format!("target={target} completed={completed}"),
                 ))?;
+            }
+            if record_path.is_some() {
+                emit_record(RecordEntry::SessionEnd(replay::recording::SessionEndRecord {
+                    completed_tasks: completed as u64,
+                    total_duration_ns: 0, // wall-clock timing not tracked at this layer
+                }));
+                replay::recorder::clear_session_recorder();
+                append_run_log("info", "session.recording.finished", json!({}));
             }
             return Ok(0);
         }

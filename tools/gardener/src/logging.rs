@@ -237,6 +237,108 @@ pub fn recent_worker_log_lines(worker_id: &str, max_lines: usize) -> Vec<String>
     lines.split_off(lines.len() - max_lines).into_iter().collect()
 }
 
+pub fn current_log_line_count() -> usize {
+    let Some(path) = current_run_log_path() else {
+        return 0;
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return 0,
+    };
+    text.lines().count()
+}
+
+pub fn recent_worker_tool_commands(
+    from_line: usize,
+    max_lines: usize,
+) -> Vec<(usize, String, String)> {
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let Some(path) = current_run_log_path() else {
+        return Vec::new();
+    };
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut events = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if idx < from_line {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        let event_type = value
+            .get("event_type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !event_type.starts_with("adapter.") {
+            continue;
+        }
+
+        let command = match value.get("payload").and_then(extract_payload_command) {
+            Some(command) => command,
+            None => continue,
+        };
+
+        let kind = value
+            .get("payload")
+            .and_then(|p| p.get("kind"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if kind != "ToolCall" && kind != "ToolResult" {
+            continue;
+        }
+
+        let worker_id = match value
+            .get("payload")
+            .and_then(|p| p.get("worker_id"))
+            .and_then(Value::as_str)
+        {
+            Some(worker_id) => worker_id.to_string(),
+            None => continue,
+        };
+        let command = if command.len() > PROMPT_LINE_LIMIT {
+            truncate_utf8(&command, PROMPT_LINE_LIMIT)
+        } else {
+            command
+        };
+        events.push((idx, worker_id, command));
+    }
+
+    if events.len() <= max_lines {
+        return events;
+    }
+    events.split_off(events.len() - max_lines)
+}
+
+fn extract_payload_command(payload: &Value) -> Option<String> {
+    payload
+        .get("command")
+        .and_then(Value::as_str)
+        .map(|command| command.replace('\n', "\\n"))
+        .or_else(|| {
+            payload
+                .get("input")
+                .and_then(|input| input.get("command"))
+                .and_then(Value::as_str)
+                .map(|command| command.replace('\n', "\\n"))
+        })
+        .or_else(|| payload.get("payload").and_then(extract_payload_command))
+        .or_else(|| {
+            payload
+                .get("item")
+                .and_then(extract_payload_command)
+        })
+}
+
 fn kv_attr(key: &str, value: &str) -> Value {
     json!({
         "key": key,

@@ -4,7 +4,10 @@ use crate::errors::GardenerError;
 use crate::hotkeys::{
     action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
 };
-use crate::logging::{append_run_log, recent_worker_log_lines, structured_fallback_line};
+use crate::logging::{
+    append_run_log, current_log_line_count, recent_worker_log_lines, recent_worker_tool_commands,
+    structured_fallback_line,
+};
 use crate::priority::Priority;
 use crate::runtime::Terminal;
 use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
@@ -87,6 +90,8 @@ pub fn run_worker_pool_fsm(
         .collect::<Vec<_>>();
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let pulse_interval = Duration::from_secs(1);
+    let mut last_worker_command_line = current_log_line_count();
+    let command_poll_chunk = 32;
     let mut completed = 0usize;
     render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
@@ -325,7 +330,12 @@ pub fn run_worker_pool_fsm(
                             now,
                             pulse_interval,
                         );
-                        if updated || last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
+                        let updated_commands = append_worker_tool_commands(
+                            &mut workers,
+                            &mut last_worker_command_line,
+                            command_poll_chunk,
+                        );
+                        if updated || updated_commands || last_dashboard_refresh.elapsed() >= Duration::from_secs(1) {
                             render(
                                 terminal,
                                 &workers,
@@ -607,6 +617,31 @@ fn now_hhmmss() -> String {
         (in_day % 3600) / 60,
         in_day % 60
     )
+}
+
+fn append_worker_tool_commands(
+    workers: &mut [WorkerRow],
+    last_worker_command_line: &mut usize,
+    max_events: usize,
+) -> bool {
+    let events = recent_worker_tool_commands(*last_worker_command_line, max_events);
+    let mut updated = false;
+    for (line, worker_id, command) in events {
+        let mut matched = false;
+        for worker in workers.iter_mut() {
+            if worker.worker_id == worker_id {
+                append_worker_command(worker, &command);
+                matched = true;
+                updated = true;
+                break;
+            }
+        }
+        *last_worker_command_line = line + 1;
+        if !matched {
+            continue;
+        }
+    }
+    updated
 }
 
 fn hotkey_action(key: char, operator_hotkeys: bool) -> Option<AppHotkeyAction> {

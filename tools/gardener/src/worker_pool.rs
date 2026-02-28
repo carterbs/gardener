@@ -11,8 +11,8 @@ use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
-    reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
-    WorkerRow,
+    reset_workers_scroll, scroll_workers_down, scroll_workers_up, toggle_selected_worker_command_detail,
+    BacklogView, QueueStats, WorkerRow,
 };
 use crate::types::RuntimeScope;
 use crate::worker::execute_task;
@@ -72,7 +72,7 @@ pub fn run_worker_pool_fsm(
             scope,
             cfg,
             store,
-            &workers,
+            &mut workers,
             operator_hotkeys,
             terminal,
             &mut report_visible,
@@ -168,7 +168,7 @@ pub fn run_worker_pool_fsm(
                     &runtime_scope,
                     cfg,
                     store,
-                    &workers,
+                    &mut workers,
                     operator_hotkeys,
                     terminal,
                     &mut report_visible,
@@ -364,7 +364,7 @@ fn handle_hotkeys(
     scope: &RuntimeScope,
     cfg: &AppConfig,
     store: &BacklogStore,
-    workers: &[WorkerRow],
+    workers: &mut [WorkerRow],
     operator_hotkeys: bool,
     terminal: &dyn Terminal,
     report_visible: &mut bool,
@@ -453,6 +453,9 @@ fn handle_hotkeys(
                     }),
                 );
                 redraw_dashboard = true;
+            }
+            Some(AppHotkeyAction::ToggleCommandDetail) => {
+                redraw_dashboard = toggle_selected_worker_command_detail(workers);
             }
             Some(AppHotkeyAction::ViewReport) => *report_visible = true,
             Some(AppHotkeyAction::RegenerateReport) => {

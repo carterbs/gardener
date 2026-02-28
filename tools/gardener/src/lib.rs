@@ -22,6 +22,7 @@ pub mod prompt_knowledge;
 pub mod prompt_registry;
 pub mod prompts;
 pub mod protocol;
+pub mod replay;
 pub mod quality_domain_catalog;
 pub mod quality_evidence;
 pub mod quality_grades;
@@ -55,6 +56,8 @@ use logging::{
     append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
     structured_fallback_line,
 };
+use replay::recorder::emit_record;
+use replay::recording::{BacklogSnapshotRecord, BacklogTaskRecord, RecordEntry};
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
@@ -96,6 +99,9 @@ pub struct Cli {
     pub triage_only: bool,
     #[arg(long, default_value_t = false)]
     pub sync_only: bool,
+    /// Write a JSONL session recording to this path (also via GARDENER_RECORD_SESSION env var).
+    #[arg(long = "record-session")]
+    pub record_session: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -217,6 +223,28 @@ pub fn run_with_runtime(
             runtime.process_runner.as_ref(),
         )?;
         set_run_working_dir(&scope.working_dir);
+        // Initialize session recorder if --record-session or GARDENER_RECORD_SESSION is set
+        let record_path = cli
+            .record_session
+            .clone()
+            .or_else(|| std::env::var("GARDENER_RECORD_SESSION").ok().map(std::path::PathBuf::from));
+        if let Some(ref path) = record_path {
+            replay::recorder::init_session_recorder(path)?;
+            emit_record(RecordEntry::SessionStart(replay::recording::SessionStartRecord {
+                run_id: run_id.clone(),
+                recorded_at_unix_ns: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(0),
+                gardener_version: env!("CARGO_PKG_VERSION").to_string(),
+                config_snapshot: serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null),
+            }));
+            append_run_log(
+                "info",
+                "session.recording.started",
+                json!({ "path": path.display().to_string() }),
+            );
+        }
         append_run_log(
             "info",
             "config.loaded",
@@ -417,6 +445,13 @@ pub fn run_with_runtime(
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
             let startup_backlog = store.list_tasks()?;
+            emit_record(RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
+                tasks: startup_backlog
+                    .iter()
+                    .cloned()
+                    .map(BacklogTaskRecord::from)
+                    .collect(),
+            }));
             let startup_backlog_tasks = startup_backlog
                 .into_iter()
                 .map(|task| {
@@ -454,6 +489,14 @@ pub fn run_with_runtime(
                     "complete",
                     &format!("target={target} completed={completed}"),
                 ))?;
+            }
+            if record_path.is_some() {
+                emit_record(RecordEntry::SessionEnd(replay::recording::SessionEndRecord {
+                    completed_tasks: completed as u64,
+                    total_duration_ns: 0, // wall-clock timing not tracked at this layer
+                }));
+                replay::recorder::clear_session_recorder();
+                append_run_log("info", "session.recording.finished", json!({}));
             }
             return Ok(0);
         }

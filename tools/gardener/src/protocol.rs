@@ -25,13 +25,14 @@ pub struct AgentEvent {
     pub payload: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentTerminal {
     Success,
     Failure,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepResult {
     pub terminal: AgentTerminal,
     pub events: Vec<AgentEvent>,

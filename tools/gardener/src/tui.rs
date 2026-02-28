@@ -70,6 +70,12 @@ const TRIAGE_STAGE_LABELS: [&str; 4] = [
     "Build project profile",
     "Seed prioritized backlog",
 ];
+const WIZARD_STEP_LABELS: [&str; 4] = [
+    "Parallelism",
+    "Validation",
+    "Docs",
+    "Notes",
+];
 const WORKER_EQUIPMENT_NAMES: [&str; 9] = [
     "Lawn Mower",
     "Leaf Blower",
@@ -353,6 +359,42 @@ fn triage_stages_with_state(current_stage: usize) -> Vec<TriageStage> {
         })
         .collect()
 }
+
+fn wizard_step_indicator(current_step: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, label) in WIZARD_STEP_LABELS.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default()));
+        }
+        let (dot, style) = if i < current_step {
+            ("● ", Style::default().fg(Color::Rgb(126, 231, 135)))
+        } else if i == current_step {
+            (
+                "● ",
+                Style::default()
+                    .fg(Color::Rgb(85, 198, 255))
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            ("○ ", Style::default().fg(Color::Rgb(82, 88, 126)))
+        };
+        spans.push(Span::styled(dot, style));
+        spans.push(Span::styled(
+            *label,
+            if i == current_step {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else if i < current_step {
+                Style::default().fg(Color::Rgb(126, 231, 135))
+            } else {
+                Style::default().fg(Color::Rgb(82, 88, 126))
+            },
+        ));
+    }
+    Line::from(spans)
+}
+
 fn command_row_with_timestamp(timestamp: &str, command: &str, max_width: usize) -> String {
     let mut command = command.to_string();
     let prefix = format!("{timestamp}  ");
@@ -1804,45 +1846,109 @@ pub fn run_repo_health_wizard(
                 let area = frame.area();
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(3), Constraint::Min(4), Constraint::Length(3)])
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Length(1),
+                        Constraint::Min(6),
+                        Constraint::Length(2),
+                    ])
                     .split(area);
 
-                let title = Paragraph::new(
-                    "Gardener Setup Wizard (Esc = keep defaults, Enter = next)",
-                )
-                    .block(Block::default().borders(Borders::ALL).title("Repo Health"));
-                frame.render_widget(title, chunks[0]);
+                let header = Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "GARDENER ",
+                        Style::default()
+                            .fg(Color::Rgb(85, 198, 255))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "setup wizard",
+                        Style::default()
+                            .fg(Color::Rgb(245, 196, 95))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("    "),
+                    Span::styled(
+                        "Esc = keep defaults",
+                        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                    ),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::BOTTOM)
+                        .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+                );
+                frame.render_widget(header, chunks[0]);
 
-                let body_text = match step {
-                    0 => format!(
-                        "Worker parallelism:\n{}\n\nType a number from 1-32, Enter to continue.",
-                        parallelism_input
+                let steps = Paragraph::new(wizard_step_indicator(step));
+                frame.render_widget(steps, chunks[1]);
+
+                let (label, help, value) = match step {
+                    0 => (
+                        "Worker parallelism",
+                        "How many parallel workers should gardener run? Range: 1-32.",
+                        format!("> {}█", parallelism_input),
                     ),
-                    1 => format!(
-                        "Validation command:\n{}\n\nType to edit, Backspace to delete, Enter to continue.",
-                        validation
+                    1 => (
+                        "Validation command",
+                        "Command to verify code changes. Edit or keep the default.",
+                        format!("> {}█", validation),
                     ),
-                    2 => format!(
-                        "Are architecture/quality docs available in repo?\nCurrent: {}\n\nPress 'y' or 'n', Enter to continue.",
-                        if docs_accessible { "yes" } else { "no" }
+                    2 => (
+                        "Architecture docs available?",
+                        "Are architecture/quality docs accessible in the repo? Press y/n.",
+                        format!("> {}", if docs_accessible { "yes" } else { "no" }),
                     ),
-                    _ => format!(
-                        "Additional constraints (optional):\n{}\n\nType notes, Enter to finish.",
-                        notes
+                    _ => (
+                        "Additional constraints (optional)",
+                        "Any extra context for workers? Leave empty to skip.",
+                        format!("> {}█", notes),
                     ),
                 };
-                let body = Paragraph::new(body_text)
-                    .block(Block::default().borders(Borders::ALL).title("Input"));
-                frame.render_widget(body, chunks[1]);
+                let body = Paragraph::new(vec![
+                    Line::from(Span::styled(
+                        label,
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        help,
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::DIM),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        value,
+                        Style::default().fg(Color::Rgb(85, 198, 255)),
+                    )),
+                ])
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+                );
+                frame.render_widget(body, chunks[2]);
 
-                let footer = Paragraph::new(match step {
-                    0 => "Step 1/4",
-                    1 => "Step 2/4",
-                    2 => "Step 3/4",
-                    _ => "Step 4/4",
-                })
-                .block(Block::default().borders(Borders::ALL));
-                frame.render_widget(footer, chunks[2]);
+                let footer = Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!("Step {} of 4", step + 1),
+                        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(
+                        if step < 3 { "Enter →" } else { "Enter to finish" },
+                        Style::default().fg(Color::Rgb(170, 178, 210)),
+                    ),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP)
+                        .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+                );
+                frame.render_widget(footer, chunks[3]);
             })
             .map_err(|e| GardenerError::Io(e.to_string()))?;
 

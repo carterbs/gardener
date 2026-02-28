@@ -22,6 +22,7 @@ pub mod prompt_knowledge;
 pub mod prompt_registry;
 pub mod prompts;
 pub mod protocol;
+pub mod replay;
 pub mod quality_domain_catalog;
 pub mod quality_evidence;
 pub mod quality_grades;

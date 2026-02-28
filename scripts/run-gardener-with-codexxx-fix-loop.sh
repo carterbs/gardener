@@ -33,6 +33,33 @@ is_true() {
   esac
 }
 
+resolve_cmd_with_zshrc() {
+  local cmd="$1"
+  local found=""
+
+  found=$(type -P "$cmd" 2>/dev/null || true)
+  if [[ -n "$found" ]]; then
+    echo "$found"
+    return 0
+  fi
+
+  if [[ -z "${ZSHRC_PATH:-}" || ! -f "$ZSHRC_PATH" ]]; then
+    return 1
+  fi
+
+  if ! command -v zsh >/dev/null 2>&1; then
+    return 1
+  fi
+
+  found=$(zsh -lc "source \"$ZSHRC_PATH\"; whence -p \"$cmd\"")
+  if [[ -n "$found" ]]; then
+    echo "$found"
+    return 0
+  fi
+
+  return 1
+}
+
 run_with_env() {
   local -a cmd=("$@")
   if [[ -n "$ZSHRC_PATH" && -f "$ZSHRC_PATH" ]]; then
@@ -53,10 +80,11 @@ if [[ ! -x "$GARDENER_BINARY" ]]; then
   echo "error: gardener binary not executable: $GARDENER_BINARY" >&2
   exit 1
 fi
-if ! command -v "$CODEXXX_BINARY" >/dev/null 2>&1; then
+if ! CODEXXX_BINARY=$(resolve_cmd_with_zshrc "$CODEXXX_BINARY"); then
   echo "error: codexxx binary not found in PATH: $CODEXXX_BINARY" >&2
   exit 1
 fi
+read -r CODEXXX_BINARY <<<"$CODEXXX_BINARY"
 
 if [[ $# -gt 0 ]]; then
   GARDENER_ARGS=("$@")
@@ -69,9 +97,12 @@ if [[ "$(git rev-parse --abbrev-ref HEAD)" != "$TARGET_BRANCH" ]]; then
   git checkout "$TARGET_BRANCH"
 fi
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-  echo "error: working tree must be clean before running agent-retry loop" >&2
-  exit 1
+if ! is_true "${GARDENER_ALLOW_DIRTY_WORKTREE:-0}"; then
+  if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "error: working tree must be clean before running agent-retry loop" >&2
+    echo "set GARDENER_ALLOW_DIRTY_WORKTREE=1 to bypass (not recommended)" >&2
+    exit 1
+  fi
 fi
 
 run_with_agent() {

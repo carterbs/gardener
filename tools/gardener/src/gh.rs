@@ -83,6 +83,21 @@ impl<'a> GhClient<'a> {
             cwd: Some(self.cwd.clone()),
         })?;
         if out.exit_code != 0 {
+            if let Some(url) = existing_pr_url_from_stderr(&out.stderr) {
+                if let Some(number) = parse_pr_number_from_url(&url) {
+                    append_run_log(
+                        "info",
+                        "gh.pr.create.already_exists",
+                        json!({
+                            "cwd": self.cwd.display().to_string(),
+                            "title": title,
+                            "pr_number": number,
+                            "pr_url": url
+                        }),
+                    );
+                    return Ok((number, url));
+                }
+            }
             append_run_log(
                 "error",
                 "gh.pr.create.failed",
@@ -99,10 +114,7 @@ impl<'a> GhClient<'a> {
             )));
         }
         let url = out.stdout.trim().to_string();
-        let number = url
-            .rsplit('/')
-            .next()
-            .and_then(|s| s.parse::<u64>().ok())
+        let number = parse_pr_number_from_url(&url)
             .ok_or_else(|| {
                 GardenerError::Process(format!(
                     "could not parse PR number from gh pr create output: {url}"
@@ -391,6 +403,20 @@ pub fn upgrade_unmerged_collision_priority(existing: Priority) -> Priority {
     }
 }
 
+fn parse_pr_number_from_url(url: &str) -> Option<u64> {
+    url.rsplit('/').next().and_then(|s| s.parse::<u64>().ok())
+}
+
+fn existing_pr_url_from_stderr(stderr: &str) -> Option<String> {
+    if !stderr.contains("already exists") {
+        return None;
+    }
+    stderr
+        .lines()
+        .find(|line| line.contains("http") && line.contains("/pull/"))
+        .map(|line| line.trim().to_string())
+}
+
 pub fn generate_pr_title_body(
     runner: &dyn ProcessRunner,
     cwd: &Path,
@@ -532,6 +558,20 @@ mod tests {
         let gh = GhClient::new(&runner, "/repo");
         let err = gh.create_pr("title", "body").expect_err("must fail");
         assert!(format!("{err}").contains("gh pr create failed"));
+    }
+
+    #[test]
+    fn create_pr_reuses_existing_pr_when_gh_reports_already_exists() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "a pull request for branch \"feat/x\" into branch \"main\" already exists:\nhttps://github.com/owner/repo/pull/18\n".to_string(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let (number, url) = gh.create_pr("title", "body").expect("should reuse");
+        assert_eq!(number, 18);
+        assert_eq!(url, "https://github.com/owner/repo/pull/18");
     }
 
     #[test]

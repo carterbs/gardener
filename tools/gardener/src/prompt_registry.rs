@@ -128,6 +128,8 @@ Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate task
 - Do not add speculative features, extra configuration, or "nice to have" improvements beyond scope.
 - Keep changes focused. Three similar lines of code are better than a premature abstraction.
 - Do not edit unrelated shared coordination/state files unless the task explicitly requires it.
+- Do not bypass quality gates. If tests/lints/coverage checks fail, fix code/tests instead of weakening checks.
+- Do not lower thresholds or expand excludes/ignore lists (coverage, lint, test, validation config) unless the task explicitly requires a policy change.
 
 ## Verification (mandatory)
 
@@ -172,6 +174,8 @@ Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate task
 6. If tests or lints fail, fix the issues before returning.
 
 Follow existing patterns in the codebase. Do not refactor surrounding code unless the task calls for it. Do not add speculative features beyond scope.
+- Do not bypass quality gates. If tests/lints/coverage checks fail, fix code/tests instead of weakening checks.
+- Do not lower thresholds or expand excludes/ignore lists (coverage, lint, test, validation config) unless the task explicitly requires a policy change.
 
 ## Verification (mandatory)
 
@@ -212,6 +216,7 @@ You are an independent reviewer. Your job is to ensure the implementation is cor
 - **Conventions**: Does the code follow project naming, file structure, and architecture conventions?
 - **Scope**: Are the changes focused on the task, or does the implementation include unrelated refactors, speculative features, or unnecessary abstractions?
 - **Quality**: Is the code clear and maintainable? Are there obvious simplifications? Would a human reviewer flag anything as over-engineered or under-documented?
+- **Integrity of checks**: Did implementation preserve validation standards? Any attempt to weaken gates (for example coverage ignores/excludes or lower thresholds) must be treated as a failure unless explicitly requested by the task.
 
 ## Verdict
 
@@ -245,6 +250,7 @@ This is remediation-only work. Keep changes minimal and strictly tied to the rep
 - Do NOT run git push, git commit, gh pr create, gh pr merge, or any other git/gh commands that move code.
 - You may inspect git state (`git status`, `git diff`, `git show`) only for diagnosis.
 - Keep changes scoped to making publication deterministic and safe.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
 Guardrails: do not move git state; only fix source files and validate.
 When your turn is complete, stop after two plain-text lines:
@@ -274,6 +280,7 @@ The deterministic merge pipeline tried to merge your PR and failed. Information 
 - Just fix the source files. Your changes will be committed and pushed automatically by the pipeline.
 - Run the project's validation command to verify your fixes before returning.
 - Keep edits minimal and mergeability-focused; avoid unrelated refactors.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
 Guardrails: do not run git/gh commands; only fix source files.
 Output schema must be JSON envelope with payload fields: summary, files_changed.
@@ -301,6 +308,7 @@ Failure details are in [knowledge_context].
 - Do NOT run git push, git commit, git merge, gh pr merge, or any git/gh commands that move code.
 - Just fix the source files. Your changes will be committed and pushed automatically.
 - Keep changes minimal — only resolve conflicts, do not refactor.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
 Guardrails: no git/gh commands; only fix source files and validate.
 Output schema must be JSON envelope with payload fields: summary, files_changed.

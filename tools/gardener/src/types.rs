@@ -73,8 +73,6 @@ pub enum WorkerActivityState {
     PrCreating,
     Reviewing,
     Merging,
-    MergeLockWaiting,
-    MergeLockHeld,
     MergePolling,
     MergeFromMain,
     MergeRemediation,
@@ -101,8 +99,6 @@ impl WorkerActivityState {
             Self::PrCreating => "pr_creating",
             Self::Reviewing => "reviewing",
             Self::Merging => "merging",
-            Self::MergeLockWaiting => "merge_lock_waiting",
-            Self::MergeLockHeld => "merge_lock_held",
             Self::MergePolling => "merge_polling",
             Self::MergeFromMain => "merge_from_main",
             Self::MergeRemediation => "merge_remediation",
@@ -154,8 +150,6 @@ mod tests {
         assert_eq!(WorkerActivityState::PrCreating.as_str(), "pr_creating");
         assert_eq!(WorkerActivityState::Reviewing.as_str(), "reviewing");
         assert_eq!(WorkerActivityState::Merging.as_str(), "merging");
-        assert_eq!(WorkerActivityState::MergeLockWaiting.as_str(), "merge_lock_waiting");
-        assert_eq!(WorkerActivityState::MergeLockHeld.as_str(), "merge_lock_held");
         assert_eq!(WorkerActivityState::MergePolling.as_str(), "merge_polling");
         assert_eq!(WorkerActivityState::MergeFromMain.as_str(), "merge_from_main");
         assert_eq!(WorkerActivityState::MergeRemediation.as_str(), "merge_remediation");

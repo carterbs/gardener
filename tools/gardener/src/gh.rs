@@ -449,8 +449,10 @@ pub fn generate_pr_title_body(
 
     let title = commits
         .first()
-        .map(|(subj, _)| subj.to_string())
-        .unwrap_or_else(|| task_summary.to_string());
+        .map(|(subj, _)| *subj)
+        .filter(|subj| is_good_pr_title(subj))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| pr_title_from_summary(task_summary));
 
     let body = if commits.len() == 1 {
         let (_, desc) = commits[0];
@@ -478,11 +480,52 @@ pub fn generate_pr_title_body(
     Ok((title, body))
 }
 
+fn is_good_pr_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = normalized.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "feat: implement task changes"
+            | "implement task changes"
+            | "wip"
+            | "update code"
+            | "misc changes"
+            | "fix stuff"
+    ) {
+        return false;
+    }
+    // Must be conventional-commit format: <type>: <description>
+    match normalized.split_once(':') {
+        Some((kind, desc)) => !kind.trim().is_empty() && !desc.trim().is_empty(),
+        None => false,
+    }
+}
+
+fn pr_title_from_summary(task_summary: &str) -> String {
+    let first_line = task_summary.lines().next().unwrap_or_default().trim();
+    if first_line.is_empty() {
+        return "feat: implement requested changes".to_string();
+    }
+    let normalized = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_desc_len = 72usize.saturating_sub("feat: ".len());
+    let desc: String = normalized.chars().take(max_desc_len).collect();
+    if desc.is_empty() {
+        "feat: implement requested changes".to_string()
+    } else {
+        format!("feat: {desc}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, MergeStateStatus,
-        Mergeable, PrMergeability,
+        generate_pr_title_body, is_good_pr_title, pr_title_from_summary,
+        upgrade_unmerged_collision_priority, GhClient, MergeStateStatus, Mergeable,
+        PrMergeability,
     };
     use crate::git::{GitClient, MergeMode};
     use crate::priority::Priority;
@@ -787,5 +830,46 @@ mod tests {
         let m: PrMergeability = serde_json::from_str(json).expect("parse");
         assert_eq!(m.mergeable, Mergeable::Mergeable);
         assert_eq!(m.merge_state_status, MergeStateStatus::Behind);
+    }
+
+    #[test]
+    fn is_good_pr_title_accepts_conventional_commit() {
+        assert!(is_good_pr_title("feat: add widget"));
+        assert!(is_good_pr_title("fix(worker): correct state transition"));
+        assert!(is_good_pr_title("chore: bump dependencies"));
+    }
+
+    #[test]
+    fn is_good_pr_title_rejects_blocklisted_and_invalid() {
+        assert!(!is_good_pr_title(""));
+        assert!(!is_good_pr_title("feat: implement task changes"));
+        assert!(!is_good_pr_title("wip"));
+        assert!(!is_good_pr_title("update code"));
+        assert!(!is_good_pr_title("misc changes"));
+        assert!(!is_good_pr_title("fix stuff"));
+        // Non-conventional-commit format
+        assert!(!is_good_pr_title("just some words"));
+    }
+
+    #[test]
+    fn pr_title_from_summary_truncates_to_72_chars() {
+        let long = "a]".repeat(50);
+        let title = pr_title_from_summary(&long);
+        assert!(title.len() <= 72);
+        assert!(title.starts_with("feat: "));
+    }
+
+    #[test]
+    fn generate_pr_title_body_falls_back_when_first_commit_is_generic() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: implement task changes\n\0".to_string(),
+            stderr: String::new(),
+        }));
+        let (title, _body) =
+            generate_pr_title_body(&runner, std::path::Path::new("/repo"), "enable clippy lint")
+                .expect("ok");
+        assert_eq!(title, "feat: enable clippy lint");
     }
 }

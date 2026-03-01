@@ -141,10 +141,9 @@ After implementation, you MUST verify your work actually works:
 - Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
-Guardrails: max 100 turns, keep patch minimal, include changed files list.
-Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
-commit_message must be a concise conventional-commit style message describing what was implemented.
-Do not use generic commit messages like "feat: implement task changes", "update code", "misc changes", or "wip".
+Guardrails: max 100 turns, keep patch minimal.
+After all verification passes, commit your work: `git add -A && git commit -m "<msg>"` where <msg> is a conventional-commit subject describing what you implemented (e.g. "feat: enable clippy::needless_update", "fix: correct state transition on timeout"). Do not use generic messages like "implement task changes".
+Output schema must be JSON envelope with payload fields: summary.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -186,10 +185,9 @@ After implementation, verify your work actually works:
 - Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
-Guardrails: max 100 turns, keep patch minimal, include changed files list.
-Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
-commit_message must be a concise conventional-commit style message describing what was implemented.
-Do not use generic commit messages like "feat: implement task changes", "update code", "misc changes", or "wip".
+Guardrails: max 100 turns, keep patch minimal.
+After all verification passes, commit your work: `git add -A && git commit -m "<msg>"` where <msg> is a conventional-commit subject describing what you implemented (e.g. "feat: enable clippy::needless_update", "fix: correct state transition on timeout"). Do not use generic messages like "implement task changes".
+Output schema must be JSON envelope with payload fields: summary.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }

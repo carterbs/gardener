@@ -343,9 +343,7 @@ fn execute_task_live(
             failure_reason,
         }));
     }
-    let doing_output = parse_doing_output(&doing_result.payload, worker_id, task_summary);
-    let commit_message =
-        select_commit_message(&doing_output.commit_message, worker_id, task_summary);
+    let _doing_output = parse_doing_output(&doing_result.payload, worker_id, task_summary);
     fsm.on_doing_turn_completed()?;
     if fsm.state == WorkerState::Parked {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked);
@@ -367,11 +365,10 @@ fn execute_task_live(
         }));
     }
 
-    // --- Deterministic Commit ---
-    // Agent wrote code — we commit deterministically.
+    // Safety-net: no-op if agent already committed (clean worktree)
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Commit);
     let git = GitClient::new(process_runner, &worktree_path);
-    git.commit_all(&commit_message)?;
+    git.commit_all(&fallback_commit_message(task_summary))?;
 
     // --- Deterministic Gitting ---
     fsm.transition(WorkerState::Gitting)?;
@@ -1029,7 +1026,7 @@ fn execute_task_simulated(
 
     let _doing_output: DoingOutput = parse_typed_payload(
         &format!(
-            "{START_MARKER}{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"summary\":\"implementation complete\",\"files_changed\":[\"src/lib.rs\"],\"commit_message\":\"feat: implement task\"}}}}{END_MARKER}"
+            "{START_MARKER}{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"summary\":\"implementation complete\"}}}}{END_MARKER}"
         ),
         WorkerState::Doing,
     )?;
@@ -1498,28 +1495,6 @@ mod tests {
     fn parse_doing_output_falls_back_when_payload_invalid() {
         let output = parse_doing_output(&serde_json::json!({"foo": "bar"}), "worker-1", "Add test");
         assert_eq!(output.summary, "Add test");
-        assert!(output.files_changed.is_empty());
-        assert_eq!(output.commit_message, "feat: Add test");
-    }
-
-    #[test]
-    fn select_commit_message_uses_valid_message() {
-        let message = select_commit_message(
-            "fix(worker): wire deterministic commit to doing payload",
-            "worker-1",
-            "ignored",
-        );
-        assert_eq!(
-            message,
-            "fix(worker): wire deterministic commit to doing payload"
-        );
-    }
-
-    #[test]
-    fn select_commit_message_rejects_generic_message() {
-        let message =
-            select_commit_message("feat: implement task changes", "worker-1", "Enable lint");
-        assert_eq!(message, "feat: Enable lint");
     }
 
     #[test]

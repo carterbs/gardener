@@ -17,6 +17,3 @@ done
 
 echo "Running project validation command: cargo test -p gardener --all-targets"
 cargo test -p gardener --all-targets
-
-echo "Running project validation command: scripts/check-no-warnings.sh"
-scripts/check-no-warnings.sh

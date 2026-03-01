@@ -2,7 +2,7 @@ use crate::agent::factory::AdapterFactory;
 use crate::agent::AdapterContext;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::protocol::AgentEvent;
+use crate::protocol::{AgentEvent, AgentTerminal};
 use crate::runtime::ProcessRunner;
 use crate::types::{AgentKind, RuntimeScope};
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,92 @@ pub fn run_legacy_seed_runner_v1_with_events(
     Ok(payload.tasks)
 }
 
+pub fn run_seed_agent_direct_v2_with_events(
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    backend: AgentKind,
+    model: &str,
+    prompt: &str,
+    mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+) -> Result<(), GardenerError> {
+    append_run_log(
+        "info",
+        "seed_runner.direct.started",
+        json!({
+            "backend": format!("{:?}", backend),
+            "model": model,
+            "working_dir": scope.working_dir.display().to_string(),
+            "prompt_version": "seeding-v3-direct",
+            "max_turns": 24,
+        }),
+    );
+
+    let factory = AdapterFactory::with_defaults();
+    let adapter = factory.get(backend).ok_or_else(|| {
+        let err = format!("adapter not registered for {:?}", backend);
+        append_run_log(
+            "error",
+            "seed_runner.direct.adapter_not_found",
+            json!({ "backend": format!("{:?}", backend), "error": err }),
+        );
+        GardenerError::InvalidConfig(err)
+    })?;
+
+    let context = AdapterContext {
+        worker_id: "seed-worker".to_string(),
+        session_id: "seed-session".to_string(),
+        sandbox_id: "seed-sandbox".to_string(),
+        model: model.to_string(),
+        cwd: scope.working_dir.clone(),
+        prompt_version: "seeding-v3-direct".to_string(),
+        context_manifest_hash: "seeding-context-direct".to_string(),
+        output_schema: None,
+        output_file: None,
+        permissive_mode: true,
+        max_turns: Some(24),
+    };
+
+    let result = if let Some(sink) = on_event.as_mut() {
+        adapter.execute(process_runner, &context, prompt, Some(*sink))
+    } else {
+        adapter.execute(process_runner, &context, prompt, None)
+    }?;
+
+    match result.terminal {
+        AgentTerminal::Success => {
+            append_run_log(
+                "info",
+                "seed_runner.direct.completed",
+                json!({
+                    "backend": format!("{:?}", backend),
+                    "model": model,
+                }),
+            );
+            Ok(())
+        }
+        AgentTerminal::Failure => {
+            let reason = if result.payload.is_null() {
+                "agent reported failure".to_string()
+            } else {
+                result.payload.to_string()
+            };
+            append_run_log(
+                "error",
+                "seed_runner.direct.failed",
+                json!({
+                    "backend": format!("{:?}", backend),
+                    "model": model,
+                    "payload": result.payload,
+                    "diagnostics": result.diagnostics,
+                }),
+            );
+            Err(GardenerError::Process(format!(
+                "direct seed runner failed: {reason}"
+            )))
+        }
+    }
+}
+
 fn parse_seed_payload(value: serde_json::Value) -> Result<SeedPayload, serde_json::Error> {
     if let Ok(payload) = serde_json::from_value::<SeedPayload>(value.clone()) {
         return Ok(payload);
@@ -183,9 +269,8 @@ fn seed_output_schema_path(scope: &RuntimeScope) -> Result<PathBuf, GardenerErro
     let desired = seed_output_schema();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     if existing != desired {
-        std::fs::write(&path, desired).map_err(|e| {
-            GardenerError::Io(format!("write schema {}: {e}", path.display()))
-        })?;
+        std::fs::write(&path, desired)
+            .map_err(|e| GardenerError::Io(format!("write schema {}: {e}", path.display())))?;
     }
     Ok(path)
 }
@@ -228,7 +313,7 @@ fn seed_output_schema() -> String {
   },
   "required": ["schema_version", "state", "payload"]
 }"#
-        .to_string()
+    .to_string()
 }
 
 #[cfg(test)]
@@ -236,8 +321,8 @@ mod tests {
     use super::run_legacy_seed_runner_v1;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use crate::types::{AgentKind, RuntimeScope};
-    use tempfile::tempdir;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn seed_runner_uses_codex_adapter_output_contract() {

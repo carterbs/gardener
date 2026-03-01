@@ -1,4 +1,3 @@
-use crate::config::GitOutputMode;
 use crate::errors::GardenerError;
 use crate::types::WorkerState;
 use std::collections::BTreeMap;
@@ -21,30 +20,11 @@ impl PromptRegistry {
         templates.insert(WorkerState::Understand, understand_template());
         templates.insert(WorkerState::Planning, planning_template());
         templates.insert(WorkerState::Doing, doing_template());
-        templates.insert(WorkerState::Gitting, gitting_template_pr());
+        templates.insert(WorkerState::Gitting, gitting_remediation_template());
         templates.insert(WorkerState::Reviewing, reviewing_template());
-        templates.insert(WorkerState::Merging, merging_template_local());
+        templates.insert(WorkerState::Merging, merge_remediation_template());
 
         Self { templates }
-    }
-
-    pub fn with_gitting_mode(mut self, mode: &GitOutputMode) -> Self {
-        let template = match mode {
-            GitOutputMode::CommitOnly => gitting_template_commit_only(),
-            GitOutputMode::Push => gitting_template_push(),
-            GitOutputMode::PullRequest => gitting_template_pr(),
-        };
-        self.templates.insert(WorkerState::Gitting, template);
-        self
-    }
-
-    pub fn with_merging_mode(mut self, mode: &GitOutputMode) -> Self {
-        let template = match mode {
-            GitOutputMode::PullRequest => merging_template_pr(),
-            GitOutputMode::CommitOnly | GitOutputMode::Push => merging_template_local(),
-        };
-        self.templates.insert(WorkerState::Merging, template);
-        self
     }
 
     pub fn with_retry_rebase(mut self, attempt_count: i64) -> Self {
@@ -52,12 +32,6 @@ impl PromptRegistry {
             self.templates
                 .insert(WorkerState::Doing, doing_template_retry_rebase());
         }
-        self
-    }
-
-    pub fn with_conflict_resolution(mut self) -> Self {
-        self.templates
-            .insert(WorkerState::Merging, conflict_resolution_template());
         self
     }
 
@@ -100,6 +74,7 @@ fn planning_template() -> PromptTemplate {
         body: r#"Intent: produce a detailed execution plan before implementation.
 
 Your job is ONLY to plan — do NOT edit source files, create files, or implement anything.
+The task has already been selected. Do NOT re-evaluate scope or pick alternative work.
 
 ## Steps
 
@@ -113,9 +88,15 @@ Your job is ONLY to plan — do NOT edit source files, create files, or implemen
 
 The plan must be detailed enough that the implementation step can execute it without needing to re-research the codebase. Include:
 - **summary**: a one-line conventional-commit style title (e.g. "feat: add backlog pruning command", "fix: correct state transition on timeout"). Use one of: feat, fix, chore, refactor, test, docs, ci, perf.
-- **milestones**: an ordered list of concrete implementation steps. Each milestone should name the files involved, describe what to build, and call out any non-obvious decisions. Keep milestones small and verifiable — a reviewer should be able to check each one independently.
+- **milestones**: an ordered list of concrete implementation steps. Each milestone must include:
+  - what to build (specific behavior, not generic verbs)
+  - exact files to create/modify
+  - tests to add/update and what they verify
+  - QA checks to run beyond "tests passed"
+  - relevant conventions/constraints that apply
 
 Do not hand-wave. "Update the handler" is not a milestone. "Add a `prune` match arm to `BacklogCommand::execute` in `src/backlog/commands.rs` that removes entries older than the configured retention window" is.
+Do not use placeholders like "update code", "fix stuff", or "improve tests". Be concrete.
 
 Guardrails: do not edit files in this state; plan only.
 Output schema must be JSON envelope with payload fields: summary, milestones.
@@ -127,6 +108,9 @@ fn doing_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-doing",
         body: r#"Intent: implement changes and verify behavior within current task scope.
+
+Execution contract: [knowledge_context] is the implementation plan context.
+Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate tasks unless a concrete contradiction blocks implementation.
 
 ## Steps
 
@@ -143,6 +127,7 @@ fn doing_template() -> PromptTemplate {
 - Do not refactor surrounding code unless the task explicitly calls for it.
 - Do not add speculative features, extra configuration, or "nice to have" improvements beyond scope.
 - Keep changes focused. Three similar lines of code are better than a premature abstraction.
+- Do not edit unrelated shared coordination/state files unless the task explicitly requires it.
 
 ## Verification (mandatory)
 
@@ -150,11 +135,14 @@ After implementation, you MUST verify your work actually works:
 - Run tests and confirm they pass.
 - If you built a new command or handler, exercise it and verify the output.
 - If you modified existing behavior, confirm the change is observable.
+- If you built tooling/linting/automation, run it and verify it catches or produces the expected result.
+- Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
+Do not use generic commit messages like "feat: implement task changes", "update code", "misc changes", or "wip".
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -173,6 +161,9 @@ If the rebase succeeds cleanly, proceed to step 2.
 
 ## Step 2 — Implement
 
+Execution contract: [knowledge_context] is the implementation plan context.
+Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate tasks unless a concrete contradiction blocks implementation.
+
 1. Read the task description from [task_packet] and the plan context from [knowledge_context].
 2. Read relevant project conventions and existing source files before writing any code.
 3. Implement changes following the plan. Keep the patch minimal — only touch files that are necessary.
@@ -187,57 +178,14 @@ Follow existing patterns in the codebase. Do not refactor surrounding code unles
 After implementation, verify your work actually works:
 - Run tests and confirm they pass.
 - If you built a new command or handler, exercise it and verify the output.
+- If you built tooling/linting/automation, run it and verify it catches or produces the expected result.
+- Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
-fn gitting_template_commit_only() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-gitting-commit-only",
-        body: r#"Intent: stage and commit all changes on the current branch.
-Run: git add -A then git commit with a clear, conventional-commit style message describing what was implemented.
-After commit, run git status --porcelain and ensure the output is clean before returning.
-
-If commit fails, assume the failure may be from pre-commit hooks:
-1) inspect the hook error output in detail,
-2) fix the reported files,
-3) run git add -A again,
-4) rerun git commit.
-Do not use --no-verify.
-
-If the tree is still dirty after one recovery attempt, stop and report a failure reason in the envelope metadata so downstream can surface it.
-Guardrails: do not push to remote; do not modify source files.
-Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
-pr_number must be a non-zero positive integer; pr_url must be an empty string.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
-fn gitting_template_push() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-gitting-push",
-        body: r#"Intent: stage and commit all changes, then push the branch to origin.
-Run: git add -A, then git commit with a clear conventional-commit style message, then git push origin <branch>.
-Guardrails: do not open a pull request; do not modify source files.
-Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
-pr_number must be 0 and pr_url must be an empty string.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
-fn gitting_template_pr() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-gitting-pr",
-        body: r#"Intent: stage and commit all changes, push the branch, then open a GitHub pull request.
-Run: git add -A, then git commit with a clear conventional-commit style message, then git push origin <branch>, then gh pr create.
-The PR title and body must be written thoughtfully: summarize what was built and why, call out any non-obvious decisions, and make it easy for a reviewer to understand the scope of the change. Do not use the task ID as the title. Write like a human engineer who cares about the reviewer's time.
-Guardrails: do not modify source files; only git and gh operations are permitted.
-Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
+Do not use generic commit messages like "feat: implement task changes", "update code", "misc changes", or "wip".
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -269,6 +217,7 @@ You are an independent reviewer. Your job is to ensure the implementation is cor
 
 - If the implementation meets all criteria: verdict = "approve", suggestions = [].
 - If there are issues: verdict = "needs_changes", suggestions = a list of specific, actionable findings. Each suggestion should name the file and describe what needs to change and why. Do not give vague feedback like "improve tests" — say exactly which cases are missing.
+- Fail closed: if required evidence is missing, validation was not run, or output is ambiguous, verdict must be "needs_changes" with specific missing evidence/actions.
 
 Guardrails: do not modify any files. Suggestions must be actionable and scoped to the current change.
 Output schema must be JSON envelope with payload fields: verdict, suggestions.
@@ -276,83 +225,113 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
-fn merging_template_local() -> PromptTemplate {
+fn gitting_remediation_template() -> PromptTemplate {
     PromptTemplate {
-        version: "v2-merging-local",
-        body: r#"Intent: merge the current worktree branch into main on the local repo and report the resulting merge commit SHA.
+        version: "v1-gitting-remediation",
+        body: r#"Intent: remediate git publication failures after deterministic push handling failed.
+
+The deterministic gitting pipeline failed to publish this branch. Failure details are provided in [knowledge_context].
+This is remediation-only work. Keep changes minimal and strictly tied to the reported failure.
 
 ## Steps
 
-1. Confirm the current branch and worktree state with git status.
-2. From the repo root (not the worktree), run: git merge --no-ff <current-branch>
-3. If merge conflicts occur, resolve them carefully:
-   - Read workspace lint configuration in the root Cargo.toml ([workspace.lints.clippy]) for canonical lint rules.
-   - Keep behavior from both sides where appropriate — do not silently drop changes.
-   - After resolving, run: ./scripts/run-validate.sh to verify the resolution is correct.
-   - If validation fails, fix the conflict resolution and re-run validation before continuing.
-4. Capture the resulting commit SHA with: git rev-parse HEAD
-5. Verify the merge completed cleanly with git status.
+1. Read [knowledge_context] and identify the exact cause of the publication failure.
+2. Inspect and fix source files as needed (for example unresolved conflict markers, missing merged changes, or failing validation-related edits).
+3. Run the project validation command to confirm the worktree is publish-ready.
+4. Return a concise summary and changed files.
 
-## On failure
+## Rules
 
-If the merge cannot complete (unresolvable conflicts, dirty worktree, validation fails after resolution, etc.), set merged=false, merge_sha="" and explain the failure in the summary.
+- Do NOT run git push, git commit, gh pr create, gh pr merge, or any other git/gh commands that move code.
+- You may inspect git state (`git status`, `git diff`, `git show`) only for diagnosis.
+- Keep changes scoped to making publication deterministic and safe.
 
-Guardrails: do not push; do not open a pull request; do not modify source files beyond conflict resolution; include the deterministic merge_sha when merged=true.
-Output schema must be JSON envelope with payload fields: merged, merge_sha.
+Guardrails: do not move git state; only fix source files and validate.
+When your turn is complete, stop after two plain-text lines:
+DONE: <what you changed>
+VALIDATION: <command(s) run and pass/fail outcome>"#,
+    }
+}
+
+fn merge_remediation_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-merge-remediation",
+        body: r#"Intent: fix this PR so it can be merged. The automated merge attempt failed.
+
+## Context
+
+The deterministic merge pipeline tried to merge your PR and failed. Information about the failure is provided in [knowledge_context].
+
+## Possible fixes
+
+- If there are merge conflicts: resolve the conflicting files so the code is correct.
+- If CI is failing: identify and fix the test/lint/build failures.
+- If the branch is behind main: rebase onto origin/main and resolve any resulting conflicts.
+
+## Rules
+
+- Do NOT run git push, git commit, gh pr merge, or any other git/gh commands that move code.
+- Just fix the source files. Your changes will be committed and pushed automatically by the pipeline.
+- Run the project's validation command to verify your fixes before returning.
+- Keep edits minimal and mergeability-focused; avoid unrelated refactors.
+
+Guardrails: do not run git/gh commands; only fix source files.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+summary must include what was fixed and the validation command/result.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
 
-fn merging_template_pr() -> PromptTemplate {
+pub fn merge_main_conflict_resolution_template() -> PromptTemplate {
     PromptTemplate {
-        version: "v1-merging-pr",
-        body: r#"Intent: merge the open GitHub pull request for the current branch and report the resulting merge commit SHA.
+        version: "v1-merge-main-conflict",
+        body: r#"Intent: resolve merge conflicts after merging origin/main into this branch.
+
+## Context
+The pipeline ran `git merge origin/main` and there are conflicts in one or more files.
+Failure details are in [knowledge_context].
 
 ## Steps
+1. Find all files with conflict markers (<<<<<<< / ======= / >>>>>>>).
+2. Resolve each conflict by choosing the correct code or combining both sides.
+3. Remove all conflict markers — no file should contain <<<<<<< when you are done.
+4. Run the project's validation command to confirm everything passes.
 
-1. Confirm the current branch and PR state with: git status && gh pr view --json state,mergeable,mergeStateStatus
-2. If the PR is not in a mergeable state, explain why and set merged=false.
-3. Merge the PR: gh pr merge --merge --auto or gh pr merge <pr-number> --merge
-4. Capture the merge commit SHA from the merge result.
-5. Verify the merge completed: gh pr view <pr-number> --json state,mergedAt
+## Rules
+- Do NOT run git push, git commit, git merge, gh pr merge, or any git/gh commands that move code.
+- Just fix the source files. Your changes will be committed and pushed automatically.
+- Keep changes minimal — only resolve conflicts, do not refactor.
 
-## On failure
-
-If the merge cannot complete (CI failing, merge conflicts, review requirements not met), set merged=false, merge_sha="" and explain the failure in the summary.
-
-Guardrails: do not perform a local git merge; do not modify source files; include the deterministic merge_sha when merged=true.
-Output schema must be JSON envelope with payload fields: merged, merge_sha.
+Guardrails: no git/gh commands; only fix source files and validate.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
 
-fn conflict_resolution_template() -> PromptTemplate {
+#[allow(dead_code)] // wired up when post-merge validation creates a fix PR
+fn post_merge_fix_template() -> PromptTemplate {
     PromptTemplate {
-        version: "v1-conflict-resolution",
-        body: r#"Intent: resolve rebase conflicts from pre-merge and choose the correct outcome.
+        version: "v1-post-merge-fix",
+        body: r#"Intent: fix a post-merge validation failure on main.
+
+The PR was merged successfully but validation on the combined main state fails.
+The validation error is provided in [knowledge_context].
 
 ## Steps
 
-1. Identify all conflicted files:
-   - `git diff --name-only --diff-filter=U`
-2. For each conflicted file:
-   - Review upstream context: `git log main --oneline -5 -- <file>`
-   - Reconcile with `[task_packet]` and decide the task-appropriate resolution.
-3. Choose exactly one outcome:
-   - **resolved**: fix conflicts, `git add -A`, and `git rebase --continue`
-   - **skipped**: `git rebase --skip` if this branch is now redundant
-   - **unresolvable**: `git rebase --abort`
-4. If resolved, run `./scripts/run-validate.sh` and ensure it passes.
-5. Return JSON with:
-   - `resolution`: `"resolved"` | `"skipped"` | `"unresolvable"`
-   - `reason`: short rationale
-   - `merge_sha`: commit SHA when `resolution == resolved`
+1. Investigate the validation failure output to understand what broke.
+2. Identify whether the failure is from your merged changes interacting with other recent changes on main.
+3. Fix the code so validation passes.
+4. Run the project's validation command to confirm the fix.
 
-Guardrails:
-- Keep output strictly to one JSON envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>.
-- Do not modify source files beyond conflict resolution.
+## Rules
 
-Output schema must be JSON envelope with payload fields: resolution, reason, merge_sha."#,
+- Do NOT run git push, git commit, or any other git/gh commands that move code.
+- Just fix the source files. Your changes will be committed and pushed automatically.
+
+Guardrails: do not run git/gh commands; only fix source files.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
 
@@ -368,7 +347,9 @@ mod tests {
             .template_for(WorkerState::Doing)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-doing-retry-rebase");
-        assert!(tpl.body.contains("git fetch origin main && git rebase origin/main"));
+        assert!(tpl
+            .body
+            .contains("git fetch origin main && git rebase origin/main"));
     }
 
     #[test]
@@ -381,28 +362,40 @@ mod tests {
     }
 
     #[test]
-    fn with_conflict_resolution_swaps_merging_template() {
-        let registry = PromptRegistry::v1().with_conflict_resolution();
-        let tpl = registry
-            .template_for(WorkerState::Merging)
-            .expect("template exists");
-        assert_eq!(tpl.version, "v1-conflict-resolution");
-        assert!(tpl.body.contains("resolution"));
-    }
-
-    #[test]
     fn registry_contains_v1_worker_templates() {
         let registry = PromptRegistry::v1();
         for state in [
             WorkerState::Understand,
             WorkerState::Planning,
             WorkerState::Doing,
-            WorkerState::Gitting,
             WorkerState::Reviewing,
             WorkerState::Merging,
         ] {
             let tpl = registry.template_for(state).expect("template exists");
             assert!(tpl.body.contains("<<GARDENER_JSON_START>>"));
         }
+    }
+
+    #[test]
+    fn merge_remediation_template_prohibits_git_commands() {
+        let registry = PromptRegistry::v1();
+        let tpl = registry
+            .template_for(WorkerState::Merging)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-merge-remediation");
+        assert!(tpl.body.contains("do not run git/gh commands"));
+    }
+
+    #[test]
+    fn gitting_remediation_template_prohibits_git_moves() {
+        let registry = PromptRegistry::v1();
+        let tpl = registry
+            .template_for(WorkerState::Gitting)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-gitting-remediation");
+        assert!(tpl.body.contains("Do NOT run git push, git commit"));
+        assert!(tpl.body.contains("git status"));
+        assert!(!tpl.body.contains("<<GARDENER_JSON_START>>"));
+        assert!(!tpl.body.contains("Output schema must be JSON envelope"));
     }
 }

@@ -171,37 +171,51 @@ impl<'a> GitClient<'a> {
             }),
         );
 
-        let rebase = self.run(["git", "pull", "--rebase", "origin", branch])?;
-        if rebase.exit_code != 0 {
+        if !is_non_fast_forward_push(&first.stderr) {
             append_run_log(
                 "error",
-                "git.push.rebase_failed",
+                "git.push.failed_unrecoverable_first_attempt",
                 json!({
                     "cwd": self.cwd.display().to_string(),
                     "branch": branch,
-                    "exit_code": rebase.exit_code,
-                    "stderr": rebase.stderr
+                    "exit_code": first.exit_code,
+                    "stderr": first.stderr
                 }),
             );
-            return Err(GardenerError::Process(
-                "push/rebase recovery failed".to_string(),
-            ));
+            return Err(GardenerError::Process("push failed".to_string()));
         }
 
         append_run_log(
             "info",
-            "git.push.rebase_succeeded",
+            "git.push.non_fast_forward_detected",
             json!({
                 "cwd": self.cwd.display().to_string(),
                 "branch": branch
             }),
         );
 
-        let second = self.run(["git", "push", "origin", branch])?;
+        let fetch = self.run(["git", "fetch", "origin", branch])?;
+        if fetch.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.push.force_with_lease.fetch_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "branch": branch,
+                    "exit_code": fetch.exit_code,
+                    "stderr": fetch.stderr
+                }),
+            );
+            return Err(GardenerError::Process(
+                "push/force-with-lease recovery failed".to_string(),
+            ));
+        }
+
+        let second = self.run(["git", "push", "--force-with-lease", "origin", branch])?;
         if second.exit_code != 0 {
             append_run_log(
                 "error",
-                "git.push.failed_after_rebase",
+                "git.push.force_with_lease.failed",
                 json!({
                     "cwd": self.cwd.display().to_string(),
                     "branch": branch,
@@ -210,13 +224,13 @@ impl<'a> GitClient<'a> {
                 }),
             );
             return Err(GardenerError::Process(
-                "push failed after rebase recovery".to_string(),
+                "push/force-with-lease recovery failed".to_string(),
             ));
         }
 
         append_run_log(
             "info",
-            "git.push.succeeded",
+            "git.push.force_with_lease.succeeded",
             json!({
                 "cwd": self.cwd.display().to_string(),
                 "branch": branch,
@@ -278,6 +292,65 @@ impl<'a> GitClient<'a> {
             }),
         );
         Ok(())
+    }
+
+    pub fn try_merge_from_main(&self) -> Result<RebaseResult, GardenerError> {
+        append_run_log(
+            "info",
+            "git.merge_from_main.started",
+            json!({ "cwd": self.cwd.display().to_string() }),
+        );
+        let fetch = self.run(["git", "fetch", "origin", "main"])?;
+        if fetch.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.merge_from_main.fetch_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": fetch.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git fetch origin main failed: {}",
+                fetch.stderr
+            )));
+        }
+        let merge = self.run(["git", "merge", "origin/main", "--no-edit"])?;
+        if merge.exit_code == 0 {
+            append_run_log(
+                "info",
+                "git.merge_from_main.clean",
+                json!({ "cwd": self.cwd.display().to_string() }),
+            );
+            return Ok(RebaseResult::Clean);
+        }
+        let stderr = merge.stderr.clone();
+        if is_merge_conflict(&stderr) {
+            append_run_log(
+                "warn",
+                "git.merge_from_main.conflict",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": stderr
+                }),
+            );
+            // Leave merge in progress — agent resolves markers, commit_all completes it
+            return Ok(RebaseResult::Conflict { stderr });
+        }
+        // Unknown error — abort the merge and return Err
+        append_run_log(
+            "error",
+            "git.merge_from_main.failed",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "exit_code": merge.exit_code,
+                "stderr": stderr
+            }),
+        );
+        let _ = self.run(["git", "merge", "--abort"]);
+        Err(GardenerError::Process(format!(
+            "git merge origin/main failed: {stderr}"
+        )))
     }
 
     pub fn rebase_onto_local(&self, base: &str) -> Result<(), GardenerError> {
@@ -514,6 +587,18 @@ fn is_rebase_conflict(stderr: &str) -> bool {
     lower.contains("conflict") || lower.contains("unmerged files")
 }
 
+fn is_merge_conflict(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("conflict") || lower.contains("unmerged files")
+}
+
+fn is_non_fast_forward_push(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("non-fast-forward")
+        || lower.contains("tip of your current branch is behind")
+        || lower.contains("failed to push some refs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::GitClient;
@@ -521,12 +606,12 @@ mod tests {
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
 
     #[test]
-    fn push_rebase_recovery_path() {
+    fn push_force_with_lease_recovery_path() {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
             exit_code: 1,
             stdout: String::new(),
-            stderr: "push failed".to_string(),
+            stderr: "non-fast-forward".to_string(),
         }));
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
@@ -542,6 +627,62 @@ mod tests {
         GitClient::new(&runner, "/repo")
             .push_with_rebase_recovery("feature/x")
             .expect("recovered");
+        let spawned = runner.spawned();
+        assert_eq!(spawned[1].args, vec!["fetch", "origin", "feature/x"]);
+        assert_eq!(
+            spawned[2].args,
+            vec!["push", "--force-with-lease", "origin", "feature/x"]
+        );
+    }
+
+    #[test]
+    fn push_recovery_bails_on_non_recoverable_error() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "Permission denied (publickey).".to_string(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .push_with_rebase_recovery("feature/x")
+            .expect_err("should not attempt recovery");
+        assert!(err.to_string().contains("push failed"));
+        assert_eq!(runner.spawned().len(), 1);
+    }
+
+    #[test]
+    fn push_recovery_handles_logged_non_fast_forward_case_without_rebase() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "To github.com:carterbs/gardener.git\n ! [rejected]        gardener/worker-3-manual-quality-e9fccfb4844348f6 -> gardener/worker-3-manual-quality-e9fccfb4844348f6 (non-fast-forward)\nerror: failed to push some refs to 'github.com:carterbs/gardener.git'\nhint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart. If you want to integrate the remote changes,\nhint: use 'git pull' before pushing again.\n".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        GitClient::new(&runner, "/repo")
+            .push_with_rebase_recovery("gardener/worker-3-manual-quality-e9fccfb4844348f6")
+            .expect("recovered from logged non-fast-forward");
+        let spawned = runner.spawned();
+        let joined = spawned
+            .iter()
+            .flat_map(|cmd| cmd.args.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !joined.contains("pull --rebase"),
+            "recovery must not attempt pull --rebase: {joined}"
+        );
     }
 
     #[test]
@@ -692,11 +833,9 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
-        assert!(
-            GitClient::new(&runner, "/repo")
-                .verify_ancestor("abc", "main")
-                .expect("ancestor"),
-        );
+        assert!(GitClient::new(&runner, "/repo")
+            .verify_ancestor("abc", "main")
+            .expect("ancestor"),);
 
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
@@ -704,11 +843,9 @@ mod tests {
             stdout: String::new(),
             stderr: "not ancestor".to_string(),
         }));
-        assert!(
-            !GitClient::new(&runner, "/repo")
-                .verify_ancestor("abc", "main")
-                .expect("ancestor"),
-        );
+        assert!(!GitClient::new(&runner, "/repo")
+            .verify_ancestor("abc", "main")
+            .expect("ancestor"),);
     }
 
     #[test]
@@ -760,7 +897,92 @@ mod tests {
         let err = GitClient::new(&runner, "/repo")
             .run_validation_command("npm run validate")
             .expect_err("validation failed");
-        assert!(err.to_string().contains("post-merge validation command failed"));
+        assert!(err
+            .to_string()
+            .contains("post-merge validation command failed"));
+    }
+
+    #[test]
+    fn try_merge_from_main_clean() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // merge
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let result = GitClient::new(&runner, "/repo")
+            .try_merge_from_main()
+            .expect("merge from main should succeed");
+        assert_eq!(result, RebaseResult::Clean);
+        let spawned = runner.spawned();
+        assert!(spawned[0].args.contains(&"fetch".to_string()));
+        assert!(spawned[1].args.contains(&"merge".to_string()));
+        assert!(spawned[1].args.contains(&"origin/main".to_string()));
+    }
+
+    #[test]
+    fn try_merge_from_main_conflict_leaves_merge_in_progress() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // merge fails with conflict
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "CONFLICT (content): Merge conflict in src/lib.rs".to_string(),
+        }));
+        let result = GitClient::new(&runner, "/repo")
+            .try_merge_from_main()
+            .expect("should return conflict, not error");
+        match result {
+            RebaseResult::Conflict { stderr } => {
+                assert!(stderr.contains("CONFLICT"));
+            }
+            _ => panic!("expected conflict result"),
+        }
+        // Should NOT have called merge --abort
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 2, "should not abort on conflict");
+    }
+
+    #[test]
+    fn try_merge_from_main_unknown_error_aborts() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // merge fails with non-conflict error
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "fatal: refusing to merge unrelated histories".to_string(),
+        }));
+        // merge --abort
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .try_merge_from_main()
+            .expect_err("should error on unknown failure");
+        assert!(err.to_string().contains("git merge origin/main failed"));
+        let spawned = runner.spawned();
+        assert!(spawned[2].args.contains(&"--abort".to_string()));
     }
 
     #[test]

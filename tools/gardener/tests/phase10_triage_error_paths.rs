@@ -2,7 +2,7 @@ use gardener::config::AppConfig;
 use gardener::errors::GardenerError;
 use gardener::repo_intelligence::read_profile;
 use gardener::runtime::{
-    FakeClock, FakeFileSystem, FakeProcessRunner, FileSystem, FakeTerminal, ProcessOutput,
+    FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput,
     ProductionRuntime, Terminal,
 };
 use gardener::triage::{profile_path, run_triage, triage_needed, TriageDecision};
@@ -12,17 +12,15 @@ use gardener::types::{AgentKind, RuntimeScope};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-struct WriteFailingTerminal {
-    is_tty: bool,
-}
+struct WriteFailingTerminal;
 
 impl Terminal for WriteFailingTerminal {
     fn stdin_is_tty(&self) -> bool {
-        self.is_tty
+        true
     }
 
     fn draw(&self, _frame: &str) -> Result<(), GardenerError> {
-        Ok(())
+        Err(GardenerError::Io("terminal write failed".to_string()))
     }
 
     fn write_line(&self, _line: &str) -> Result<(), GardenerError> {
@@ -50,8 +48,10 @@ fn default_profile_path() -> PathBuf {
 }
 
 fn profile_with_head_sha(head_sha: &str) -> String {
-    include_str!("fixtures/triage/expected-profiles/phase03-profile.toml")
-        .replace("head_sha = \"unknown\"", &format!("head_sha = \"{head_sha}\""))
+    include_str!("fixtures/triage/expected-profiles/phase03-profile.toml").replace(
+        "head_sha = \"unknown\"",
+        &format!("head_sha = \"{head_sha}\""),
+    )
 }
 
 fn discovery_stdout() -> String {
@@ -68,10 +68,7 @@ fn triage_needed_unknown_sha_profile_is_never_retriggered() {
         stderr: "boom\n".to_string(),
     }));
 
-    let fs = FakeFileSystem::with_file(
-        default_profile_path(),
-        profile_with_head_sha("unknown"),
-    );
+    let fs = FakeFileSystem::with_file(default_profile_path(), profile_with_head_sha("unknown"));
     let runtime = ProductionRuntime {
         clock: Arc::new(FakeClock::default()),
         file_system: Arc::new(fs),
@@ -100,10 +97,7 @@ fn triage_needed_git_revparse_failure_uses_unknown_sha() {
         stderr: "rev-list failed\n".to_string(),
     }));
 
-    let fs = FakeFileSystem::with_file(
-        default_profile_path(),
-        profile_with_head_sha("abc123"),
-    );
+    let fs = FakeFileSystem::with_file(default_profile_path(), profile_with_head_sha("abc123"));
     let runtime = ProductionRuntime {
         clock: Arc::new(FakeClock::default()),
         file_system: Arc::new(fs),
@@ -133,10 +127,7 @@ fn triage_needed_commits_since_failure_defaults_not_stale() {
         stderr: "unknown revision\n".to_string(),
     }));
 
-    let fs = FakeFileSystem::with_file(
-        default_profile_path(),
-        profile_with_head_sha("abc123"),
-    );
+    let fs = FakeFileSystem::with_file(default_profile_path(), profile_with_head_sha("abc123"));
     let runtime = ProductionRuntime {
         clock: Arc::new(FakeClock::default()),
         file_system: Arc::new(fs),
@@ -162,11 +153,8 @@ fn profile_with_schema_version_99_is_silently_accepted() {
         process_runner: Arc::new(FakeProcessRunner::default()),
         terminal: Arc::new(FakeTerminal::new(true)),
     };
-    let profile = read_profile(
-        runtime.file_system.as_ref(),
-        &default_profile_path(),
-    )
-    .expect("profile parse should succeed");
+    let profile = read_profile(runtime.file_system.as_ref(), &default_profile_path())
+        .expect("profile parse should succeed");
     assert_eq!(profile.meta.schema_version, 99);
 }
 
@@ -189,7 +177,9 @@ fn detect_agent_both_signals_defaults_to_codex() {
 fn run_discovery_process_error_can_be_fallback_to_unknown() {
     let scope = default_scope();
     let process = FakeProcessRunner::default();
-    process.push_response(Err(GardenerError::Process("agent process died".to_string())));
+    process.push_response(Err(GardenerError::Process(
+        "agent process died".to_string(),
+    )));
 
     let discovered = run_discovery(&process, &scope, AgentKind::Codex, "gpt-5-codex", 12);
     let fallback = discovered.unwrap_or_else(|_| DiscoveryAssessment::unknown());
@@ -243,7 +233,7 @@ fn discovery_lost_when_interview_write_line_fails() {
         clock: Arc::new(FakeClock::default()),
         file_system: Arc::new(FakeFileSystem::default()),
         process_runner: Arc::new(process),
-        terminal: Arc::new(WriteFailingTerminal { is_tty: true }),
+        terminal: Arc::new(WriteFailingTerminal),
     };
     let cfg = default_config();
     let env = EnvMap::new();
@@ -256,6 +246,7 @@ fn discovery_lost_when_interview_write_line_fails() {
 }
 
 #[test]
+#[ignore] // launches real TUI wizard via run_repo_health_wizard
 fn unknown_sha_written_to_profile_after_git_failure() {
     // B1: head lookup failure is persisted as "unknown" and still writes a profile.
     let scope = default_scope();

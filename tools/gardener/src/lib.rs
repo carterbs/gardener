@@ -22,11 +22,11 @@ pub mod prompt_knowledge;
 pub mod prompt_registry;
 pub mod prompts;
 pub mod protocol;
-pub mod replay;
 pub mod quality_domain_catalog;
 pub mod quality_evidence;
 pub mod quality_grades;
 pub mod quality_scoring;
+pub mod replay;
 pub mod repo_intelligence;
 pub mod runtime;
 pub mod seed_runner;
@@ -99,6 +99,8 @@ pub struct Cli {
     pub triage_only: bool,
     #[arg(long, default_value_t = false)]
     pub sync_only: bool,
+    #[arg(long, default_value_t = false)]
+    pub force_seed_backlog: bool,
     /// Write a JSONL session recording to this path (also via GARDENER_RECORD_SESSION env var).
     #[arg(long = "record-session")]
     pub record_session: Option<std::path::PathBuf>,
@@ -183,7 +185,8 @@ pub fn run_with_runtime(
                 "task_override": cli.task,
                 "target": cli.target,
                 "triage_only": cli.triage_only,
-                "sync_only": cli.sync_only
+                "sync_only": cli.sync_only,
+                "force_seed_backlog": cli.force_seed_backlog
             }),
         );
 
@@ -224,21 +227,24 @@ pub fn run_with_runtime(
         )?;
         set_run_working_dir(&scope.working_dir);
         // Initialize session recorder if --record-session or GARDENER_RECORD_SESSION is set
-        let record_path = cli
-            .record_session
-            .clone()
-            .or_else(|| std::env::var("GARDENER_RECORD_SESSION").ok().map(std::path::PathBuf::from));
+        let record_path = cli.record_session.clone().or_else(|| {
+            std::env::var("GARDENER_RECORD_SESSION")
+                .ok()
+                .map(std::path::PathBuf::from)
+        });
         if let Some(ref path) = record_path {
             replay::recorder::init_session_recorder(path)?;
-            emit_record(RecordEntry::SessionStart(replay::recording::SessionStartRecord {
-                run_id: run_id.clone(),
-                recorded_at_unix_ns: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(0),
-                gardener_version: env!("CARGO_PKG_VERSION").to_string(),
-                config_snapshot: serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null),
-            }));
+            emit_record(RecordEntry::SessionStart(
+                replay::recording::SessionStartRecord {
+                    run_id: run_id.clone(),
+                    recorded_at_unix_ns: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0),
+                    gardener_version: env!("CARGO_PKG_VERSION").to_string(),
+                    config_snapshot: serde_json::to_value(&cfg).unwrap_or(serde_json::Value::Null),
+                },
+            ));
             append_run_log(
                 "info",
                 "session.recording.started",
@@ -317,21 +323,39 @@ pub fn run_with_runtime(
         if cli.backlog_only {
             runtime.terminal.write_line("phase3 backlog-only")?;
             let mut cfg_for_startup = cfg;
-            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, true)?;
+            let _ = run_startup_audits(
+                runtime,
+                &mut cfg_for_startup,
+                &startup.scope,
+                true,
+                cli.force_seed_backlog,
+            )?;
             return Ok(0);
         }
 
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
             let mut cfg_for_startup = cfg;
-            let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+            let _ = run_startup_audits(
+                runtime,
+                &mut cfg_for_startup,
+                &startup.scope,
+                false,
+                false,
+            )?;
             return Ok(0);
         }
 
         if cli.sync_only {
             let mut cfg_for_startup = cfg;
             if !cfg_for_startup.execution.test_mode {
-                let _ = run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false)?;
+                let _ = run_startup_audits(
+                    runtime,
+                    &mut cfg_for_startup,
+                    &startup.scope,
+                    false,
+                    false,
+                )?;
             }
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let snapshot_path = startup
@@ -439,6 +463,7 @@ pub fn run_with_runtime(
                     &mut cfg_for_startup,
                     &startup.scope,
                     true,
+                    cli.force_seed_backlog,
                     |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
                 )?;
             }
@@ -491,10 +516,12 @@ pub fn run_with_runtime(
                 ))?;
             }
             if record_path.is_some() {
-                emit_record(RecordEntry::SessionEnd(replay::recording::SessionEndRecord {
-                    completed_tasks: completed as u64,
-                    total_duration_ns: 0, // wall-clock timing not tracked at this layer
-                }));
+                emit_record(RecordEntry::SessionEnd(
+                    replay::recording::SessionEndRecord {
+                        completed_tasks: completed as u64,
+                        total_duration_ns: 0, // wall-clock timing not tracked at this layer
+                    },
+                ));
                 replay::recorder::clear_session_recorder();
                 append_run_log("info", "session.recording.finished", json!({}));
             }
@@ -666,7 +693,9 @@ mod tests {
     use super::{config, repo_intelligence, runtime, triage_discovery};
     use std::path::Path;
 
-    fn sample_profile(preferred_parallelism: Option<u32>) -> repo_intelligence::RepoIntelligenceProfile {
+    fn sample_profile(
+        preferred_parallelism: Option<u32>,
+    ) -> repo_intelligence::RepoIntelligenceProfile {
         let clock = runtime::FakeClock::default();
         let mut profile = repo_intelligence::build_profile(repo_intelligence::BuildProfileInput {
             clock: &clock,

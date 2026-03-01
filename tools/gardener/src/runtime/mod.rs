@@ -1094,10 +1094,9 @@ impl ProcessRunner for FakeProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_and_flush_lines, flush_trailing_line, Clock, FakeClock, FileSystem, FakeFileSystem,
-        FakeProcessRunner, FakeTerminal, is_copy_shortcut_key, ProcessOutput, ProcessRequest,
-        ProcessRunner,
-        Terminal,
+        append_and_flush_lines, flush_trailing_line, is_copy_shortcut_key, Clock, FakeClock,
+        FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput, ProcessRequest,
+        ProcessRunner, Terminal,
     };
     use crate::errors::GardenerError;
     use std::path::PathBuf;
@@ -1117,11 +1116,9 @@ mod tests {
         append_and_flush_lines(&mut buffer, b"alpha\nbeta\n", &mut |line| {
             lines.push(line.to_string())
         });
-        append_and_flush_lines(
-            &mut buffer,
-            b"gamma\n",
-            &mut |line| lines.push(line.to_string()),
-        );
+        append_and_flush_lines(&mut buffer, b"gamma\n", &mut |line| {
+            lines.push(line.to_string())
+        });
         assert_eq!(lines, vec!["alpha", "alpha\nbeta", "gamma"]);
         assert!(buffer.is_empty());
     }
@@ -1144,8 +1141,14 @@ mod tests {
         clock
             .sleep_until(SystemTime::UNIX_EPOCH + Duration::from_secs(15))
             .expect("sleep");
-        assert_eq!(clock.now(), SystemTime::UNIX_EPOCH + Duration::from_secs(15));
-        assert_eq!(clock.sleeps(), vec![SystemTime::UNIX_EPOCH + Duration::from_secs(15)]);
+        assert_eq!(
+            clock.now(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(15)
+        );
+        assert_eq!(
+            clock.sleeps(),
+            vec![SystemTime::UNIX_EPOCH + Duration::from_secs(15)]
+        );
     }
 
     #[test]
@@ -1166,12 +1169,8 @@ mod tests {
     #[test]
     fn fake_terminal_records_draw_calls() {
         let terminal = FakeTerminal::new(true);
-        terminal
-            .draw("frame")
-            .expect("draw");
-        terminal
-            .write_line("line")
-            .expect("write");
+        terminal.draw("frame").expect("draw");
+        terminal.write_line("line").expect("write");
         terminal.copy_to_clipboard("payload").expect("clipboard");
         assert_eq!(terminal.drawn_frames(), vec!["frame".to_string()]);
         assert_eq!(terminal.written_lines(), vec!["line".to_string()]);

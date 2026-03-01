@@ -1,4 +1,5 @@
 .cache/
+.gardener/
 .DS_STORE
 .claude/worktrees/
 .worktrees/

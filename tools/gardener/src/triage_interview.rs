@@ -196,18 +196,13 @@ mod tests {
     #[test]
     fn non_tty_path_formats_read_only_sections() {
         let terminal = FakeTerminal::new(false);
-        let result = run_interview(
-            &terminal,
-            &discovery("B"),
-            4,
-            "cargo test --all-targets",
-        )
-        .expect("interview");
+        let result = run_interview(&terminal, &discovery("B"), 4, "cargo test --all-targets")
+            .expect("interview");
 
         assert_eq!(result.preferred_parallelism, Some(4));
         assert_eq!(result.validation_command, "cargo test --all-targets");
         assert_eq!(result.additional_context, String::new());
-        assert_eq!(result.external_docs_accessible, true);
+        assert!(result.external_docs_accessible);
         assert_eq!(result.agent_steering_correction, "B: agent");
     }
 }

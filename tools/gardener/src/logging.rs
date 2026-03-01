@@ -150,7 +150,20 @@ pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
     append_run_log_nolock(level, event_type, payload);
 }
 
+/// Like `append_run_log` but skips the 4 KB payload truncation.
+/// Use for large payloads that must be logged in full (e.g. rendered prompts).
+pub fn append_run_log_untruncated(level: &str, event_type: &str, payload: Value) {
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
+    append_run_log_inner(level, event_type, payload, false);
+}
+
 fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
+    append_run_log_inner(level, event_type, payload, true);
+}
+
+fn append_run_log_inner(level: &str, event_type: &str, payload: Value, truncate: bool) {
     let logger = {
         let logger_slot = run_logger_slot().lock().expect("run logger lock");
         logger_slot.clone()
@@ -166,9 +179,13 @@ fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
 
     let ts_ns = now_unix_nanos();
     let (severity_text, severity_number) = to_otel_severity(level);
-    let truncated_payload = truncate_json(payload, logger.max_payload_bytes);
+    let final_payload = if truncate {
+        truncate_json(payload, logger.max_payload_bytes)
+    } else {
+        payload
+    };
     let payload_string =
-        serde_json::to_string(&truncated_payload).unwrap_or_else(|_| "\"<encode-error>\"".into());
+        serde_json::to_string(&final_payload).unwrap_or_else(|_| "\"<encode-error>\"".into());
 
     let line = json!({
         "resource": {
@@ -202,7 +219,7 @@ fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
             "flags": 1
         },
         "event_type": event_type,
-        "payload": truncated_payload
+        "payload": final_payload
     });
 
     let _ = logger.append_json(&line);
@@ -403,6 +420,7 @@ fn recent_worker_state_events_nolock(
     from_line: usize,
     max_lines: usize,
 ) -> Vec<(usize, String, String)> {
+    let _ = structured_fallback_line("logging", "recent_worker_state_events_nolock", "starting");
     if max_lines == 0 {
         return Vec::new();
     }
@@ -429,7 +447,7 @@ fn recent_worker_state_events_nolock(
             .get("event_type")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if event_type != "agent.turn.started" {
+        if event_type != "worker.activity.state_changed" {
             continue;
         }
 
@@ -769,15 +787,15 @@ mod tests {
     }
 
     #[test]
-    fn recent_worker_state_events_collects_turn_start_events() {
+    fn recent_worker_state_events_collects_activity_state_events() {
         let _guard = with_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("run.jsonl");
         init_run_logger_nolock(&path, dir.path());
         let log_lines = [
-            r#"{"event_type":"agent.turn.started","payload":{"worker_id":"worker-1","state":"understand"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-1","state":"understand"}}"#,
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"ToolCall","command":"ignored"}}"#,
-            r#"{"event_type":"agent.turn.started","payload":{"worker_id":"worker-2","state":"gitting"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-2","state":"merge_lock_waiting"}}"#,
         ];
         std::fs::write(&path, log_lines.join("\n")).expect("seed log");
 
@@ -788,7 +806,7 @@ mod tests {
         assert_eq!(lines[0].2, "understand");
         assert_eq!(lines[1].0, 2);
         assert_eq!(lines[1].1, "worker-2");
-        assert_eq!(lines[1].2, "gitting");
+        assert_eq!(lines[1].2, "merge_lock_waiting");
         clear_run_logger_nolock();
     }
 

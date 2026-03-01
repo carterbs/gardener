@@ -72,7 +72,7 @@ stale_if_head_commit_differs = true
     )
     .expect("config");
 
-    let summary = run_startup_audits(&runtime, &mut cfg, &scope, false).expect("startup");
+    let summary = run_startup_audits(&runtime, &mut cfg, &scope, false, false).expect("startup");
     assert!(summary.quality_written);
     assert!(runtime.file_system.exists(Path::new("/repo/quality.md")));
 }
@@ -113,6 +113,7 @@ stale_if_head_commit_differs = true
     )
     .expect("config");
 
-    let err = run_startup_audits(&runtime, &mut cfg, &scope, false).expect_err("missing profile");
+    let err = run_startup_audits(&runtime, &mut cfg, &scope, false, false)
+        .expect_err("missing profile");
     assert!(format!("{err}").contains("No repo intelligence profile found"));
 }

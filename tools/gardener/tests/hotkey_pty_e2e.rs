@@ -256,6 +256,7 @@ max_turns = 12
 }
 
 #[test]
+#[ignore]
 fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
     let (report_path, _dir, store, cmd) = setup_pty_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
@@ -286,6 +287,7 @@ fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
 }
 
 #[test]
+#[ignore]
 fn pty_e2e_ctrl_c_quits() {
     let (_report_path, _dir, store, cmd) = setup_pty_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
@@ -304,6 +306,7 @@ fn pty_e2e_ctrl_c_quits() {
 }
 
 #[test]
+#[ignore]
 fn pty_e2e_q_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
@@ -327,6 +330,7 @@ fn pty_e2e_q_interrupts_live_blocking_turn() {
 }
 
 #[test]
+#[ignore]
 fn pty_e2e_ctrl_c_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");

@@ -130,8 +130,16 @@ pub fn run_startup_audits(
     cfg: &mut AppConfig,
     scope: &RuntimeScope,
     run_seeding: bool,
+    force_seed_backlog: bool,
 ) -> Result<StartupSummary, GardenerError> {
-    run_startup_audits_with_progress(runtime, cfg, scope, run_seeding, |_detail| Ok(()))
+    run_startup_audits_with_progress(
+        runtime,
+        cfg,
+        scope,
+        run_seeding,
+        force_seed_backlog,
+        |_detail| Ok(()),
+    )
 }
 
 pub fn run_startup_audits_with_progress<F>(
@@ -139,6 +147,7 @@ pub fn run_startup_audits_with_progress<F>(
     cfg: &mut AppConfig,
     scope: &RuntimeScope,
     run_seeding: bool,
+    force_seed_backlog: bool,
     mut progress: F,
 ) -> Result<StartupSummary, GardenerError>
 where
@@ -150,6 +159,7 @@ where
         "startup.audits.started",
         json!({
             "run_seeding": run_seeding,
+            "force_seed_backlog": force_seed_backlog,
             "profile_loc": profile_loc.display().to_string(),
             "working_dir": scope.working_dir.display().to_string(),
         }),
@@ -252,9 +262,9 @@ where
             cwd: Some(scope.working_dir.clone()),
         })?;
         if out.exit_code != 0 {
-        append_run_log(
-            "warn",
-            "startup.validation.failed",
+            append_run_log(
+                "warn",
+                "startup.validation.failed",
                 json!({
                     "command": command,
                     "exit_code": out.exit_code,
@@ -264,9 +274,9 @@ where
                 .terminal
                 .write_line("WARN startup validation failed; enqueueing P0 recovery task")?;
             // Safety: store is Some because validate_on_boot implies needs_store.
-            let store = store.as_ref().ok_or_else(|| {
-                GardenerError::Database("store not initialized".to_string())
-            })?;
+            let store = store
+                .as_ref()
+                .ok_or_else(|| GardenerError::Database("store not initialized".to_string()))?;
             store.upsert_task(NewTask {
                 kind: TaskKind::Maintenance,
                 title: "Recovery: startup validation failed".to_string(),
@@ -299,7 +309,12 @@ where
     } else {
         0
     };
-    let will_seed = should_seed_backlog(run_seeding, cfg.execution.test_mode, existing_active_backlog_count);
+    let will_seed = should_seed_backlog(
+        run_seeding,
+        cfg.execution.test_mode,
+        existing_active_backlog_count,
+        force_seed_backlog,
+    );
     append_run_log(
         "info",
         "startup.seeding_gate.checked",
@@ -307,6 +322,7 @@ where
             "run_seeding": run_seeding,
             "test_mode": cfg.execution.test_mode,
             "existing_active_count": existing_active_backlog_count,
+            "force_seed_backlog": force_seed_backlog,
             "will_seed": will_seed,
         }),
     );
@@ -314,11 +330,12 @@ where
         run_seeding,
         cfg.execution.test_mode,
         existing_active_backlog_count,
+        force_seed_backlog,
     ) {
         // Safety: store is Some because should_seed_backlog requires !test_mode && run_seeding.
-        let store = store.as_ref().ok_or_else(|| {
-            GardenerError::Database("store not initialized".to_string())
-        })?;
+        let store = store
+            .as_ref()
+            .ok_or_else(|| GardenerError::Database("store not initialized".to_string()))?;
         append_run_log(
             "info",
             "startup.seeding.started",
@@ -347,80 +364,57 @@ where
             ))?;
         }
         let seed_generation = seed_generation(store)?;
-        let seeded = match run_seed_with_heartbeat(
+        let mut seeding_error: Option<String> = None;
+        let backlog_snapshot = summarize_active_backlog(store)?;
+        if let Err(err) = run_seed_with_heartbeat(
             runtime,
             scope,
             cfg,
             &profile,
             &quality_doc,
+            &backlog_snapshot,
             &mut progress,
         ) {
-            Ok(tasks) => {
-                append_run_log(
-                    "info",
-                    "startup.seeding.agent_returned",
-                    json!({ "task_count": tasks.len() }),
-                );
-                progress(&format!(
-                    "Seeding agent returned {} candidate task(s)",
-                    tasks.len()
-                ))?;
-                if !runtime.terminal.stdin_is_tty() {
-                    runtime.terminal.write_line(&format!(
-                        "startup backlog seeding: agent returned {} candidate tasks",
-                        tasks.len()
-                    ))?;
-                }
-                tasks
-            }
-            Err(err) => {
-                append_run_log(
-                    "warn",
-                    "startup.seeding.agent_failed",
-                    json!({
-                        "error": err.to_string(),
-                        "fallback_target": fallback_target,
-                    }),
-                );
-                progress(&format!(
-                    "Seeding agent failed ({err}); continuing with fallback task templates"
-                ))?;
-                runtime
-                    .terminal
-                    .write_line(&format!("WARN backlog seeding failed: {err}"))?;
-                Vec::new()
-            }
-            };
-        if !seeded.is_empty() {
             append_run_log(
-                "info",
-                "startup.seeding.persisting",
-                json!({ "task_count": seeded.len(), "source": "seed_runner_v2" }),
+                "warn",
+                "startup.seeding.agent_failed",
+                json!({
+                    "error": err.to_string(),
+                    "fallback_target": fallback_target,
+                }),
             );
             progress(&format!(
-                "Persisting {} seeded task(s) to backlog store",
-                seeded.len()
+                "Seeding agent failed ({err}); checking backlog before fallback"
             ))?;
-            for task in seeded {
-                let scope_key = if task.domain.trim().is_empty() {
-                    profile.agent_readiness.primary_gap.clone()
-                } else {
-                    task.domain
-                };
-                let row = store.upsert_task(NewTask {
-                    kind: TaskKind::QualityGap,
-                    title: task.title,
-                    details: task.details,
-                    rationale: task.rationale,
-                    scope_key,
-                    priority: parse_seed_priority(&task.priority),
-                    source: format!("seed_runner_v2_gen_{seed_generation}"),
-                    related_pr: None,
-                    related_branch: None,
-                })?;
-                if !row.task_id.is_empty() {
-                    seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
-                }
+            runtime
+                .terminal
+                .write_line(&format!("WARN backlog seeding failed: {err}"))?;
+            seeding_error = Some(err.to_string());
+        }
+        let post_seed_active_count = store.count_active_tasks()?;
+        let agent_seeded = post_seed_active_count.saturating_sub(existing_active_backlog_count);
+        if agent_seeded > 0 {
+            append_run_log(
+                "info",
+                "startup.seeding.direct_persisted",
+                json!({
+                    "task_count": agent_seeded,
+                    "source": "seed_runner_v2_direct",
+                    "existing_count": existing_active_backlog_count,
+                    "post_count": post_seed_active_count,
+                }),
+            );
+            progress(&format!(
+                "Seeding agent inserted {} backlog task(s) directly",
+                agent_seeded
+            ))?;
+            seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(agent_seeded);
+            if let Some(err) = seeding_error {
+                append_run_log(
+                    "warn",
+                    "startup.seeding.direct_persisted_after_error",
+                    json!({ "error": err, "task_count": agent_seeded }),
+                );
             }
         } else {
             append_run_log(
@@ -539,7 +533,10 @@ pub fn backup_db_if_exists(path: &Path) -> Result<Option<PathBuf>, GardenerError
     for ext in &["sqlite-wal", "sqlite-shm"] {
         let sidecar = path.with_extension(ext);
         if sidecar.exists() {
-            let sidecar_bak = bak_path.with_extension(format!("bak-{}", ext.strip_prefix("sqlite-").unwrap_or(ext)));
+            let sidecar_bak = bak_path.with_extension(format!(
+                "bak-{}",
+                ext.strip_prefix("sqlite-").unwrap_or(ext)
+            ));
             let _ = std::fs::copy(&sidecar, &sidecar_bak);
         }
     }
@@ -557,8 +554,13 @@ pub fn backup_db_if_exists(path: &Path) -> Result<Option<PathBuf>, GardenerError
     Ok(Some(bak_path))
 }
 
-fn should_seed_backlog(run_seeding: bool, test_mode: bool, existing_backlog_count: usize) -> bool {
-    run_seeding && !test_mode && existing_backlog_count == 0
+fn should_seed_backlog(
+    run_seeding: bool,
+    test_mode: bool,
+    existing_backlog_count: usize,
+    force_seed_backlog: bool,
+) -> bool {
+    run_seeding && !test_mode && (existing_backlog_count == 0 || force_seed_backlog)
 }
 
 fn seed_generation(store: &BacklogStore) -> Result<usize, GardenerError> {
@@ -576,23 +578,15 @@ fn seed_generation(store: &BacklogStore) -> Result<usize, GardenerError> {
     Ok(highest.saturating_add(1))
 }
 
-fn parse_seed_priority(raw: &str) -> Priority {
-    match raw {
-        "P0" => Priority::P0,
-        "P1" => Priority::P1,
-        "P2" => Priority::P2,
-        _ => Priority::P1,
-    }
-}
-
 fn run_seed_with_heartbeat<F>(
     runtime: &ProductionRuntime,
     scope: &RuntimeScope,
     cfg: &AppConfig,
     profile: &crate::repo_intelligence::RepoIntelligenceProfile,
     quality_doc: &str,
+    backlog_snapshot: &str,
     progress: &mut F,
-) -> Result<Vec<crate::seed_runner::SeedTask>, GardenerError>
+) -> Result<(), GardenerError>
 where
     F: FnMut(&str) -> Result<(), GardenerError>,
 {
@@ -606,7 +600,7 @@ where
     );
     enum SeedProgressMessage {
         AgentUpdate(String),
-        Done(Result<Vec<crate::seed_runner::SeedTask>, GardenerError>),
+        Done(Result<(), GardenerError>),
     }
     let (tx, rx) = mpsc::channel::<SeedProgressMessage>();
 
@@ -623,6 +617,7 @@ where
                 cfg,
                 profile,
                 quality_doc,
+                backlog_snapshot,
                 Some(&mut on_event),
             );
             let _ = tx.send(SeedProgressMessage::Done(result));
@@ -669,6 +664,32 @@ where
             }
         }
     })
+}
+
+fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerError> {
+    let mut lines = Vec::new();
+    for task in store.list_tasks()?.into_iter() {
+        if matches!(task.status, crate::backlog_store::TaskStatus::Complete | crate::backlog_store::TaskStatus::Failed) {
+            continue;
+        }
+        let details = task.details.replace('\n', " ").trim().to_string();
+        lines.push(format!(
+            "- [{}] {} ({}) {} :: {}",
+            task.priority.as_str(),
+            task.title,
+            task.scope_key,
+            task.status.as_str(),
+            details
+        ));
+        if lines.len() >= 40 {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        Ok("No active backlog tasks.".to_string())
+    } else {
+        Ok(lines.join("\n"))
+    }
 }
 
 fn summarize_seed_agent_event(event: &AgentEvent) -> Option<String> {
@@ -944,9 +965,8 @@ fn report_stamp_is_stale(
 mod tests {
     use super::{
         backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
-        extract_message_preview, fallback_seed_tasks, parse_seed_priority, quality_stamp_path,
-        report_stamp_is_stale, seed_generation, should_seed_backlog,
-        summarize_seed_agent_event,
+        extract_message_preview, fallback_seed_tasks, quality_stamp_path,
+        report_stamp_is_stale, seed_generation, should_seed_backlog, summarize_seed_agent_event,
     };
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
@@ -980,10 +1000,11 @@ mod tests {
 
     #[test]
     fn seeding_gate_requires_empty_backlog() {
-        assert!(should_seed_backlog(true, false, 0));
-        assert!(!should_seed_backlog(true, false, 1));
-        assert!(!should_seed_backlog(false, false, 0));
-        assert!(!should_seed_backlog(true, true, 0));
+        assert!(should_seed_backlog(true, false, 0, false));
+        assert!(!should_seed_backlog(true, false, 1, false));
+        assert!(should_seed_backlog(true, false, 1, true));
+        assert!(!should_seed_backlog(false, false, 0, true));
+        assert!(!should_seed_backlog(true, true, 0, true));
     }
 
     #[test]
@@ -993,8 +1014,7 @@ mod tests {
 
         // Create a valid SQLite DB via BacklogStore::open, then drop it.
         {
-            let _store =
-                crate::backlog_store::BacklogStore::open(&db).expect("create valid db");
+            let _store = crate::backlog_store::BacklogStore::open(&db).expect("create valid db");
         }
 
         let meta_before = std::fs::metadata(&db).expect("metadata");
@@ -1038,14 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_seed_priority_handles_unknown_values() {
-        assert_eq!(parse_seed_priority("P0"), Priority::P0);
-        assert_eq!(parse_seed_priority("P1"), Priority::P1);
-        assert_eq!(parse_seed_priority("P2"), Priority::P2);
-        assert_eq!(parse_seed_priority("MYSTERY"), Priority::P1);
-    }
-
-    #[test]
     fn fallback_seed_tasks_uses_templates_when_no_risky_rows() {
         let tasks = fallback_seed_tasks(
             "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 92 | B |\n",
@@ -1054,7 +1066,9 @@ mod tests {
             "seed_runner_v2_fallback_gen_4",
         );
         assert_eq!(tasks.len(), 3);
-        assert!(tasks[0].title.contains("Bootstrap backlog for infrastructure #1"));
+        assert!(tasks[0]
+            .title
+            .contains("Bootstrap backlog for infrastructure #1"));
     }
 
     #[test]
@@ -1078,8 +1092,7 @@ mod tests {
     #[test]
     fn seed_generation_uses_max_observed_seed_run() {
         let dir = tempdir().expect("tempdir");
-        let store = BacklogStore::open(dir.path().join("backlog.sqlite"))
-            .expect("open store");
+        let store = BacklogStore::open(dir.path().join("backlog.sqlite")).expect("open store");
         let _ = store.upsert_task(NewTask {
             kind: TaskKind::QualityGap,
             title: "first".into(),
@@ -1143,17 +1156,15 @@ mod tests {
             }),
             Some("Agent session started".to_string())
         );
-        assert!(
-            summarize_seed_agent_event(&AgentEvent {
-                protocol_version: 1,
-                kind: AgentEventKind::ToolCall,
-                raw_type: "item.started".into(),
-                payload: serde_json::json!({"item": {"command":"echo hi"}}),
-            })
-            .as_deref()
-            .expect("tool call preview")
-            .contains("echo hi")
-        );
+        assert!(summarize_seed_agent_event(&AgentEvent {
+            protocol_version: 1,
+            kind: AgentEventKind::ToolCall,
+            raw_type: "item.started".into(),
+            payload: serde_json::json!({"item": {"command":"echo hi"}}),
+        })
+        .as_deref()
+        .expect("tool call preview")
+        .contains("echo hi"));
         assert_eq!(
             summarize_seed_agent_event(&AgentEvent {
                 protocol_version: 1,
@@ -1210,13 +1221,14 @@ mod tests {
 
         let stamp = dir.path().join("report.md.stamp");
         let fs = FakeFileSystem::default();
-        fs.write_string(&stamp, "0")
-            .expect("seed stamp");
+        fs.write_string(&stamp, "0").expect("seed stamp");
         let mut cfg = AppConfig::default();
         cfg.quality_report.stale_after_days = 0;
         cfg.quality_report.stale_if_head_commit_differs = false;
         let runtime = ProductionRuntime {
-            clock: Arc::new(FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000))),
+            clock: Arc::new(FakeClock::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            )),
             file_system: Arc::new(fs),
             process_runner: Arc::new(FakeProcessRunner::default()),
             terminal: Arc::new(FakeTerminal::default()),
@@ -1269,7 +1281,8 @@ mod tests {
             },
         };
         let profile_path = triage::profile_path(&scope, &cfg);
-        fs.write_string(&profile_path, &toml::to_string(&profile).expect("toml")).expect("write profile");
+        fs.write_string(&profile_path, &toml::to_string(&profile).expect("toml"))
+            .expect("write profile");
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
@@ -1277,7 +1290,9 @@ mod tests {
             stderr: String::new(),
         }));
         let runtime = ProductionRuntime {
-            clock: Arc::new(FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000))),
+            clock: Arc::new(FakeClock::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            )),
             file_system: Arc::new(fs),
             process_runner: Arc::new(runner),
             terminal: Arc::new(FakeTerminal::default()),

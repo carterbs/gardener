@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-80}"
+MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
+COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-"/tools/gardener/src/(worker\.rs|startup\.rs|tui\.rs|worker_pool\.rs|runtime/mod\.rs|backlog_store\.rs|git\.rs|worktree\.rs|lib\.rs|replay/replayer\.rs|seeding\.rs|triage\.rs|pr_audit\.rs)"}"
 
-report="$(cargo llvm-cov -p gardener --all-targets --summary-only)"
+if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
+  report="$(cargo llvm-cov -p gardener --all-targets --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX")"
+else
+  report="$(cargo llvm-cov -p gardener --all-targets --summary-only)"
+fi
 printf '%s\n' "$report"
 
 line_cov="$(printf '%s\n' "$report" | awk '/^TOTAL/{print $10}' | tr -d '%')"

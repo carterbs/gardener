@@ -432,7 +432,10 @@ mod tests {
             .expect("missing terminal should synthesize failure");
         assert_eq!(result.terminal, AgentTerminal::Failure);
         assert_eq!(result.payload["type"], "turn.failed");
-        assert_eq!(result.payload["reason"], "missing turn.completed or turn.failed event");
+        assert_eq!(
+            result.payload["reason"],
+            "missing turn.completed or turn.failed event"
+        );
     }
 
     #[test]

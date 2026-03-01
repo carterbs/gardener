@@ -4,7 +4,7 @@ use crate::logging::append_run_log;
 use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
-use crate::seed_runner::{run_legacy_seed_runner_v1_with_events, SeedTask};
+use crate::seed_runner::run_seed_agent_direct_v2_with_events;
 use crate::types::RuntimeScope;
 use serde_json::json;
 use std::fmt::Write as _;
@@ -19,14 +19,17 @@ pub struct SeedPromptContext {
     pub claude_md: String,
     pub docs_listing: String,
     pub quality_risks: String,
+    pub backlog_skill_md: String,
+    pub existing_backlog: String,
 }
 
 pub fn build_seed_prompt(
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
     scope: &RuntimeScope,
+    existing_backlog: &str,
 ) -> String {
-    let context = build_seed_prompt_context(profile, quality_doc, scope);
+    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
     build_seed_prompt_v2(&context)
 }
 
@@ -40,15 +43,14 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
     }
 
     out.push_str("You are the Gardener backlog seeding worker.\n");
-    out.push_str(
-        "Goal: generate precise, high-signal repo work for future agents and reduce measurable quality risk.\n\n",
-    );
+    out.push_str("Goal: research the repository and seed the backlog database directly with 10 actionable tasks.\n");
+    out.push_str("Do not implement code changes. Your output is backlog rows, not a JSON task envelope.\n\n");
 
     out.push_str("System framing\n");
     out.push_str("- Do not invent nonexistent files, architecture, or conventions.\n");
-    out.push_str("- Use AGENTS.md, CLAUDE.md, docs listing, and quality grades as source of truth.\n");
-    out.push_str("- Emit tasks that can be picked up immediately by a runtime worker without additional context assumptions.\n");
-    out.push_str("- Prefer changes that improve repository legibility, automation, and reliability.\n\n");
+    out.push_str("- Use AGENTS.md, CLAUDE.md, docs listing, quality grades, and codex article as source of truth.\n");
+    out.push_str("- Add tasks that can be picked up immediately by runtime workers.\n");
+    out.push_str("- Prefer work that improves repository legibility, automation, and reliability.\n\n");
 
     out.push_str("Inputs\n");
     out.push_str(&format!(
@@ -80,41 +82,41 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
         out.push_str(&context.docs_listing);
     }
     out.push('\n');
+    out.push_str("4) docs/references/codex-agent-team-article.md\n");
+    out.push_str("Read this file directly before writing tasks.\n\n");
+
+    out.push_str("Backlog DB skill reference (.codex/skills/backlog-db/SKILL.md)\n");
+    if context.backlog_skill_md.is_empty() {
+        out.push_str("No backlog-db skill file found.\n");
+    } else {
+        out.push_str(&context.backlog_skill_md);
+        out.push('\n');
+    }
+    out.push_str("Existing active backlog snapshot\n");
+    out.push_str(&context.existing_backlog);
+    out.push_str("\n\n");
 
     out.push_str("Task contract\n");
-    out.push_str(
-        "Return exactly 10 tasks in one JSON payload. Prefer a practical mix of immediate fixes and cleanup debt.\n",
-    );
-    out.push_str("- Each task must be in the exact format listed in Output contract.\n");
+    out.push_str("Create exactly 10 tasks in the backlog DB. Prefer a practical mix of immediate fixes and cleanup debt.\n");
     out.push_str("- At least 2 tasks should map to primary_gap.\n");
     out.push_str("- At least 2 tasks should be cleanup/debt reduction tasks.\n");
     out.push_str("- priority must be one of P0, P1, P2.\n");
     out.push_str("- domain should be concrete and align to discovered file families.\n");
     out.push_str("- rationale should state the immediate quality signal and why now.\n\n");
 
-    out.push_str("Output contract\n");
-    out.push_str(
-        "Respond with strict JSON only. Top-level keys: schema_version, state, payload.\n",
-    );
-    out.push_str("schema_version must be 1.\n");
-    out.push_str("state must be seeding.\n");
-    out.push_str("payload.tasks is an array of SeedTask objects.\n");
-    out.push_str(
-        "Each object must include: title, details, rationale, domain, priority.\n\n",
-    );
-
-    out.push_str("SeedTask schema\n");
-    out.push_str("- title: concise actionable sentence\n");
-    out.push_str("- details: 1-3 sentence implementation scope and expected outcome\n");
-    out.push_str("- rationale: 1-2 sentence why this task improves readiness/quality now\n");
-    out.push_str("- domain: one of triage, backlog, seeding, worker-pool, agent-adapters, tui, quality-grades, startup, git-integration, prompts, learning, infrastructure\n");
-    out.push_str("- priority: P0|P1|P2\n\n");
-
-    out.push_str("Example (format only; do not copy text)\n");
-    out.push_str(
-        r#"{"schema_version":1,"state":"seeding","payload":{"tasks":[{"title":"Add integration coverage for startup seeding fallback","details":"Identify seeding edge cases and add regression tests around fallback trigger conditions.","rationale":"This reduces reseed risk and improves startup reliability.","domain":"startup","priority":"P1"}]}}"#,
-    );
-    out.push('\n');
+    out.push_str("Execution steps\n");
+    out.push_str("1. Read docs/quality-grades.md, AGENTS.md, docs/conventions/, and docs/references/codex-agent-team-article.md.\n");
+    out.push_str("2. Inspect docs/ and code to identify concrete, non-duplicate work.\n");
+    out.push_str("3. Run ./scripts/backlog-db.sh list before writes to see current rows.\n");
+    out.push_str("4. For each new task, run ./scripts/backlog-db.sh add with:\n");
+    out.push_str("   --kind quality_gap\n");
+    out.push_str("   --priority P0|P1|P2\n");
+    out.push_str("   --scope <domain>\n");
+    out.push_str("   --source seed_runner_v2_direct\n");
+    out.push_str("   --title <title>\n");
+    out.push_str("   --details <details + rationale in one concise paragraph>\n");
+    out.push_str("5. Insert exactly 10 new tasks, then run ./scripts/backlog-db.sh list to verify.\n");
+    out.push_str("6. Final response should be plain text summary only (no JSON envelope).\n\n");
 
     out.push_str("\nQuality doc (truncated for prompt budget)\n");
     out.push_str(&context.quality_doc);
@@ -128,8 +130,17 @@ pub fn seed_backlog_if_needed(
     cfg: &AppConfig,
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
-) -> Result<Vec<SeedTask>, GardenerError> {
-    seed_backlog_if_needed_with_events(process_runner, scope, cfg, profile, quality_doc, None)
+    existing_backlog: &str,
+) -> Result<(), GardenerError> {
+    seed_backlog_if_needed_with_events(
+        process_runner,
+        scope,
+        cfg,
+        profile,
+        quality_doc,
+        existing_backlog,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -139,8 +150,9 @@ pub fn seed_backlog_if_needed_with_events(
     cfg: &AppConfig,
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
+    existing_backlog: &str,
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
-) -> Result<Vec<SeedTask>, GardenerError> {
+) -> Result<(), GardenerError> {
     append_run_log(
         "info",
         "seeding.started",
@@ -153,9 +165,9 @@ pub fn seed_backlog_if_needed_with_events(
         }),
     );
 
-    let prompt = build_seed_prompt(profile, quality_doc, scope);
+    let prompt = build_seed_prompt(profile, quality_doc, scope, existing_backlog);
     let result = if let Some(sink) = on_event.as_mut() {
-        run_legacy_seed_runner_v1_with_events(
+        run_seed_agent_direct_v2_with_events(
             process_runner,
             scope,
             cfg.seeding.backend,
@@ -164,7 +176,7 @@ pub fn seed_backlog_if_needed_with_events(
             Some(*sink),
         )
     } else {
-        run_legacy_seed_runner_v1_with_events(
+        run_seed_agent_direct_v2_with_events(
             process_runner,
             scope,
             cfg.seeding.backend,
@@ -174,14 +186,14 @@ pub fn seed_backlog_if_needed_with_events(
         )
     };
     match &result {
-        Ok(tasks) => {
+        Ok(()) => {
             append_run_log(
                 "info",
                 "seeding.completed",
                 json!({
                     "backend": format!("{:?}", cfg.seeding.backend),
                     "model": cfg.seeding.model,
-                    "task_count": tasks.len(),
+                    "mode": "direct_backlog_db",
                 }),
             );
         }
@@ -204,6 +216,7 @@ fn build_seed_prompt_context(
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
     scope: &RuntimeScope,
+    existing_backlog: &str,
 ) -> SeedPromptContext {
     let repo_root = scope
         .repo_root
@@ -214,6 +227,7 @@ fn build_seed_prompt_context(
     let claude_md = read_optional_file(&repo_root.join("CLAUDE.md"));
     let docs_listing = collect_docs_listing(&repo_root);
     let quality_risks = extract_quality_risks(quality_doc);
+    let backlog_skill_md = read_optional_file(&repo_root.join(".codex/skills/backlog-db/SKILL.md"));
 
     SeedPromptContext {
         primary_gap: profile.agent_readiness.primary_gap.clone(),
@@ -224,6 +238,8 @@ fn build_seed_prompt_context(
         claude_md,
         docs_listing,
         quality_risks,
+        backlog_skill_md,
+        existing_backlog: existing_backlog.to_string(),
     }
 }
 
@@ -313,8 +329,8 @@ fn extract_quality_risks(quality_doc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_docs_listing, extract_quality_risks, read_optional_file, walk_docs, build_seed_prompt,
-        build_seed_prompt_context, build_seed_prompt_v2, SeedPromptContext,
+        build_seed_prompt, build_seed_prompt_context, build_seed_prompt_v2, collect_docs_listing,
+        extract_quality_risks, read_optional_file, walk_docs, SeedPromptContext,
     };
     use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
@@ -375,17 +391,20 @@ mod tests {
             primary_gap: profile.agent_readiness.primary_gap.clone(),
             readiness_score: profile.agent_readiness.readiness_score,
             readiness_grade: profile.agent_readiness.readiness_grade,
-            quality_doc: "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 40 | C |".to_string(),
+            quality_doc: "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 40 | C |"
+                .to_string(),
             agents_md: String::new(),
             claude_md: String::new(),
             docs_listing: "- docs/index.md\n".to_string(),
             quality_risks: "| startup | 40 | C |\n".to_string(),
+            backlog_skill_md: String::new(),
+            existing_backlog: "No active backlog tasks.".to_string(),
         };
         let prompt = super::build_seed_prompt_v2(&context);
-        assert!(prompt.contains("Output contract"));
+        assert!(prompt.contains("Execution steps"));
         assert!(prompt.contains("primary_gap"));
         assert!(prompt.contains("Quality risks extracted from report"));
-        assert!(prompt.contains("\"state\":\"seeding\""));
+        assert!(prompt.contains("codex-agent-team-article.md"));
     }
 
     fn sample_profile() -> RepoIntelligenceProfile {
@@ -474,7 +493,10 @@ mod tests {
         fs::write(nested.join("ignore.txt"), "skip").expect("write");
 
         let listing = collect_docs_listing(dir.path());
-        assert_eq!(listing.lines().collect::<Vec<_>>(), vec!["- docs/README.md", "- docs/nested/nested.md"]);
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec!["- docs/README.md", "- docs/nested/nested.md"]
+        );
     }
 
     #[test]
@@ -505,13 +527,16 @@ mod tests {
             working_dir: repo_root,
         };
         let profile = sample_profile();
-        let context = build_seed_prompt_context(&profile, "Quality report", &scope);
+        let context =
+            build_seed_prompt_context(&profile, "Quality report", &scope, "No active backlog tasks.");
 
         assert_eq!(context.primary_gap, "coverage_signal");
         assert_eq!(context.agents_md, "# AGENTS");
         assert_eq!(context.claude_md, "## CLAUDE");
         assert_eq!(context.docs_listing, "- docs/guide.md\n");
         assert!(context.quality_risks.is_empty());
+        assert!(context.backlog_skill_md.is_empty());
+        assert_eq!(context.existing_backlog, "No active backlog tasks.");
 
         let prompt = build_seed_prompt_v2(&context);
         assert!(prompt.contains("# AGENTS"));
@@ -521,15 +546,22 @@ mod tests {
     #[test]
     fn build_seed_prompt_uses_quality_markdown_without_repository_files() {
         let profile = sample_profile();
-        let prompt = build_seed_prompt(&profile, "Risk summary", &RuntimeScope {
-            process_cwd: std::env::current_dir().expect("cwd"),
-            repo_root: None,
-            working_dir: std::env::current_dir().expect("cwd"),
-        });
+        let prompt = build_seed_prompt(
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+            "No active backlog tasks.",
+        );
 
         assert!(prompt.contains("No AGENTS.md found."));
         assert!(prompt.contains("No CLAUDE.md found."));
         assert!(prompt.contains("No docs directory found or readable."));
+        assert!(prompt.contains("No backlog-db skill file found."));
+        assert!(prompt.contains("Existing active backlog snapshot"));
         assert!(prompt.contains("Quality doc"));
     }
 }

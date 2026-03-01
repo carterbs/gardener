@@ -58,6 +58,20 @@ cargo test -p gardener --all-targets
 cargo llvm-cov -p gardener --all-targets --summary-only
 ```
 
+Coverage gate helper:
+
+```bash
+# Enforces 90% minimum line coverage by default for Gardener coverage runs.
+./scripts/test-gardener-coverage.sh
+
+# Override the minimum at runtime:
+COVERAGE_MIN_LINE=95 ./scripts/test-gardener-coverage.sh
+
+# Override ignored source files (optional):
+COVERAGE_IGNORE_REGEX="/tools/gardener/src/(agent/mod\.rs|agent/factory\.rs)" \
+  ./scripts/test-gardener-coverage.sh
+```
+
 ## Git Hooks
 
 Enable the local pre-commit hook to run Gardener validation before each commit:

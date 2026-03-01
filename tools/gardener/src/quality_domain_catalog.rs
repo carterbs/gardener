@@ -55,21 +55,43 @@ fn collect_source_domains(path: &Path, names: &mut BTreeSet<String>) {
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
             continue;
         }
-        let rel = path
-            .to_string_lossy()
-            .to_ascii_lowercase();
+        let rel = path.to_string_lossy().to_ascii_lowercase();
         let domain = match rel.as_str() {
-            p if p.contains("/agent/") || p.ends_with("/protocol.rs") || p.ends_with("/output_envelope.rs") => Some("agent-adapters"),
-            p if p.contains("/triage") || p.ends_with("/triage.rs") || p.starts_with("/triage") => Some("triage"),
-            p if p.contains("/backlog") || p.ends_with("/priority.rs") || p.ends_with("/task_identity.rs") => Some("backlog"),
+            p if p.contains("/agent/")
+                || p.ends_with("/protocol.rs")
+                || p.ends_with("/output_envelope.rs") =>
+            {
+                Some("agent-adapters")
+            }
+            p if p.contains("/triage") || p.ends_with("/triage.rs") || p.starts_with("/triage") => {
+                Some("triage")
+            }
+            p if p.contains("/backlog")
+                || p.ends_with("/priority.rs")
+                || p.ends_with("/task_identity.rs") =>
+            {
+                Some("backlog")
+            }
             p if p.contains("/seeding.rs") || p.contains("/seed_runner.rs") => Some("seeding"),
             p if p.contains("/worker") || p.ends_with("/fsm.rs") => Some("worker-pool"),
             p if p.ends_with("/tui.rs") || p.ends_with("/hotkeys.rs") => Some("tui"),
             p if p.contains("/quality") => Some("quality-grades"),
-            p if p.ends_with("/startup.rs") || p.ends_with("/worktree_audit.rs") || p.ends_with("/pr_audit.rs") => Some("startup"),
-            p if p.ends_with("/git.rs") || p.ends_with("/gh.rs") || p.ends_with("/worktree.rs") => Some("git-integration"),
+            p if p.ends_with("/startup.rs")
+                || p.ends_with("/worktree_audit.rs")
+                || p.ends_with("/pr_audit.rs") =>
+            {
+                Some("startup")
+            }
+            p if p.ends_with("/git.rs") || p.ends_with("/gh.rs") || p.ends_with("/worktree.rs") => {
+                Some("git-integration")
+            }
             p if p.contains("/prompt") => Some("prompts"),
-            p if p.ends_with("/learning_loop.rs") || p.ends_with("/postmerge_analysis.rs") || p.ends_with("/postmortem.rs") => Some("learning"),
+            p if p.ends_with("/learning_loop.rs")
+                || p.ends_with("/postmerge_analysis.rs")
+                || p.ends_with("/postmortem.rs") =>
+            {
+                Some("learning")
+            }
             _ => None,
         };
         if let Some(domain) = domain {
@@ -104,10 +126,8 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("tempdir");
         let src = temp.path().join("src");
-        fs::create_dir_all(src.join("agent"))
-            .expect("create source directory");
-        fs::write(src.join("agent").join("protocol.rs"), "let x = 1;")
-            .expect("write source");
+        fs::create_dir_all(src.join("agent")).expect("create source directory");
+        fs::write(src.join("agent").join("protocol.rs"), "let x = 1;").expect("write source");
         fs::write(src.join("tui.rs"), "fn main() {}").expect("write source");
         fs::write(src.join("triage.rs"), "fn main() {}").expect("write source");
         fs::write(src.join("bad.txt"), "skip").expect("write source");

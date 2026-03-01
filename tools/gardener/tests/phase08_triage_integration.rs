@@ -1,8 +1,7 @@
 use gardener::config::AppConfig;
 use gardener::output_envelope::parse_last_envelope;
 use gardener::runtime::{
-    FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, ProcessOutput,
-    ProductionRuntime,
+    FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, ProcessOutput, ProductionRuntime,
 };
 use gardener::triage::{triage_needed, TriageDecision};
 use gardener::triage_agent_detection::{is_non_interactive, EnvMap};
@@ -85,8 +84,8 @@ fn triage_needed_when_force_retriage() {
 #[test]
 fn discovery_valid_envelope_parsed_directly() {
     let content = load_fixture("discovery/codex-discovery.jsonl");
-    let envelope = parse_last_envelope(&content, WorkerState::Seeding)
-        .expect("should parse valid envelope");
+    let envelope =
+        parse_last_envelope(&content, WorkerState::Seeding).expect("should parse valid envelope");
     assert_eq!(envelope.schema_version, 1);
     assert_eq!(envelope.state, WorkerState::Seeding);
     let output = &envelope.payload["gardener_output"];
@@ -100,7 +99,10 @@ fn discovery_no_envelope_returns_error() {
     let err = parse_last_envelope(&content, WorkerState::Seeding)
         .expect_err("should fail without envelope markers");
     let msg = format!("{err}");
-    assert!(msg.contains("missing start marker"), "error should mention missing marker: {msg}");
+    assert!(
+        msg.contains("missing start marker"),
+        "error should mention missing marker: {msg}"
+    );
 }
 
 #[test]
@@ -109,7 +111,10 @@ fn discovery_wrong_state_returns_error() {
     let err = parse_last_envelope(&content, WorkerState::Seeding)
         .expect_err("should fail on state mismatch");
     let msg = format!("{err}");
-    assert!(msg.contains("state mismatch"), "error should mention state mismatch: {msg}");
+    assert!(
+        msg.contains("state mismatch"),
+        "error should mention state mismatch: {msg}"
+    );
 }
 
 #[test]
@@ -128,7 +133,10 @@ fn non_interactive_detected_in_ci() {
     env.insert("CI".to_string(), "1".to_string());
     let terminal = FakeTerminal::new(true);
     let reason = is_non_interactive(&env, &terminal);
-    assert!(reason.is_some(), "CI environment should be detected as non-interactive");
+    assert!(
+        reason.is_some(),
+        "CI environment should be detected as non-interactive"
+    );
 }
 
 #[test]
@@ -136,7 +144,10 @@ fn non_interactive_detected_without_tty() {
     let env = EnvMap::new();
     let terminal = FakeTerminal::new(false);
     let reason = is_non_interactive(&env, &terminal);
-    assert!(reason.is_some(), "non-TTY should be detected as non-interactive");
+    assert!(
+        reason.is_some(),
+        "non-TTY should be detected as non-interactive"
+    );
 }
 
 #[test]
@@ -144,5 +155,8 @@ fn interactive_detected_with_tty_no_ci() {
     let env = EnvMap::new();
     let terminal = FakeTerminal::new(true);
     let reason = is_non_interactive(&env, &terminal);
-    assert!(reason.is_none(), "TTY without CI should be interactive, got: {reason:?}");
+    assert!(
+        reason.is_none(),
+        "TTY without CI should be interactive, got: {reason:?}"
+    );
 }

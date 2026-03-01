@@ -1,6 +1,8 @@
-use gardener::runtime::{FakeFileSystem, FileSystem, FakeTerminal, Terminal};
+use gardener::runtime::{FakeFileSystem, FakeTerminal, FileSystem, Terminal};
+use gardener::tui::{
+    render_dashboard, render_report_view, render_triage, BacklogView, QueueStats, WorkerRow,
+};
 use std::path::Path;
-use gardener::tui::{render_dashboard, render_report_view, render_triage, BacklogView, QueueStats, WorkerRow};
 
 fn make_worker(id: &str, state: &str, title: &str) -> WorkerRow {
     WorkerRow {
@@ -75,7 +77,10 @@ fn render_report_view_empty_report() {
 
 #[test]
 fn render_report_view_very_long_content_truncated() {
-    let report = (0..1000).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let report = (0..1000)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let frame = render_report_view("/tmp/report.md", &report, 120, 30);
     assert!(frame.contains("line 0"));
     assert!(!frame.contains("line 999"));
@@ -84,7 +89,9 @@ fn render_report_view_very_long_content_truncated() {
 #[test]
 fn fake_terminal_draw_shutdown_does_not_produce_drawn_frame() {
     let terminal = FakeTerminal::new(true);
-    terminal.draw_shutdown_screen("title", "message").expect("draw shutdown");
+    terminal
+        .draw_shutdown_screen("title", "message")
+        .expect("draw shutdown");
     assert!(terminal.drawn_frames().is_empty());
     assert_eq!(terminal.shutdown_screens().len(), 1);
 }

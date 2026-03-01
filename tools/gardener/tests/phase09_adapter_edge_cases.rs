@@ -1,6 +1,6 @@
 use gardener::agent::claude::ClaudeAdapter;
 use gardener::agent::codex::CodexAdapter;
-use gardener::agent::{AgentAdapter, AdapterContext};
+use gardener::agent::{AdapterContext, AgentAdapter};
 use gardener::output_envelope::{parse_last_envelope, END_MARKER, START_MARKER};
 use gardener::protocol::{map_codex_event, AgentEventKind, AgentTerminal};
 use gardener::runtime::{FakeProcessRunner, ProcessOutput};
@@ -50,12 +50,7 @@ fn claude_result_without_subtype_is_failure() {
     }));
     let adapter = ClaudeAdapter;
     let result = adapter
-        .execute(
-            &runner,
-            &claude_context(),
-            "do a task",
-            None,
-        )
+        .execute(&runner, &claude_context(), "do a task", None)
         .expect("result must parse");
     assert_ne!(result.terminal, AgentTerminal::Success);
     assert_eq!(result.terminal, AgentTerminal::Failure);
@@ -158,7 +153,10 @@ fn claude_stderr_does_not_affect_success() {
         .execute(&runner, &claude_context(), "do a task", None)
         .expect("result must parse");
     assert_eq!(result.terminal, AgentTerminal::Success);
-    assert!(result.diagnostics.iter().any(|line| line.contains("WARNING")));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|line| line.contains("WARNING")));
 }
 
 #[test]
@@ -166,7 +164,8 @@ fn claude_non_json_stdout_is_ignored() {
     let runner = FakeProcessRunner::default();
     runner.push_response(Ok(ProcessOutput {
         exit_code: 0,
-        stdout: "NOTICE warmup\n{\"type\":\"result\",\"subtype\":\"success\",\"result\":{}}\n".to_string(),
+        stdout: "NOTICE warmup\n{\"type\":\"result\",\"subtype\":\"success\",\"result\":{}}\n"
+            .to_string(),
         stderr: String::new(),
     }));
     let adapter = ClaudeAdapter;
@@ -334,20 +333,17 @@ fn discovery_envelope_missing_gardener_output_is_structurally_invalid() {
 fn discovery_multiple_envelopes_uses_last_one() {
     let first = r#"{"schema_version":1,"state":"seeding","payload":{"note":"first"}}"#;
     let second = r#"{"schema_version":1,"state":"seeding","payload":{"note":"second"}}"#;
-    let content = format!(
-        "{START_MARKER}\n{first}\n{END_MARKER}\n{START_MARKER}\n{second}\n{END_MARKER}\n"
-    );
-    let envelope = parse_last_envelope(&content, WorkerState::Seeding)
-        .expect("latest envelope should win");
+    let content =
+        format!("{START_MARKER}\n{first}\n{END_MARKER}\n{START_MARKER}\n{second}\n{END_MARKER}\n");
+    let envelope =
+        parse_last_envelope(&content, WorkerState::Seeding).expect("latest envelope should win");
     assert_eq!(envelope.payload["note"], "second");
 }
 
 #[test]
 fn discovery_schema_version_2_rejected() {
     let payload = r#"{"schema_version":2,"state":"seeding","payload":{"agent_steering":{"grade":"unknown","summary":"n/a","issues":[],"strengths":[]},"knowledge_accessible":{"grade":"unknown","summary":"n/a","issues":[],"strengths":[]},"mechanical_guardrails":{"grade":"unknown","summary":"n/a","issues":[],"strengths":[]},"local_feedback_loop":{"grade":"unknown","summary":"n/a","issues":[],"strengths":[]},"coverage_signal":{"grade":"unknown","summary":"n/a","issues":[],"strengths":[]},"overall_readiness_score":10,"overall_readiness_grade":"F","primary_gap":"agent_steering","notable_findings":"","scope_notes":""}}"#;
-    let stdout = format!(
-        "{START_MARKER}\n{payload}\n{END_MARKER}\n"
-    );
+    let stdout = format!("{START_MARKER}\n{payload}\n{END_MARKER}\n");
     let err = parse_last_envelope(&stdout, WorkerState::Seeding).expect_err("schema 2 should fail");
     assert!(format!("{err}").contains("schema_version must be 1"));
 }
@@ -364,10 +360,9 @@ fn discovery_end_marker_before_start_marker_is_rejected() {
 #[test]
 fn discovery_payload_parse_shape_is_not_validated_by_parse_last_envelope() {
     let payload = r#"{"schema_version":1,"state":"seeding","payload":{"wrong_key":"value"}}"#;
-    let stdout = format!(
-        "{START_MARKER}\n{payload}\n{END_MARKER}\n"
-    );
-    let envelope = parse_last_envelope(&stdout, WorkerState::Seeding).expect("parse markers succeeds");
+    let stdout = format!("{START_MARKER}\n{payload}\n{END_MARKER}\n");
+    let envelope =
+        parse_last_envelope(&stdout, WorkerState::Seeding).expect("parse markers succeeds");
     assert_eq!(envelope.payload["wrong_key"], "value");
 }
 

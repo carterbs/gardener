@@ -25,12 +25,12 @@ pub fn collect_evidence(domains: &[QualityDomain], repo_root: &Path) -> Vec<Doma
     let evidence: Vec<DomainEvidence> = domains
         .iter()
         .map(|domain| {
-        let source_files = source_files_for_domain(repo_root, &domain.name);
-        let inline_test_files = source_files
-            .iter()
-            .filter(|path| file_contains_tests(Path::new(path)))
-            .cloned()
-            .collect::<Vec<_>>();
+            let source_files = source_files_for_domain(repo_root, &domain.name);
+            let inline_test_files = source_files
+                .iter()
+                .filter(|path| file_contains_tests(Path::new(path)))
+                .cloned()
+                .collect::<Vec<_>>();
             let integration_tests = integration_tests_for_domain(repo_root, &domain.name);
             let instrumentation_files = source_files
                 .iter()
@@ -171,28 +171,30 @@ fn collect_integration_files(root: &Path, files: &mut Vec<String>, domain: &str)
 
 fn domain_matches_file(domain: &str, full: &Path, file_name: &str) -> bool {
     if domain == "infrastructure" {
-        return !matches_known_domain_file(full, file_name, &[
-            "triage",
-            "backlog",
-            "seeding",
-            "worker-pool",
-            "agent-adapters",
-            "tui",
-            "quality-grades",
-            "startup",
-            "git-integration",
-            "prompts",
-            "learning",
-        ]);
+        return !matches_known_domain_file(
+            full,
+            file_name,
+            &[
+                "triage",
+                "backlog",
+                "seeding",
+                "worker-pool",
+                "agent-adapters",
+                "tui",
+                "quality-grades",
+                "startup",
+                "git-integration",
+                "prompts",
+                "learning",
+            ],
+        );
     }
     matches_known_domain_file(full, file_name, &[domain])
 }
 
 fn matches_known_domain_file(path: &Path, file_name: &str, targets: &[&str]) -> bool {
     let file = file_name.to_ascii_lowercase();
-    let path = path
-        .to_string_lossy()
-        .to_ascii_lowercase();
+    let path = path.to_string_lossy().to_ascii_lowercase();
     for target in targets {
         if matches_domain_file(target, &file, &path) {
             return true;
@@ -204,19 +206,25 @@ fn matches_known_domain_file(path: &Path, file_name: &str, targets: &[&str]) -> 
 fn matches_domain_file(domain: &str, file: &str, path: &str) -> bool {
     match domain {
         "triage" => path.contains("triage") || file.starts_with("triage"),
-        "backlog" => file.starts_with("backlog")
-            || file == "priority.rs"
-            || file == "task_identity.rs"
-            || path.ends_with("backlog_store.rs"),
+        "backlog" => {
+            file.starts_with("backlog")
+                || file == "priority.rs"
+                || file == "task_identity.rs"
+                || path.ends_with("backlog_store.rs")
+        }
         "seeding" => file == "seeding.rs" || file == "seed_runner.rs",
         "worker-pool" => file.starts_with("worker") || file == "fsm.rs",
-        "agent-adapters" => path.contains("/agent/") || file == "protocol.rs" || file == "output_envelope.rs",
+        "agent-adapters" => {
+            path.contains("/agent/") || file == "protocol.rs" || file == "output_envelope.rs"
+        }
         "tui" => file == "tui.rs" || file == "hotkeys.rs",
         "quality-grades" => file.starts_with("quality"),
         "startup" => file == "startup.rs" || file == "worktree_audit.rs" || file == "pr_audit.rs",
         "git-integration" => file == "git.rs" || file == "gh.rs" || file == "worktree.rs",
         "prompts" => file.starts_with("prompt"),
-        "learning" => file == "learning_loop.rs" || file == "postmerge_analysis.rs" || file == "postmortem.rs",
+        "learning" => {
+            file == "learning_loop.rs" || file == "postmerge_analysis.rs" || file == "postmortem.rs"
+        }
         "infrastructure" => true,
         _ => false,
     }

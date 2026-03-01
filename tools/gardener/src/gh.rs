@@ -114,12 +114,11 @@ impl<'a> GhClient<'a> {
             )));
         }
         let url = out.stdout.trim().to_string();
-        let number = parse_pr_number_from_url(&url)
-            .ok_or_else(|| {
-                GardenerError::Process(format!(
-                    "could not parse PR number from gh pr create output: {url}"
-                ))
-            })?;
+        let number = parse_pr_number_from_url(&url).ok_or_else(|| {
+            GardenerError::Process(format!(
+                "could not parse PR number from gh pr create output: {url}"
+            ))
+        })?;
         append_run_log(
             "info",
             "gh.pr.create.succeeded",
@@ -482,8 +481,8 @@ pub fn generate_pr_title_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, Mergeable,
-        MergeStateStatus, PrMergeability,
+        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, MergeStateStatus,
+        Mergeable, PrMergeability,
     };
     use crate::git::{GitClient, MergeMode};
     use crate::priority::Priority;

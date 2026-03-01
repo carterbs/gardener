@@ -252,9 +252,9 @@ where
             cwd: Some(scope.working_dir.clone()),
         })?;
         if out.exit_code != 0 {
-        append_run_log(
-            "warn",
-            "startup.validation.failed",
+            append_run_log(
+                "warn",
+                "startup.validation.failed",
                 json!({
                     "command": command,
                     "exit_code": out.exit_code,
@@ -264,9 +264,9 @@ where
                 .terminal
                 .write_line("WARN startup validation failed; enqueueing P0 recovery task")?;
             // Safety: store is Some because validate_on_boot implies needs_store.
-            let store = store.as_ref().ok_or_else(|| {
-                GardenerError::Database("store not initialized".to_string())
-            })?;
+            let store = store
+                .as_ref()
+                .ok_or_else(|| GardenerError::Database("store not initialized".to_string()))?;
             store.upsert_task(NewTask {
                 kind: TaskKind::Maintenance,
                 title: "Recovery: startup validation failed".to_string(),
@@ -299,7 +299,11 @@ where
     } else {
         0
     };
-    let will_seed = should_seed_backlog(run_seeding, cfg.execution.test_mode, existing_active_backlog_count);
+    let will_seed = should_seed_backlog(
+        run_seeding,
+        cfg.execution.test_mode,
+        existing_active_backlog_count,
+    );
     append_run_log(
         "info",
         "startup.seeding_gate.checked",
@@ -316,9 +320,9 @@ where
         existing_active_backlog_count,
     ) {
         // Safety: store is Some because should_seed_backlog requires !test_mode && run_seeding.
-        let store = store.as_ref().ok_or_else(|| {
-            GardenerError::Database("store not initialized".to_string())
-        })?;
+        let store = store
+            .as_ref()
+            .ok_or_else(|| GardenerError::Database("store not initialized".to_string()))?;
         append_run_log(
             "info",
             "startup.seeding.started",
@@ -390,7 +394,7 @@ where
                     .write_line(&format!("WARN backlog seeding failed: {err}"))?;
                 Vec::new()
             }
-            };
+        };
         if !seeded.is_empty() {
             append_run_log(
                 "info",
@@ -539,7 +543,10 @@ pub fn backup_db_if_exists(path: &Path) -> Result<Option<PathBuf>, GardenerError
     for ext in &["sqlite-wal", "sqlite-shm"] {
         let sidecar = path.with_extension(ext);
         if sidecar.exists() {
-            let sidecar_bak = bak_path.with_extension(format!("bak-{}", ext.strip_prefix("sqlite-").unwrap_or(ext)));
+            let sidecar_bak = bak_path.with_extension(format!(
+                "bak-{}",
+                ext.strip_prefix("sqlite-").unwrap_or(ext)
+            ));
             let _ = std::fs::copy(&sidecar, &sidecar_bak);
         }
     }
@@ -945,8 +952,7 @@ mod tests {
     use super::{
         backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
         extract_message_preview, fallback_seed_tasks, parse_seed_priority, quality_stamp_path,
-        report_stamp_is_stale, seed_generation, should_seed_backlog,
-        summarize_seed_agent_event,
+        report_stamp_is_stale, seed_generation, should_seed_backlog, summarize_seed_agent_event,
     };
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
@@ -993,8 +999,7 @@ mod tests {
 
         // Create a valid SQLite DB via BacklogStore::open, then drop it.
         {
-            let _store =
-                crate::backlog_store::BacklogStore::open(&db).expect("create valid db");
+            let _store = crate::backlog_store::BacklogStore::open(&db).expect("create valid db");
         }
 
         let meta_before = std::fs::metadata(&db).expect("metadata");
@@ -1054,7 +1059,9 @@ mod tests {
             "seed_runner_v2_fallback_gen_4",
         );
         assert_eq!(tasks.len(), 3);
-        assert!(tasks[0].title.contains("Bootstrap backlog for infrastructure #1"));
+        assert!(tasks[0]
+            .title
+            .contains("Bootstrap backlog for infrastructure #1"));
     }
 
     #[test]
@@ -1078,8 +1085,7 @@ mod tests {
     #[test]
     fn seed_generation_uses_max_observed_seed_run() {
         let dir = tempdir().expect("tempdir");
-        let store = BacklogStore::open(dir.path().join("backlog.sqlite"))
-            .expect("open store");
+        let store = BacklogStore::open(dir.path().join("backlog.sqlite")).expect("open store");
         let _ = store.upsert_task(NewTask {
             kind: TaskKind::QualityGap,
             title: "first".into(),
@@ -1143,17 +1149,15 @@ mod tests {
             }),
             Some("Agent session started".to_string())
         );
-        assert!(
-            summarize_seed_agent_event(&AgentEvent {
-                protocol_version: 1,
-                kind: AgentEventKind::ToolCall,
-                raw_type: "item.started".into(),
-                payload: serde_json::json!({"item": {"command":"echo hi"}}),
-            })
-            .as_deref()
-            .expect("tool call preview")
-            .contains("echo hi")
-        );
+        assert!(summarize_seed_agent_event(&AgentEvent {
+            protocol_version: 1,
+            kind: AgentEventKind::ToolCall,
+            raw_type: "item.started".into(),
+            payload: serde_json::json!({"item": {"command":"echo hi"}}),
+        })
+        .as_deref()
+        .expect("tool call preview")
+        .contains("echo hi"));
         assert_eq!(
             summarize_seed_agent_event(&AgentEvent {
                 protocol_version: 1,
@@ -1210,13 +1214,14 @@ mod tests {
 
         let stamp = dir.path().join("report.md.stamp");
         let fs = FakeFileSystem::default();
-        fs.write_string(&stamp, "0")
-            .expect("seed stamp");
+        fs.write_string(&stamp, "0").expect("seed stamp");
         let mut cfg = AppConfig::default();
         cfg.quality_report.stale_after_days = 0;
         cfg.quality_report.stale_if_head_commit_differs = false;
         let runtime = ProductionRuntime {
-            clock: Arc::new(FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000))),
+            clock: Arc::new(FakeClock::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            )),
             file_system: Arc::new(fs),
             process_runner: Arc::new(FakeProcessRunner::default()),
             terminal: Arc::new(FakeTerminal::default()),
@@ -1269,7 +1274,8 @@ mod tests {
             },
         };
         let profile_path = triage::profile_path(&scope, &cfg);
-        fs.write_string(&profile_path, &toml::to_string(&profile).expect("toml")).expect("write profile");
+        fs.write_string(&profile_path, &toml::to_string(&profile).expect("toml"))
+            .expect("write profile");
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
@@ -1277,7 +1283,9 @@ mod tests {
             stderr: String::new(),
         }));
         let runtime = ProductionRuntime {
-            clock: Arc::new(FakeClock::new(SystemTime::UNIX_EPOCH + Duration::from_secs(10_000))),
+            clock: Arc::new(FakeClock::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
+            )),
             file_system: Arc::new(fs),
             process_runner: Arc::new(runner),
             terminal: Arc::new(FakeTerminal::default()),

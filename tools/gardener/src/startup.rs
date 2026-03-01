@@ -667,6 +667,7 @@ where
 }
 
 fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerError> {
+    append_run_log("debug", "startup.summarize_active_backlog.started", json!({}));
     let mut lines = Vec::new();
     for task in store.list_tasks()?.into_iter() {
         if matches!(task.status, crate::backlog_store::TaskStatus::Complete | crate::backlog_store::TaskStatus::Failed) {

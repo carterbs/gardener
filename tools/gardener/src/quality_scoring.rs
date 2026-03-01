@@ -42,7 +42,11 @@ pub fn score_domains(evidence: &[DomainEvidence], has_coverage_gates: bool) -> V
             if !item.integration_tests.is_empty() {
                 score += 10.0;
             }
-            if item.inline_test_files.iter().any(|path| path.contains("/quality")) {
+            if item
+                .inline_test_files
+                .iter()
+                .any(|path| path.contains("/quality"))
+            {
                 score += 5.0;
             }
 

@@ -63,12 +63,23 @@ fn dashboard_header_shows_queue_stats() {
         p2: 0,
     };
     let frame = render_dashboard(&workers, &stats, &empty_backlog(), 120, 30);
-    assert!(frame.contains("GARDENER"), "frame should contain GARDENER header");
+    assert!(
+        frame.contains("GARDENER"),
+        "frame should contain GARDENER header"
+    );
 }
 
 #[test]
 fn dashboard_worker_states_all_render() {
-    for state in ["doing", "reviewing", "failed", "complete", "idle", "planning", "gitting"] {
+    for state in [
+        "doing",
+        "reviewing",
+        "failed",
+        "complete",
+        "idle",
+        "planning",
+        "gitting",
+    ] {
         let frame = render_dashboard(
             &[make_worker("w-01", state, "task")],
             &zero_stats(),
@@ -91,18 +102,33 @@ fn dashboard_keeps_three_workers_visible_in_short_viewports_without_backlog() {
         make_worker("w-02", "doing", "task-b"),
         make_worker("w-03", "doing", "task-c"),
     ];
-    let frame = render_dashboard(&workers, &QueueStats {
-        ready: 0,
-        active: 3,
-        failed: 0,
-        unresolved: 0,
-        p0: 0,
-        p1: 3,
-        p2: 0,
-    }, &BacklogView::default(), 80, 19);
-    assert!(frame.contains("Lawn Mower"), "first worker card should be visible");
-    assert!(frame.contains("Leaf Blower"), "second worker card should be visible");
-    assert!(frame.contains("Hedge Trimmer"), "third worker card should be visible");
+    let frame = render_dashboard(
+        &workers,
+        &QueueStats {
+            ready: 0,
+            active: 3,
+            failed: 0,
+            unresolved: 0,
+            p0: 0,
+            p1: 3,
+            p2: 0,
+        },
+        &BacklogView::default(),
+        80,
+        19,
+    );
+    assert!(
+        frame.contains("Lawn Mower"),
+        "first worker card should be visible"
+    );
+    assert!(
+        frame.contains("Leaf Blower"),
+        "second worker card should be visible"
+    );
+    assert!(
+        frame.contains("Hedge Trimmer"),
+        "third worker card should be visible"
+    );
 }
 
 #[test]
@@ -116,18 +142,33 @@ fn dashboard_keeps_three_workers_visible_with_backlog() {
         in_progress: vec!["INP 5d8c91a fix lint errors".to_string()],
         queued: vec!["Q 2f4b1e4 update docs".to_string()],
     };
-    let frame = render_dashboard(&workers, &QueueStats {
-        ready: 2,
-        active: 3,
-        failed: 0,
-        unresolved: 0,
-        p0: 0,
-        p1: 3,
-        p2: 0,
-    }, &backlog, 80, 24);
-    assert!(frame.contains("Lawn Mower"), "first worker card should be visible");
-    assert!(frame.contains("Leaf Blower"), "second worker card should be visible");
-    assert!(frame.contains("Hedge Trimmer"), "third worker card should be visible");
+    let frame = render_dashboard(
+        &workers,
+        &QueueStats {
+            ready: 2,
+            active: 3,
+            failed: 0,
+            unresolved: 0,
+            p0: 0,
+            p1: 3,
+            p2: 0,
+        },
+        &backlog,
+        80,
+        24,
+    );
+    assert!(
+        frame.contains("Lawn Mower"),
+        "first worker card should be visible"
+    );
+    assert!(
+        frame.contains("Leaf Blower"),
+        "second worker card should be visible"
+    );
+    assert!(
+        frame.contains("Hedge Trimmer"),
+        "third worker card should be visible"
+    );
 }
 
 #[test]
@@ -154,7 +195,10 @@ fn dashboard_skips_human_problems_panel() {
 #[test]
 fn dashboard_empty_backlog_renders_without_panic() {
     let frame = render_dashboard(&[], &zero_stats(), &empty_backlog(), 120, 30);
-    assert!(frame.contains("GARDENER"), "frame should still render header");
+    assert!(
+        frame.contains("GARDENER"),
+        "frame should still render header"
+    );
 }
 
 #[test]
@@ -179,15 +223,24 @@ fn dashboard_backlog_priority_badges() {
         30,
     );
     assert!(frame.contains("P0"), "frame should contain P0");
-    assert!(frame.contains("Critical task"), "frame should contain task title");
+    assert!(
+        frame.contains("Critical task"),
+        "frame should contain task title"
+    );
 }
 
 #[test]
 fn triage_screen_renders_activity() {
-    let activity = vec!["Scanning repository".to_string(), "Detecting tools".to_string()];
+    let activity = vec![
+        "Scanning repository".to_string(),
+        "Detecting tools".to_string(),
+    ];
     let artifacts = vec!["agent: codex".to_string()];
     let frame = render_triage(&activity, &artifacts, 120, 30);
-    assert!(frame.contains("GARDENER"), "triage frame should contain GARDENER");
+    assert!(
+        frame.contains("GARDENER"),
+        "triage frame should contain GARDENER"
+    );
 }
 
 #[test]
@@ -256,17 +309,24 @@ fn dashboard_allocates_more_worker_rows_with_wider_viewport() {
 #[test]
 fn report_screen_via_fake_terminal() {
     let terminal = FakeTerminal::new(true);
-    terminal.draw_report("/tmp/quality.md", "grade: B\noverall: good").expect("draw_report");
+    terminal
+        .draw_report("/tmp/quality.md", "grade: B\noverall: good")
+        .expect("draw_report");
     let draws = terminal.report_draws();
     assert_eq!(draws.len(), 1);
     assert_eq!(draws[0].0, "/tmp/quality.md");
-    assert!(draws[0].1.contains("grade: B"), "report content should be captured");
+    assert!(
+        draws[0].1.contains("grade: B"),
+        "report content should be captured"
+    );
 }
 
 #[test]
 fn shutdown_screen_captures_title_and_message() {
     let terminal = FakeTerminal::new(true);
-    terminal.draw_shutdown_screen("error: disk full", "out of space").expect("draw_shutdown_screen");
+    terminal
+        .draw_shutdown_screen("error: disk full", "out of space")
+        .expect("draw_shutdown_screen");
     let screens = terminal.shutdown_screens();
     assert_eq!(screens.len(), 1);
     assert_eq!(screens[0].0, "error: disk full");

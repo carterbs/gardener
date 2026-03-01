@@ -52,8 +52,7 @@ struct RecorderState {
 
 impl RecorderState {
     fn emit(&self, entry: &RecordEntry) -> Result<(), GardenerError> {
-        let line =
-            serde_json::to_string(entry).map_err(|e| GardenerError::Io(e.to_string()))?;
+        let line = serde_json::to_string(entry).map_err(|e| GardenerError::Io(e.to_string()))?;
         let _guard = self.write_lock.lock().expect("recorder write lock");
         let mut file = OpenOptions::new()
             .create(true)
@@ -104,9 +103,7 @@ pub fn emit_record(entry: RecordEntry) {
 
 // ── RecordingProcessRunner ────────────────────────────────────────────────────
 
-use crate::replay::recording::{
-    ProcessCallRecord, ProcessOutputRecord, ProcessRequestRecord,
-};
+use crate::replay::recording::{ProcessCallRecord, ProcessOutputRecord, ProcessRequestRecord};
 
 /// Wraps any `ProcessRunner`, recording every call/response as a `ProcessCall` entry.
 pub struct RecordingProcessRunner {
@@ -148,7 +145,10 @@ impl ProcessRunner for RecordingProcessRunner {
     fn kill(&self, handle: u64) -> Result<(), GardenerError> {
         self.inner.kill(handle)?;
         // Remove from in-flight tracking without emitting a record
-        self.in_flight.lock().expect("in_flight lock").remove(&handle);
+        self.in_flight
+            .lock()
+            .expect("in_flight lock")
+            .remove(&handle);
         Ok(())
     }
 
@@ -158,9 +158,9 @@ impl ProcessRunner for RecordingProcessRunner {
         on_stdout_line: &mut dyn FnMut(&str),
         on_stderr_line: &mut dyn FnMut(&str),
     ) -> Result<ProcessOutput, GardenerError> {
-        let output =
-            self.inner
-                .wait_with_line_stream(handle, on_stdout_line, on_stderr_line)?;
+        let output = self
+            .inner
+            .wait_with_line_stream(handle, on_stdout_line, on_stderr_line)?;
         self.emit_process_call(handle, &output);
         Ok(output)
     }

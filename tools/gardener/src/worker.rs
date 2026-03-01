@@ -460,10 +460,7 @@ fn execute_task_live(
         match gh.merge_pr(pr) {
             Ok(()) => {
                 let view = gh.view_pr(pr)?;
-                let sha = view
-                    .merge_commit
-                    .map(|c| c.oid)
-                    .unwrap_or_default();
+                let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
                 merge_output = MergingOutput {
                     merged: true,
                     merge_sha: Some(sha),
@@ -1288,9 +1285,8 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 mod tests {
     use super::{
         execute_task, extract_failure_reason, parse_reviewing_output, parse_understand_output,
-        review_artifact_path, sanitize_for_branch,
-        worktree_branch_for, worktree_path_for, worktree_slug_for_task, worktree_slug_suffix,
-        WORKTREE_TASK_SLUG_PREFIX_CHARS,
+        review_artifact_path, sanitize_for_branch, worktree_branch_for, worktree_path_for,
+        worktree_slug_for_task, worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::runtime::FakeProcessRunner;

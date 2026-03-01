@@ -167,7 +167,8 @@ fn run_with_runtime_paths_and_errors() {
         "/config.toml".into(),
     ];
     assert_eq!(
-        gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime).expect("test fixture should not fail"),
+        gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime)
+            .expect("test fixture should not fail"),
         0
     );
 
@@ -208,12 +209,14 @@ fn run_with_runtime_paths_and_errors() {
 
     let help = vec!["gardener".into(), "--help".into()];
     assert_eq!(
-        gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime).expect("test fixture should not fail"),
+        gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime)
+            .expect("test fixture should not fail"),
         0
     );
 
     let invalid = vec!["gardener".into(), "--agent".into(), "invalid".into()];
-    let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime).expect_err("test fixture should not fail");
+    let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime)
+        .expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(_)));
 
     let retriage = vec!["gardener".into(), "--retriage".into()];
@@ -230,8 +233,8 @@ fn run_with_runtime_paths_and_errors() {
     let dir2 = TempDir::new().expect("tempdir");
     let repo_root2 = dir2.path().to_str().expect("utf8").to_string();
     let non_tty_runtime = runtime_with_config("", false, Some(&repo_root2));
-    let err =
-        gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime).expect_err("test fixture should not fail");
+    let err = gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime)
+        .expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
 }
 
@@ -289,7 +292,8 @@ fn run_with_runtime_propagates_write_and_config_errors() {
     let normal = vec!["gardener".into()];
 
     for args in [prune, backlog, quality, normal] {
-        let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime).expect_err("test fixture should not fail");
+        let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime)
+            .expect_err("test fixture should not fail");
         assert!(
             matches!(err, GardenerError::Io(message) if message.contains("terminal write failed") || message.contains("terminal draw failed"))
         );
@@ -304,8 +308,8 @@ fn run_with_runtime_propagates_write_and_config_errors() {
         "--config".into(),
         "/missing.toml".into(),
     ];
-    let err =
-        gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime).expect_err("test fixture should not fail");
+    let err = gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime)
+        .expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Io(message) if message.contains("missing file")));
 }
 
@@ -337,7 +341,8 @@ default = "claude"
         ..CliOverrides::default()
     };
 
-    let (cfg, _scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).expect("test fixture should not fail");
+    let (cfg, _scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner)
+        .expect("test fixture should not fail");
     assert_eq!(cfg.orchestrator.parallelism, 9);
     assert_eq!(cfg.validation.command, "npm run validate:cli");
     assert_eq!(cfg.agent.default, Some(AgentKind::Codex));
@@ -421,7 +426,8 @@ test_mode = true
         config_path: Some(PathBuf::from("/cfg.toml")),
         ..CliOverrides::default()
     };
-    let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner).expect("test fixture should not fail");
+    let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner)
+        .expect("test fixture should not fail");
     assert_eq!(cfg.scheduler.lease_timeout_seconds, 111);
     assert_eq!(cfg.scheduler.heartbeat_interval_seconds, 22);
     assert_eq!(cfg.prompts.turn_budget.understand, 10);
@@ -710,7 +716,8 @@ fn output_envelope_contract() {
     let good = format!(
         "x\n{START_MARKER}\n{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"ok\":true}}}}\n{END_MARKER}\n"
     );
-    let parsed = parse_last_envelope(&good, WorkerState::Doing).expect("test fixture should not fail");
+    let parsed =
+        parse_last_envelope(&good, WorkerState::Doing).expect("test fixture should not fail");
     assert_eq!(parsed.payload["ok"], true);
 
     assert!(matches!(
@@ -720,7 +727,8 @@ fn output_envelope_contract() {
 
     let bad_json = format!("{START_MARKER} nope {END_MARKER}");
     assert!(matches!(
-        parse_last_envelope(&bad_json, WorkerState::Doing).expect_err("test fixture should not fail"),
+        parse_last_envelope(&bad_json, WorkerState::Doing)
+            .expect_err("test fixture should not fail"),
         GardenerError::OutputEnvelope(_)
     ));
 }
@@ -755,17 +763,25 @@ fn runtime_fake_contracts() {
     let now = UNIX_EPOCH + Duration::from_secs(10);
     let clock = FakeClock::new(now);
     let deadline = UNIX_EPOCH + Duration::from_secs(20);
-    clock.sleep_until(deadline).expect("test fixture should not fail");
+    clock
+        .sleep_until(deadline)
+        .expect("test fixture should not fail");
     assert_eq!(clock.now(), deadline);
 
     let fs = FakeFileSystem::default();
     let path = Path::new("a.txt");
-    fs.write_string(path, "hello").expect("test fixture should not fail");
-    assert_eq!(fs.read_to_string(path).expect("test fixture should not fail"), "hello");
+    fs.write_string(path, "hello")
+        .expect("test fixture should not fail");
+    assert_eq!(
+        fs.read_to_string(path)
+            .expect("test fixture should not fail"),
+        "hello"
+    );
     fs.remove_file(path).expect("test fixture should not fail");
     assert!(!fs.exists(path));
     assert!(matches!(
-        fs.read_to_string(path).expect_err("test fixture should not fail"),
+        fs.read_to_string(path)
+            .expect_err("test fixture should not fail"),
         GardenerError::Io(_)
     ));
 
@@ -785,8 +801,12 @@ fn runtime_fake_contracts() {
     assert_eq!(out.exit_code, 0);
 
     let terminal = FakeTerminal::new(false);
-    terminal.write_line("line").expect("test fixture should not fail");
-    terminal.draw("frame").expect("test fixture should not fail");
+    terminal
+        .write_line("line")
+        .expect("test fixture should not fail");
+    terminal
+        .draw("frame")
+        .expect("test fixture should not fail");
     assert!(!terminal.stdin_is_tty());
 }
 
@@ -798,10 +818,12 @@ fn runtime_extra_branch_coverage() {
     let fs = FakeFileSystem::default();
     fs.set_fail_next(GardenerError::Io("x".to_string()));
     assert!(matches!(
-        fs.create_dir_all(Path::new("d")).expect_err("test fixture should not fail"),
+        fs.create_dir_all(Path::new("d"))
+            .expect_err("test fixture should not fail"),
         GardenerError::Io(_)
     ));
-    fs.create_dir_all(Path::new("d")).expect("test fixture should not fail");
+    fs.create_dir_all(Path::new("d"))
+        .expect("test fixture should not fail");
 
     let term = FakeTerminal::new(true);
     term.write_line("a").expect("test fixture should not fail");
@@ -833,7 +855,9 @@ fn runtime_extra_branch_coverage() {
 #[test]
 fn runtime_production_contracts() {
     let clock = ProductionClock;
-    clock.sleep_until(clock.now()).expect("test fixture should not fail");
+    clock
+        .sleep_until(clock.now())
+        .expect("test fixture should not fail");
     clock
         .sleep_until(clock.now() + Duration::from_millis(1))
         .expect("test fixture should not fail");
@@ -842,9 +866,15 @@ fn runtime_production_contracts() {
     let path = dir.path().join("x.txt");
     let fs = ProductionFileSystem;
     let nested = dir.path().join("a/b/c");
-    fs.create_dir_all(&nested).expect("test fixture should not fail");
-    fs.write_string(&path, "abc").expect("test fixture should not fail");
-    assert_eq!(fs.read_to_string(&path).expect("test fixture should not fail"), "abc");
+    fs.create_dir_all(&nested)
+        .expect("test fixture should not fail");
+    fs.write_string(&path, "abc")
+        .expect("test fixture should not fail");
+    assert_eq!(
+        fs.read_to_string(&path)
+            .expect("test fixture should not fail"),
+        "abc"
+    );
     assert!(fs.exists(&path));
     fs.remove_file(&path).expect("test fixture should not fail");
 
@@ -879,7 +909,9 @@ fn runtime_production_contracts() {
     let rt = ProductionRuntime::new();
     let _rt_default = ProductionRuntime::default();
     let prod_terminal = gardener::runtime::ProductionTerminal;
-    prod_terminal.draw("frame").expect("test fixture should not fail");
+    prod_terminal
+        .draw("frame")
+        .expect("test fixture should not fail");
     assert!(rt.terminal.stdin_is_tty() || !rt.terminal.stdin_is_tty());
 }
 

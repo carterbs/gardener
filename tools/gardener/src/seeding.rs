@@ -46,9 +46,13 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
 
     out.push_str("System framing\n");
     out.push_str("- Do not invent nonexistent files, architecture, or conventions.\n");
-    out.push_str("- Use AGENTS.md, CLAUDE.md, docs listing, and quality grades as source of truth.\n");
+    out.push_str(
+        "- Use AGENTS.md, CLAUDE.md, docs listing, and quality grades as source of truth.\n",
+    );
     out.push_str("- Emit tasks that can be picked up immediately by a runtime worker without additional context assumptions.\n");
-    out.push_str("- Prefer changes that improve repository legibility, automation, and reliability.\n\n");
+    out.push_str(
+        "- Prefer changes that improve repository legibility, automation, and reliability.\n\n",
+    );
 
     out.push_str("Inputs\n");
     out.push_str(&format!(
@@ -99,9 +103,7 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
     out.push_str("schema_version must be 1.\n");
     out.push_str("state must be seeding.\n");
     out.push_str("payload.tasks is an array of SeedTask objects.\n");
-    out.push_str(
-        "Each object must include: title, details, rationale, domain, priority.\n\n",
-    );
+    out.push_str("Each object must include: title, details, rationale, domain, priority.\n\n");
 
     out.push_str("SeedTask schema\n");
     out.push_str("- title: concise actionable sentence\n");
@@ -313,8 +315,8 @@ fn extract_quality_risks(quality_doc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_docs_listing, extract_quality_risks, read_optional_file, walk_docs, build_seed_prompt,
-        build_seed_prompt_context, build_seed_prompt_v2, SeedPromptContext,
+        build_seed_prompt, build_seed_prompt_context, build_seed_prompt_v2, collect_docs_listing,
+        extract_quality_risks, read_optional_file, walk_docs, SeedPromptContext,
     };
     use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
@@ -375,7 +377,8 @@ mod tests {
             primary_gap: profile.agent_readiness.primary_gap.clone(),
             readiness_score: profile.agent_readiness.readiness_score,
             readiness_grade: profile.agent_readiness.readiness_grade,
-            quality_doc: "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 40 | C |".to_string(),
+            quality_doc: "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 40 | C |"
+                .to_string(),
             agents_md: String::new(),
             claude_md: String::new(),
             docs_listing: "- docs/index.md\n".to_string(),
@@ -474,7 +477,10 @@ mod tests {
         fs::write(nested.join("ignore.txt"), "skip").expect("write");
 
         let listing = collect_docs_listing(dir.path());
-        assert_eq!(listing.lines().collect::<Vec<_>>(), vec!["- docs/README.md", "- docs/nested/nested.md"]);
+        assert_eq!(
+            listing.lines().collect::<Vec<_>>(),
+            vec!["- docs/README.md", "- docs/nested/nested.md"]
+        );
     }
 
     #[test]
@@ -521,11 +527,15 @@ mod tests {
     #[test]
     fn build_seed_prompt_uses_quality_markdown_without_repository_files() {
         let profile = sample_profile();
-        let prompt = build_seed_prompt(&profile, "Risk summary", &RuntimeScope {
-            process_cwd: std::env::current_dir().expect("cwd"),
-            repo_root: None,
-            working_dir: std::env::current_dir().expect("cwd"),
-        });
+        let prompt = build_seed_prompt(
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+        );
 
         assert!(prompt.contains("No AGENTS.md found."));
         assert!(prompt.contains("No CLAUDE.md found."));

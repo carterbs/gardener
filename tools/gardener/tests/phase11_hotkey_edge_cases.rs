@@ -59,8 +59,8 @@ fn escalate_creates_task_even_with_zero_active_workers() {
     // BUG B4: escalation uses active worker count with no guard, so 0 is accepted.
     let dir = TempDir::new().expect("tempdir");
     let scope = test_scope(&dir);
-    let store = BacklogStore::open(dir.path().join(".cache/gardener/backlog.sqlite"))
-        .expect("open store");
+    let store =
+        BacklogStore::open(dir.path().join(".cache/gardener/backlog.sqlite")).expect("open store");
 
     let mut cfg = AppConfig::default();
     cfg.execution.test_mode = true;
@@ -77,10 +77,10 @@ fn escalate_creates_task_even_with_zero_active_workers() {
 
     let tasks = store.list_tasks().expect("list tasks");
     assert!(
-        tasks
-            .iter()
-            .any(|task| task.title.contains("Escalation requested for 0 active worker(s)")
-                && task.priority == Priority::P0),
+        tasks.iter().any(|task| task
+            .title
+            .contains("Escalation requested for 0 active worker(s)")
+            && task.priority == Priority::P0),
         "expected operator-initiated P0 task with active count in the title"
     );
 }
@@ -89,8 +89,8 @@ fn escalate_creates_task_even_with_zero_active_workers() {
 fn quit_after_zero_shows_shutdown_screen() {
     let dir = TempDir::new().expect("tempdir");
     let scope = test_scope(&dir);
-    let store = BacklogStore::open(dir.path().join(".cache/gardener/backlog.sqlite"))
-        .expect("open store");
+    let store =
+        BacklogStore::open(dir.path().join(".cache/gardener/backlog.sqlite")).expect("open store");
 
     let mut cfg = AppConfig::default();
     cfg.execution.test_mode = true;
@@ -104,9 +104,7 @@ fn quit_after_zero_shows_shutdown_screen() {
     assert_eq!(completed, 0);
 
     let shutdown_screens = terminal.shutdown_screens();
-    let shutdown = shutdown_screens
-        .first()
-        .expect("shutdown screen was shown");
+    let shutdown = shutdown_screens.first().expect("shutdown screen was shown");
     assert_eq!(shutdown.0, "All Tasks Complete");
     assert_eq!(shutdown.1, "Completed 0 of 0 task(s).");
 }
@@ -143,7 +141,13 @@ fn operator_hotkey_mapping_unchanged() {
 #[test]
 fn unknown_hotkey_does_not_corrupt_known_actions() {
     assert_eq!(action_for_key_with_mode('x', true), None);
-    assert_eq!(action_for_key_with_mode('r', true), Some(HotkeyAction::Retry));
+    assert_eq!(
+        action_for_key_with_mode('r', true),
+        Some(HotkeyAction::Retry)
+    );
     assert_eq!(action_for_key_with_mode('x', true), None);
-    assert_eq!(action_for_key_with_mode('l', true), Some(HotkeyAction::ReleaseLease));
+    assert_eq!(
+        action_for_key_with_mode('l', true),
+        Some(HotkeyAction::ReleaseLease)
+    );
 }

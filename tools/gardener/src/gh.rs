@@ -438,8 +438,8 @@ pub fn generate_pr_title_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, Mergeable,
-        MergeStateStatus, PrMergeability,
+        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, MergeStateStatus,
+        Mergeable, PrMergeability,
     };
     use crate::git::{GitClient, MergeMode};
     use crate::priority::Priority;

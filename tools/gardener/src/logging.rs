@@ -1,5 +1,6 @@
 use crate::errors::GardenerError;
 use crate::log_retention::enforce_total_budget;
+use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -370,19 +371,14 @@ fn recent_worker_tool_commands_nolock(
             continue;
         }
 
-        let command = match value.get("payload").and_then(extract_payload_command) {
+        let payload = match value.get("payload") {
+            Some(payload) => payload,
+            None => continue,
+        };
+        let command = match format_adapter_event_command(event_type, payload) {
             Some(command) => command,
             None => continue,
         };
-
-        let kind = value
-            .get("payload")
-            .and_then(|p| p.get("kind"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if kind != "ToolCall" && kind != "ToolResult" {
-            continue;
-        }
 
         let worker_id = match value
             .get("payload")
@@ -409,7 +405,7 @@ fn recent_worker_tool_commands_nolock(
 pub fn recent_worker_state_events(
     from_line: usize,
     max_lines: usize,
-) -> Vec<(usize, String, String)> {
+) -> Vec<(usize, String, String, String)> {
     let _guard = run_log_activity_lock()
         .lock()
         .expect("run log activity lock");
@@ -419,7 +415,7 @@ pub fn recent_worker_state_events(
 fn recent_worker_state_events_nolock(
     from_line: usize,
     max_lines: usize,
-) -> Vec<(usize, String, String)> {
+) -> Vec<(usize, String, String, String)> {
     let _ = structured_fallback_line("logging", "recent_worker_state_events_nolock", "starting");
     if max_lines == 0 {
         return Vec::new();
@@ -467,7 +463,8 @@ fn recent_worker_state_events_nolock(
             Some(state) if !state.is_empty() => state.to_string(),
             _ => continue,
         };
-        events.push((idx, worker_id, state));
+        let details = worker_state_details(&state, value.get("payload"));
+        events.push((idx, worker_id, state, details));
     }
 
     if events.len() <= max_lines {
@@ -488,8 +485,103 @@ fn extract_payload_command(payload: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .map(|command| command.replace('\n', "\\n"))
         })
-        .or_else(|| payload.get("payload").and_then(extract_payload_command))
         .or_else(|| payload.get("item").and_then(extract_payload_command))
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|message| message.replace('\n', "\\n"))
+        })
+        .or_else(|| {
+            payload
+                .get("text")
+                .and_then(Value::as_str)
+                .map(|message| message.replace('\n', "\\n"))
+        })
+        .or_else(|| {
+            payload
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|message| message.replace('\n', "\\n"))
+        })
+        .or_else(|| payload.get("payload").and_then(extract_payload_command))
+}
+
+fn format_adapter_event_command(event_type: &str, payload: &Value) -> Option<String> {
+    let message = extract_payload_command(payload)?;
+    let kind = payload.get("kind").and_then(Value::as_str).unwrap_or("");
+    let raw_type = payload
+        .get("raw_type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !kind.is_empty() {
+        Some(format!("{kind}: {message}"))
+    } else if !raw_type.is_empty() {
+        Some(format!("{raw_type}: {message}"))
+    } else if event_type == "adapter.call" {
+        Some(format!("call: {message}"))
+    } else {
+        Some(message)
+    }
+}
+
+fn worker_state_details(state: &str, payload: Option<&Value>) -> String {
+    let Some(payload) = payload else {
+        return String::new();
+    };
+    if state.is_empty() {
+        return String::new();
+    }
+    let mut details = Vec::new();
+    let mut push_detail = |name: &'static str, value: Option<&Value>| {
+        let Some(value) = value else {
+            return;
+        };
+        if name == "next_check_in_secs" {
+            if let Some(seconds) = value.as_u64() {
+                if let Some(checked_time) = local_time_for_next_check(seconds) {
+                    details.push(format!("next_check_at={checked_time}"));
+                } else {
+                    details.push(format!("next_check_in={seconds}s"));
+                }
+                return;
+            }
+        }
+        let value = match value {
+            Value::String(s) if !s.is_empty() => s.to_string(),
+            Value::Null => String::new(),
+            Value::Bool(b) => b.to_string(),
+            Value::Number(n) => n.to_string(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| String::new()),
+        };
+        if !value.is_empty() {
+            details.push(format!("{name}={value}"));
+        }
+    };
+    push_detail("attempt", payload.get("attempt"));
+    push_detail("pr_number", payload.get("pr_number"));
+    push_detail("block_reason", payload.get("block_reason"));
+    push_detail("mergeable", payload.get("mergeable"));
+    push_detail("merge_state_status", payload.get("merge_state_status"));
+    push_detail("next_check_in_secs", payload.get("next_check_in_secs"));
+    if details.is_empty() {
+        return String::new();
+    }
+    if state == "merge_polling" {
+        return details.join(", ");
+    }
+    if state == "ci_failure_remediation" && !state.is_empty() {
+        details.push(format!("state={state}"));
+        return details.join(", ");
+    }
+    details.join(", ")
+}
+
+fn local_time_for_next_check(_seconds: u64) -> Option<String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let target = now.saturating_add(_seconds) as i64;
+    let local = Local.timestamp_opt(target, 0).single()?;
+    Some(local.format("%H:%M:%S").to_string())
 }
 
 fn kv_attr(key: &str, value: &str) -> Value {
@@ -581,7 +673,7 @@ mod tests {
     use super::{
         append_run_log_nolock, clear_run_logger_nolock, current_run_id_nolock,
         current_run_log_path_nolock, default_run_log_path, init_run_logger_nolock,
-        structured_fallback_line, JsonlLogger,
+        local_time_for_next_check, structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
     use std::path::Path;
@@ -775,14 +867,17 @@ mod tests {
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-2","kind":"ToolCall","command":"ignored"}}"#,
         ];
         std::fs::write(&path, log_lines.join("\n")).expect("seed log");
-        let lines = super::recent_worker_tool_commands_nolock(0, 2);
-        assert_eq!(lines.len(), 2);
+        let lines = super::recent_worker_tool_commands_nolock(0, 3);
+        assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].0, 0);
         assert_eq!(lines[0].1, "worker-1");
-        assert_eq!(lines[1].0, 2);
-        assert_eq!(lines[1].1, "worker-2");
-        assert!(lines[0].2.contains("rg abc"));
-        assert!(lines[1].2.contains("ignored"));
+        assert_eq!(lines[1].0, 1);
+        assert_eq!(lines[1].1, "worker-1");
+        assert_eq!(lines[2].0, 2);
+        assert_eq!(lines[2].1, "worker-2");
+        assert!(lines[0].2.contains("ToolResult: rg abc"));
+        assert!(lines[1].2.contains("Message: skip"));
+        assert!(lines[2].2.contains("ToolCall: ignored"));
         clear_run_logger_nolock();
     }
 
@@ -804,10 +899,88 @@ mod tests {
         assert_eq!(lines[0].0, 0);
         assert_eq!(lines[0].1, "worker-1");
         assert_eq!(lines[0].2, "understand");
+        assert_eq!(lines[0].3, "");
         assert_eq!(lines[1].0, 2);
         assert_eq!(lines[1].1, "worker-2");
         assert_eq!(lines[1].2, "merge_lock_waiting");
+        assert_eq!(lines[1].3, "");
         clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn local_time_for_next_check_uses_local_timestamp_format() {
+        let next_check = local_time_for_next_check(30).unwrap_or_default();
+        if !next_check.is_empty() {
+            assert_eq!(next_check.len(), 8);
+            assert_eq!(&next_check[2..3], ":");
+            assert_eq!(&next_check[5..6], ":");
+        }
+    }
+
+    #[test]
+    fn worker_state_details_formats_merge_polling_fields() {
+        let details = super::worker_state_details(
+            "merge_polling",
+            Some(&json!({
+                "attempt": 2,
+                "pr_number": 53,
+                "block_reason": "checks are still running",
+                "mergeable": "UNKNOWN",
+                "merge_state_status": "DIRTY",
+                "next_check_in_secs": 30
+            })),
+        );
+
+        assert!(details.contains("attempt=2"));
+        assert!(details.contains("pr_number=53"));
+        assert!(details.contains("block_reason=checks are still running"));
+        assert!(details.contains("mergeable=UNKNOWN"));
+        assert!(details.contains("merge_state_status=DIRTY"));
+        assert!(details.contains("next_check_"));
+    }
+
+    #[test]
+    fn worker_state_details_for_ci_failure_includes_state_suffix() {
+        let details = super::worker_state_details(
+            "ci_failure_remediation",
+            Some(&json!({
+                "attempt": 1
+            })),
+        );
+        assert!(details.contains("attempt=1"));
+        assert!(details.contains("state=ci_failure_remediation"));
+    }
+
+    #[test]
+    fn format_adapter_event_command_covers_kind_raw_and_call_paths() {
+        let with_kind = super::format_adapter_event_command(
+            "adapter.tool",
+            &json!({
+                "kind": "ToolCall",
+                "command": "git status"
+            }),
+        )
+        .expect("kind format");
+        assert_eq!(with_kind, "ToolCall: git status");
+
+        let with_raw_type = super::format_adapter_event_command(
+            "adapter.message",
+            &json!({
+                "raw_type": "assistant_thought",
+                "text": "thinking"
+            }),
+        )
+        .expect("raw type format");
+        assert_eq!(with_raw_type, "assistant_thought: thinking");
+
+        let with_call = super::format_adapter_event_command(
+            "adapter.call",
+            &json!({
+                "message": "spawned"
+            }),
+        )
+        .expect("call format");
+        assert_eq!(with_call, "call: spawned");
     }
 
     #[test]

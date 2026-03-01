@@ -82,7 +82,11 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
         return Ok(0);
     }
 
-    eprintln!("Timeline: {} bytes, {} events", timeline.len(), timeline.lines().count());
+    eprintln!(
+        "Timeline: {} bytes, {} events",
+        timeline.len(),
+        timeline.lines().count()
+    );
     append_run_log(
         "info",
         "friction_analysis.timeline.extracted",
@@ -100,7 +104,8 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
     }
 
     // Step 2: Load config for LLM access
-    let cwd = std::env::current_dir().map_err(|e| gardener::errors::GardenerError::Io(e.to_string()))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| gardener::errors::GardenerError::Io(e.to_string()))?;
     let runtime = ProductionRuntime::new();
     let overrides = CliOverrides {
         config_path: args.config.clone(),
@@ -150,13 +155,7 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
 
             eprintln!("Found {} friction finding(s):", findings.len());
             for (i, f) in findings.iter().enumerate() {
-                eprintln!(
-                    "  {}. [{}] {} ({})",
-                    i + 1,
-                    f.severity,
-                    f.title,
-                    f.category
-                );
+                eprintln!("  {}. [{}] {} ({})", i + 1, f.severity, f.title, f.category);
             }
 
             // Print full JSON to stdout
@@ -166,8 +165,7 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
             });
             println!(
                 "{}",
-                serde_json::to_string_pretty(&output)
-                    .unwrap_or_else(|_| "{{}}".to_string())
+                serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{{}}".to_string())
             );
 
             // Optionally write to backlog

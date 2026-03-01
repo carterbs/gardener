@@ -2,7 +2,7 @@ use gardener::errors::GardenerError;
 use gardener::gh::GhClient;
 use gardener::git::GitClient;
 use gardener::merge_loop::{run_merge_loop, MergeLoopContext};
-use gardener::phase_cli::{step, print_agent_event, resolve_worktree_from_pr, PhaseRuntime};
+use gardener::phase_cli::{print_agent_event, resolve_worktree_from_pr, step, PhaseRuntime};
 
 fn main() -> Result<(), GardenerError> {
     gardener::logging::append_run_log("info", "bin.merge_pr.started", serde_json::json!({}));
@@ -19,7 +19,14 @@ fn main() -> Result<(), GardenerError> {
     let (worktree_path, branch, pr_number) =
         resolve_worktree_from_pr(&rt.runner, &rt.scope, pr, "merge-pr")?;
 
-    step("merge-pr", "RUN", &format!("pr={pr_number} branch={branch} worktree={}", worktree_path.display()));
+    step(
+        "merge-pr",
+        "RUN",
+        &format!(
+            "pr={pr_number} branch={branch} worktree={}",
+            worktree_path.display()
+        ),
+    );
 
     let gh = GhClient::new(&rt.runner, &worktree_path);
     let git = GitClient::new(&rt.runner, &worktree_path);

@@ -361,7 +361,9 @@ impl BacklogStore {
                         log_write_result(
                             &writer_path,
                             operation,
-                            &result.as_ref().map(|count| json!({ "recovered_count": count })),
+                            &result
+                                .as_ref()
+                                .map(|count| json!({ "recovered_count": count })),
                             result.as_ref().err(),
                         );
                         let _ = reply.send(result);
@@ -414,8 +416,7 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                        let result =
-                            mark_merge_pending(&write_conn, &task_id, &lease_owner, now);
+                        let result = mark_merge_pending(&write_conn, &task_id, &lease_owner, now);
                         log_write_result(
                             &writer_path,
                             operation,
@@ -462,8 +463,7 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                        let result =
-                            set_related_pr(&write_conn, &task_id, pr_number, &branch, now);
+                        let result = set_related_pr(&write_conn, &task_id, pr_number, &branch, now);
                         log_write_result(
                             &writer_path,
                             operation,
@@ -868,12 +868,7 @@ impl BacklogStore {
     }
 
     /// Attach PR metadata to a task if it has not already been linked.
-    pub fn set_related_pr(
-        &self,
-        task_id: &str,
-        pr_number: i64,
-        branch: &str,
-    ) -> StoreResult<bool> {
+    pub fn set_related_pr(&self, task_id: &str, pr_number: i64, branch: &str) -> StoreResult<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
             .blocking_send(WriteCmd::SetRelatedPr {

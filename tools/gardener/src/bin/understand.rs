@@ -1,6 +1,6 @@
 use gardener::errors::GardenerError;
 use gardener::logging::append_run_log;
-use gardener::phase_cli::{step, print_agent_event, PhaseRuntime};
+use gardener::phase_cli::{print_agent_event, step, PhaseRuntime};
 use gardener::understand_phase::{run_understand, UnderstandContext};
 
 fn main() -> Result<(), GardenerError> {
@@ -31,6 +31,13 @@ fn main() -> Result<(), GardenerError> {
         on_agent_event: Some(&|event| print_agent_event("understand", event)),
     })?;
 
-    step("understand", "DONE", &format!("category={:?} reasoning={}", outcome.category, outcome.reasoning));
+    step(
+        "understand",
+        "DONE",
+        &format!(
+            "category={:?} reasoning={}",
+            outcome.category, outcome.reasoning
+        ),
+    );
     Ok(())
 }

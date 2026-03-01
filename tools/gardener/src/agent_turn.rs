@@ -113,6 +113,25 @@ pub fn run_agent_turn(input: AgentTurnInput<'_>) -> Result<AgentTurnOutput, Gard
         }),
     );
 
+    let output_schema = if state == WorkerState::Doing {
+        let caps = adapter
+            .probe_capabilities(process_runner)
+            .unwrap_or_default();
+        if caps.supports_output_schema {
+            let schema_path = scope
+                .working_dir
+                .join(".cache/gardener/doing-output-schema.json");
+            let schema = r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#;
+            std::fs::write(&schema_path, schema)
+                .ok()
+                .map(|_| schema_path)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let max_turns = Some(max_turns_for_state(cfg, state));
     let ctx = AdapterContext {
         worker_id: identity.worker_id.clone(),
@@ -122,7 +141,7 @@ pub fn run_agent_turn(input: AgentTurnInput<'_>) -> Result<AgentTurnOutput, Gard
         cwd: worktree_path.to_path_buf(),
         prompt_version: prepared.prompt_version.clone(),
         context_manifest_hash: prepared.context_manifest_hash.clone(),
-        output_schema: None,
+        output_schema,
         output_file: Some(output_file),
         permissive_mode: cfg.execution.permissions_mode == "permissive_v1",
         max_turns,

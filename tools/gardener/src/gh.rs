@@ -1111,7 +1111,10 @@ mod tests {
 
     #[test]
     fn truncate_log_keeps_last_n_lines() {
-        let log = (1..=200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let log = (1..=200)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let truncated = truncate_log(&log, 150);
         let lines: Vec<&str> = truncated.lines().collect();
         assert_eq!(lines.len(), 150);

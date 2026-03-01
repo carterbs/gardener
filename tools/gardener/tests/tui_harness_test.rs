@@ -24,7 +24,7 @@ fn fake_terminal_captures_tui_frames_and_interactions() {
             active: 1,
             failed: 0,
             unresolved: 0,
-        merge_pending: 0,
+            merge_pending: 0,
             p0: 1,
             p1: 1,
             p2: 0,

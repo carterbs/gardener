@@ -644,8 +644,7 @@ fn merge_worker_card_item(
                 row.state.clone(),
                 row.task_title.clone(),
                 row.tool_line.clone(),
-                row
-                    .command_details
+                row.command_details
                     .iter()
                     .map(|(timestamp, command)| CommandEntry {
                         timestamp: timestamp.clone(),
@@ -704,11 +703,7 @@ fn merge_worker_card_item(
             Line::from(vec![
                 Span::raw("    "),
                 Span::styled("Commands: ", Style::default().fg(Color::Blue)),
-                Span::styled(
-                    command_stream,
-                    Style::default()
-                        .fg(Color::Gray),
-                ),
+                Span::styled(command_stream, Style::default().fg(Color::Gray)),
             ]),
         ]
     };
@@ -1244,11 +1239,7 @@ fn draw_dashboard_frame(
                     Line::from(vec![
                         Span::raw("    "),
                         Span::styled("Commands: ", Style::default().fg(Color::Blue)),
-                        Span::styled(
-                            command_stream,
-                            Style::default()
-                                .fg(Color::Gray),
-                        ),
+                        Span::styled(command_stream, Style::default().fg(Color::Gray)),
                     ]),
                 ]
             };
@@ -1817,7 +1808,7 @@ where
     })
 }
 
-fn format_state_label(state: &str) -> String {
+pub(crate) fn format_state_label(state: &str) -> String {
     match state {
         "init" => "Startup".to_string(),
         "backlog_sync" => "Backlog Sync".to_string(),
@@ -1836,9 +1827,10 @@ fn format_state_label(state: &str) -> String {
         "merging" => "Merging".to_string(),
         "merge_lock_waiting" => "Merge Lock Wait".to_string(),
         "merge_lock_held" => "Merge Lock Held".to_string(),
-        "merge_polling" => "Merge Polling".to_string(),
+        "merge_polling" => "Checking mergeability".to_string(),
+        "merge_from_main" => "Updating branch with main".to_string(),
         "merge_remediation" => "Merge Remediation".to_string(),
-        "post_merge_validation" => "Post-Merge Validation".to_string(),
+        "post_merge_validation" => "Running post-merge checks".to_string(),
         "teardown" => "Teardown".to_string(),
         "complete" => "Complete".to_string(),
         "failed" => "Failed".to_string(),

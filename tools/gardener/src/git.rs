@@ -108,12 +108,53 @@ impl<'a> GitClient<'a> {
 
     pub fn head_sha(&self) -> Result<Option<String>, GardenerError> {
         let out = self.run(["git", "rev-parse", "HEAD"])?;
-        if out.exit_code == 0 {
-            let sha = out.stdout.trim().to_string();
-            Ok(if sha.is_empty() { None } else { Some(sha) })
+        let sha = if out.exit_code == 0 {
+            let s = out.stdout.trim().to_string();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         } else {
-            Ok(None)
+            None
+        };
+        append_run_log(
+            "debug",
+            "git.head_sha",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "sha": sha
+            }),
+        );
+        Ok(sha)
+    }
+
+    pub fn commits_since(&self, base_sha: &str) -> Result<Vec<String>, GardenerError> {
+        if base_sha.is_empty() {
+            return Ok(vec![]);
         }
+        let range = format!("{base_sha}..HEAD");
+        let out = self.run(["git", "log", &range, "--format=%s"])?;
+        let subjects: Vec<String> = if out.exit_code != 0 {
+            vec![]
+        } else {
+            out.stdout
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        };
+        append_run_log(
+            "debug",
+            "git.commits_since",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "base_sha": base_sha,
+                "count": subjects.len()
+            }),
+        );
+        Ok(subjects)
     }
 
     pub fn verify_ancestor(
@@ -828,6 +869,47 @@ mod tests {
             .detect_detached_head()
             .expect("checked");
         assert!(detached);
+    }
+
+    #[test]
+    fn commits_since_returns_subjects() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: add foo\nfix: bar\n".to_string(),
+            stderr: String::new(),
+        }));
+        let subjects = GitClient::new(&runner, "/repo")
+            .commits_since("abc123")
+            .expect("commits_since");
+        assert_eq!(subjects, vec!["feat: add foo", "fix: bar"]);
+        let spawned = runner.spawned();
+        assert!(spawned[0].args.contains(&"abc123..HEAD".to_string()));
+        assert!(spawned[0].args.contains(&"--format=%s".to_string()));
+    }
+
+    #[test]
+    fn commits_since_empty_base_returns_empty() {
+        let runner = FakeProcessRunner::default();
+        let subjects = GitClient::new(&runner, "/repo")
+            .commits_since("")
+            .expect("empty base");
+        assert!(subjects.is_empty());
+        assert_eq!(runner.spawned().len(), 0);
+    }
+
+    #[test]
+    fn commits_since_nonzero_exit_returns_empty() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 128,
+            stdout: String::new(),
+            stderr: "bad object abc123".to_string(),
+        }));
+        let subjects = GitClient::new(&runner, "/repo")
+            .commits_since("abc123")
+            .expect("nonzero returns empty");
+        assert!(subjects.is_empty());
     }
 
     #[test]

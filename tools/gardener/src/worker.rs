@@ -12,7 +12,9 @@ use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
-use crate::prompt_registry::{ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry};
+use crate::prompt_registry::{
+    ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry,
+};
 use crate::protocol::AgentTerminal;
 use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
@@ -126,6 +128,23 @@ fn emit_worker_activity_state_with(
     append_run_log("info", "worker.activity.state_changed", payload);
 }
 
+fn merge_polling_block_reason(
+    mergeable: &Mergeable,
+    merge_state_status: &MergeStateStatus,
+) -> Option<&'static str> {
+    match (mergeable, merge_state_status) {
+        (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => None,
+        (Mergeable::Conflicting, _) => Some("merge conflicts detected"),
+        (_, MergeStateStatus::Blocked) => {
+            Some("blocked by branch protection rules or required checks")
+        }
+        (_, MergeStateStatus::Dirty) => Some("checks are still running"),
+        (_, MergeStateStatus::Unstable) => Some("checks are failing or unstable"),
+        (_, MergeStateStatus::Behind) => Some("branch is behind main"),
+        (Mergeable::Unknown, _) => Some("mergeability is currently unknown"),
+        _ => None,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn execute_task(
@@ -306,6 +325,9 @@ fn execute_task_live(
         fsm.transition(WorkerState::Doing)?;
     }
 
+    let git = GitClient::new(process_runner, &worktree_path);
+    let pre_doing_sha = git.head_sha()?.unwrap_or_default();
+
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing);
     let doing_result = run_agent_turn(AgentTurnInput {
         cfg,
@@ -345,16 +367,33 @@ fn execute_task_live(
     }
     let doing_output = match parse_doing_output(&doing_result.payload, worker_id, task_summary) {
         Ok(output) => output,
-        Err(e) => {
-            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
-            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-                worker_id: identity.worker_id,
-                session_id: identity.session.session_id,
-                final_state: WorkerState::Failed,
-                logs,
-                teardown: None,
-                failure_reason: Some(e.to_string()),
-            }));
+        Err(parse_err) => {
+            // Git fallback: if the agent committed something, the work was done
+            // regardless of whether the JSON envelope was valid.
+            let commits = git.commits_since(&pre_doing_sha).unwrap_or_default();
+            if let Some(subject) = commits.into_iter().next() {
+                append_run_log(
+                    "warn",
+                    "worker.doing.payload_fallback_to_git",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task_id,
+                        "parse_error": parse_err.to_string(),
+                        "commit_subject": &subject
+                    }),
+                );
+                DoingOutput { summary: subject }
+            } else {
+                emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                return Ok(WorkerOutcome::Completed(WorkerRunSummary {
+                    worker_id: identity.worker_id,
+                    session_id: identity.session.session_id,
+                    final_state: WorkerState::Failed,
+                    logs,
+                    teardown: None,
+                    failure_reason: Some(parse_err.to_string()),
+                }));
+            }
         }
     };
     let _ = doing_output;
@@ -381,7 +420,6 @@ fn execute_task_live(
 
     // Safety-net: no-op if agent already committed (clean worktree)
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Commit);
-    let git = GitClient::new(process_runner, &worktree_path);
     git.commit_all(&fallback_commit_message(task_summary))?;
 
     // --- Deterministic Gitting ---
@@ -665,16 +703,25 @@ pub fn execute_merge_phase(
     };
 
     for attempt in 0..MAX_MERGE_REMEDIATION {
+        let status = gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
+        let block_reason =
+            merge_polling_block_reason(&status.mergeable, &status.merge_state_status);
+        let mut poll_details = json!({
+            "pr_number": pr,
+            "attempt": attempt + 1,
+            "mergeable": format!("{:?}", status.mergeable),
+            "merge_state_status": format!("{:?}", status.merge_state_status),
+            "next_check_in_secs": MERGEABILITY_POLL_INTERVAL.as_secs()
+        });
+        if let Some(reason) = block_reason {
+            poll_details["block_reason"] = json!(reason);
+        }
         emit_worker_activity_state_with(
             worker_id,
             task_id,
             WorkerActivityState::MergePolling,
-            json!({
-                "pr_number": pr,
-                "attempt": attempt + 1
-            }),
+            poll_details,
         );
-        let status = gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
 
         append_run_log(
             "info",
@@ -714,7 +761,11 @@ pub fn execute_merge_phase(
                     }
                     Err(merge_err) => {
                         if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                            emit_worker_activity_state(
+                                worker_id,
+                                task_id,
+                                WorkerActivityState::Failed,
+                            );
                             return Ok(WorkerRunSummary {
                                 worker_id: req.worker_id.clone(),
                                 session_id: req.session_id.clone(),
@@ -739,13 +790,28 @@ pub fn execute_merge_phase(
                     json!({ "pr_number": pr, "attempt": attempt + 1 }),
                 );
                 if let Err(e) = worker_merge_main_and_push(
-                    &gh, &git, &mut learning_loop, &mut logs, cfg, process_runner,
-                    scope, req, &factory, &registry, &identity, pr, branch, worker_id,
-                    task_id, attempt,
+                    &gh,
+                    &git,
+                    &mut learning_loop,
+                    &mut logs,
+                    cfg,
+                    process_runner,
+                    scope,
+                    req,
+                    &factory,
+                    &registry,
+                    &identity,
+                    pr,
+                    branch,
+                    worker_id,
+                    task_id,
+                    attempt,
                 ) {
                     // Git-level merge failed — let the agent fix it
                     emit_worker_activity_state_with(
-                        worker_id, task_id, WorkerActivityState::MergeRemediation,
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::MergeRemediation,
                         json!({ "pr_number": pr, "attempt": attempt + 1 }),
                     );
                     learning_loop.ingest_failure(
@@ -754,14 +820,19 @@ pub fn execute_merge_phase(
                         vec![format!("error={e}")],
                     );
                     let remediation_result = run_agent_turn(AgentTurnInput {
-                        cfg, process_runner, scope,
+                        cfg,
+                        process_runner,
+                        scope,
                         worktree_path: &req.worktree_path,
-                        factory: &factory, registry: &registry,
-                        learning_loop: &learning_loop, identity: &identity,
+                        factory: &factory,
+                        registry: &registry,
+                        learning_loop: &learning_loop,
+                        identity: &identity,
                         state: WorkerState::Merging,
                         task_summary: &req.task_summary,
                         attempt_count: req.attempt_count,
-                        prompt_override: None, on_event: None,
+                        prompt_override: None,
+                        on_event: None,
                     })?;
                     logs.push(log_event_from(&remediation_result, WorkerState::Merging));
                     if remediation_result.terminal == AgentTerminal::Failure
@@ -772,7 +843,10 @@ pub fn execute_merge_phase(
                         return Ok(WorkerRunSummary {
                             worker_id: req.worker_id.clone(),
                             session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed, logs, teardown: None, failure_reason,
+                            final_state: WorkerState::Failed,
+                            logs,
+                            teardown: None,
+                            failure_reason,
                         });
                     }
                 }
@@ -787,13 +861,28 @@ pub fn execute_merge_phase(
                     json!({ "pr_number": pr, "attempt": attempt + 1 }),
                 );
                 if let Err(e) = worker_merge_main_and_push(
-                    &gh, &git, &mut learning_loop, &mut logs, cfg, process_runner,
-                    scope, req, &factory, &registry, &identity, pr, branch, worker_id,
-                    task_id, attempt,
+                    &gh,
+                    &git,
+                    &mut learning_loop,
+                    &mut logs,
+                    cfg,
+                    process_runner,
+                    scope,
+                    req,
+                    &factory,
+                    &registry,
+                    &identity,
+                    pr,
+                    branch,
+                    worker_id,
+                    task_id,
+                    attempt,
                 ) {
                     // Git-level merge failed — let the agent fix it
                     emit_worker_activity_state_with(
-                        worker_id, task_id, WorkerActivityState::MergeRemediation,
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::MergeRemediation,
                         json!({ "pr_number": pr, "attempt": attempt + 1 }),
                     );
                     learning_loop.ingest_failure(
@@ -802,14 +891,19 @@ pub fn execute_merge_phase(
                         vec![format!("error={e}")],
                     );
                     let remediation_result = run_agent_turn(AgentTurnInput {
-                        cfg, process_runner, scope,
+                        cfg,
+                        process_runner,
+                        scope,
                         worktree_path: &req.worktree_path,
-                        factory: &factory, registry: &registry,
-                        learning_loop: &learning_loop, identity: &identity,
+                        factory: &factory,
+                        registry: &registry,
+                        learning_loop: &learning_loop,
+                        identity: &identity,
                         state: WorkerState::Merging,
                         task_summary: &req.task_summary,
                         attempt_count: req.attempt_count,
-                        prompt_override: None, on_event: None,
+                        prompt_override: None,
+                        on_event: None,
                     })?;
                     logs.push(log_event_from(&remediation_result, WorkerState::Merging));
                     if remediation_result.terminal == AgentTerminal::Failure
@@ -820,7 +914,10 @@ pub fn execute_merge_phase(
                         return Ok(WorkerRunSummary {
                             worker_id: req.worker_id.clone(),
                             session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed, logs, teardown: None, failure_reason,
+                            final_state: WorkerState::Failed,
+                            logs,
+                            teardown: None,
+                            failure_reason,
                         });
                     }
                 }
@@ -837,13 +934,14 @@ pub fn execute_merge_phase(
                 let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
                 let evidence: Vec<String> = failed_checks
                     .iter()
-                    .map(|c| format!("## CI check: {}\nLink: {}\n\n```\n{}\n```", c.name, c.link, c.log_snippet))
+                    .map(|c| {
+                        format!(
+                            "## CI check: {}\nLink: {}\n\n```\n{}\n```",
+                            c.name, c.link, c.log_snippet
+                        )
+                    })
                     .collect();
-                learning_loop.ingest_failure(
-                    WorkerState::Merging,
-                    "CI checks failed",
-                    evidence,
-                );
+                learning_loop.ingest_failure(WorkerState::Merging, "CI checks failed", evidence);
                 let ci_tpl = ci_failure_remediation_template();
                 let ci_result = run_agent_turn(AgentTurnInput {
                     cfg,
@@ -902,7 +1000,11 @@ pub fn execute_merge_phase(
                     }
                     Err(merge_err) => {
                         if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                            emit_worker_activity_state(
+                                worker_id,
+                                task_id,
+                                WorkerActivityState::Failed,
+                            );
                             return Ok(WorkerRunSummary {
                                 worker_id: req.worker_id.clone(),
                                 session_id: req.session_id.clone(),
@@ -1464,13 +1566,12 @@ fn worktree_slug_suffix(task_id: &str) -> String {
 
 const WORKTREE_TASK_SLUG_PREFIX_CHARS: usize = 14;
 
-
 #[cfg(test)]
 mod tests {
     use super::{
         execute_task, extract_failure_reason, review_artifact_path, sanitize_for_branch,
-        worktree_branch_for, worktree_path_for, worktree_slug_for_task,
-        worktree_slug_suffix, WorkerOutcome, WORKTREE_TASK_SLUG_PREFIX_CHARS,
+        worktree_branch_for, worktree_path_for, worktree_slug_for_task, worktree_slug_suffix,
+        WorkerOutcome, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::do_phase::{fallback_commit_message, parse_doing_output};
@@ -1667,7 +1768,10 @@ mod tests {
     fn parse_doing_output_succeeds_with_valid_payload() {
         let payload = serde_json::json!({"summary": "did the thing"});
         let result = parse_doing_output(&payload, "worker-1", "Add test");
-        assert_eq!(result.expect("valid payload should parse").summary, "did the thing");
+        assert_eq!(
+            result.expect("valid payload should parse").summary,
+            "did the thing"
+        );
     }
 
     #[test]

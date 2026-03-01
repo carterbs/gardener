@@ -1,7 +1,7 @@
+use gardener::do_phase::{run_do, DoContext};
 use gardener::errors::GardenerError;
 use gardener::logging::append_run_log;
-use gardener::phase_cli::{step, print_agent_event, PhaseRuntime};
-use gardener::do_phase::{run_do, DoContext};
+use gardener::phase_cli::{print_agent_event, step, PhaseRuntime};
 
 fn main() -> Result<(), GardenerError> {
     append_run_log("info", "bin.do_task.started", serde_json::json!({}));
@@ -18,7 +18,11 @@ fn main() -> Result<(), GardenerError> {
     let rt = PhaseRuntime::init("do-task")?;
     let worktree_path = std::path::PathBuf::from(&worktree);
 
-    step("do-task", "RUN", &format!("task={task} worktree={worktree}"));
+    step(
+        "do-task",
+        "RUN",
+        &format!("task={task} worktree={worktree}"),
+    );
 
     let outcome = run_do(&DoContext {
         cfg: &rt.cfg,
@@ -40,5 +44,7 @@ fn main() -> Result<(), GardenerError> {
 }
 
 fn get_arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }

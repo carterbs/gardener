@@ -1,6 +1,6 @@
 use gardener::errors::GardenerError;
 use gardener::logging::append_run_log;
-use gardener::phase_cli::{step, print_agent_event, PhaseRuntime};
+use gardener::phase_cli::{print_agent_event, step, PhaseRuntime};
 use gardener::plan_phase::{run_plan, PlanContext};
 
 fn main() -> Result<(), GardenerError> {
@@ -40,5 +40,7 @@ fn main() -> Result<(), GardenerError> {
 }
 
 fn get_arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }

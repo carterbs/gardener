@@ -532,8 +532,8 @@ fn linter_run_triage_with_tty_must_be_ignored() {
 fn find_tty_forwarding_helpers(lines: &[&str]) -> Vec<String> {
     let mut helpers = Vec::new();
     let mut i = 0;
-        while i < lines.len() {
-            let trimmed = lines[i].trim();
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
         // Skip test functions — we only want file-level helpers
         if trimmed == "#[test]" {
             i += 1;

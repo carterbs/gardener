@@ -17,16 +17,16 @@ use crate::runtime::{
 };
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
-use crate::worker_identity::WorkerIdentity;
 use crate::tui::{
-    reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats,
-    WorkerRow,
+    format_state_label, reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView,
+    QueueStats, WorkerRow,
 };
 use crate::types::RuntimeScope;
 use crate::worker::{
     execute_merge_phase, execute_task, worktree_branch_for, worktree_path_for, MergeRequest,
     WorkerOutcome,
 };
+use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde_json::json;
 use std::sync::mpsc;
@@ -133,12 +133,13 @@ pub fn run_worker_pool_fsm(
     let mut completed = 0usize;
 
     let mark_merge_worker_busy = |workers: &mut [WorkerRow],
-                                      last_activity_pulse: &mut Vec<Instant>,
-                                      merge_row_idx: usize,
-                                      pr_number: u64,
-                                      task_summary: &str| {
+                                  last_activity_pulse: &mut Vec<Instant>,
+                                  merge_row_idx: usize,
+                                  pr_number: u64,
+                                  task_summary: &str| {
         workers[merge_row_idx].state = "merging".to_string();
-        workers[merge_row_idx].task_title = format!("PR #{pr_number} {task_title}", task_title = task_summary);
+        workers[merge_row_idx].task_title =
+            format!("PR #{pr_number} {task_title}", task_title = task_summary);
         let merge_msg = format!("merging PR #{pr_number}");
         workers[merge_row_idx].tool_line = merge_msg.clone();
         append_worker_command(&mut workers[merge_row_idx], &merge_msg);
@@ -165,10 +166,7 @@ pub fn run_worker_pool_fsm(
         if report_visible {
             continue;
         }
-        let repo_root = scope
-            .repo_root
-            .as_ref()
-            .unwrap_or(&scope.working_dir);
+        let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
         let worktree_client = WorktreeClient::new(runtime.process_runner.as_ref(), repo_root);
         let maybe_start_merge = |active_merging: &mut usize,
                                  merge_tx: &mut Option<mpsc::Sender<MergeRequest>>|
@@ -296,10 +294,8 @@ pub fn run_worker_pool_fsm(
             mpsc::Receiver<PoolResultMessage>,
         ) = mpsc::channel();
         // Merge queue: doing workers send MergeRequests here.
-        let (merge_tx, merge_rx): (
-            mpsc::Sender<MergeRequest>,
-            mpsc::Receiver<MergeRequest>,
-        ) = mpsc::channel();
+        let (merge_tx, merge_rx): (mpsc::Sender<MergeRequest>, mpsc::Receiver<MergeRequest>) =
+            mpsc::channel();
         let runtime_scope = scope.clone();
         let mut merge_tx = Some(merge_tx);
         if let Some((pr_number, task_summary)) =
@@ -400,7 +396,11 @@ pub fn run_worker_pool_fsm(
                 }
 
                 match rx.recv_timeout(Duration::from_millis(25)) {
-                    Ok(PoolResultMessage::DoingResult { slot_idx: idx, task_id, result }) => {
+                    Ok(PoolResultMessage::DoingResult {
+                        slot_idx: idx,
+                        task_id,
+                        result,
+                    }) => {
                         active_doing = active_doing.saturating_sub(1);
                         let worker_id = workers[idx].worker_id.clone();
                         if shutdown_error.is_some() {
@@ -423,7 +423,8 @@ pub fn run_worker_pool_fsm(
                                             "error": msg
                                         }),
                                     );
-                                    shutdown_error = Some((worker_id.clone(), task_id.clone(), msg));
+                                    shutdown_error =
+                                        Some((worker_id.clone(), task_id.clone(), msg));
                                     request_interrupt();
                                 }
                                 Ok(WorkerOutcome::HandoffToMerge(req)) => {
@@ -434,26 +435,30 @@ pub fn run_worker_pool_fsm(
                                         req.pr_number as i64,
                                         &req.branch,
                                     );
-                                    emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                        seq: next_seq(),
-                                        timestamp_ns: timestamp_ns(),
-                                        worker_id: worker_id.clone(),
-                                        operation: "mark_merge_pending".to_string(),
-                                        task_id: task_id.clone(),
-                                        result_ok: true,
-                                    }));
+                                    emit_record(RecordEntry::BacklogMutation(
+                                        BacklogMutationRecord {
+                                            seq: next_seq(),
+                                            timestamp_ns: timestamp_ns(),
+                                            worker_id: worker_id.clone(),
+                                            operation: "mark_merge_pending".to_string(),
+                                            task_id: task_id.clone(),
+                                            result_ok: true,
+                                        },
+                                    ));
                                     // Process doing worker logs for TUI
                                     for event in &req.logs {
                                         workers[idx].state = event.state.as_str().to_string();
                                         let prompt = format!("prompt {}", event.prompt_version);
                                         workers[idx].tool_line = prompt.clone();
                                         append_worker_command(&mut workers[idx], &prompt);
-                                        workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                                        workers[idx].breadcrumb =
+                                            format!("state>{}", event.state.as_str());
                                         last_activity_pulse[idx] = Instant::now();
                                     }
                                     // Update doing worker TUI to show handoff
                                     workers[idx].state = "handoff".to_string();
-                                    let handoff_msg = format!("handed off PR #{} to merge worker", req.pr_number);
+                                    let handoff_msg =
+                                        format!("handed off PR #{} to merge worker", req.pr_number);
                                     workers[idx].tool_line = handoff_msg.clone();
                                     append_worker_command(&mut workers[idx], &handoff_msg);
                                     workers[idx].breadcrumb = "handoff>merge".to_string();
@@ -485,7 +490,8 @@ pub fn run_worker_pool_fsm(
                                         let prompt = format!("prompt {}", event.prompt_version);
                                         workers[idx].tool_line = prompt.clone();
                                         append_worker_command(&mut workers[idx], &prompt);
-                                        workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                                        workers[idx].breadcrumb =
+                                            format!("state>{}", event.state.as_str());
                                         let now = Instant::now();
                                         last_activity_pulse[idx] = now;
                                         workers[idx].last_heartbeat_secs = 0;
@@ -500,24 +506,38 @@ pub fn run_worker_pool_fsm(
                                                 "context_manifest_hash": event.context_manifest_hash
                                             }),
                                         );
-                                        refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
-                                        render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                                        refresh_worker_heartbeats(
+                                            &mut workers,
+                                            &last_activity_pulse,
+                                        );
+                                        render(
+                                            terminal,
+                                            &workers,
+                                            &dashboard_snapshot(store)?,
+                                            hb,
+                                            lt,
+                                        )?;
                                     }
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, &worker_id)?;
-                                        emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                            seq: next_seq(),
-                                            timestamp_ns: timestamp_ns(),
-                                            worker_id: worker_id.clone(),
-                                            operation: "mark_complete".to_string(),
-                                            task_id: task_id.clone(),
-                                            result_ok: true,
-                                        }));
+                                        emit_record(RecordEntry::BacklogMutation(
+                                            BacklogMutationRecord {
+                                                seq: next_seq(),
+                                                timestamp_ns: timestamp_ns(),
+                                                worker_id: worker_id.clone(),
+                                                operation: "mark_complete".to_string(),
+                                                task_id: task_id.clone(),
+                                                result_ok: true,
+                                            },
+                                        ));
                                         completed = completed.saturating_add(1);
                                         workers[idx].state = "complete".to_string();
                                         let completed_message = format!("completed {}", task_id);
                                         workers[idx].tool_line = completed_message.clone();
-                                        append_worker_command(&mut workers[idx], &completed_message);
+                                        append_worker_command(
+                                            &mut workers[idx],
+                                            &completed_message,
+                                        );
                                         workers[idx].breadcrumb = "complete".to_string();
                                         workers[idx].lease_held = false;
                                         append_run_log(
@@ -531,22 +551,23 @@ pub fn run_worker_pool_fsm(
                                         );
                                     } else {
                                         workers[idx].state = "failed".to_string();
-                                        let failed_message =
-                                            if let Some(reason) = summary.failure_reason.clone() {
-                                                if reason.is_empty() {
-                                                    format!("failed {}", task_id)
-                                                } else {
-                                                    let truncated =
-                                                        reason.chars().take(150).collect::<String>();
-                                                    if reason.chars().count() > 150 {
-                                                        format!("failed: {}…", truncated)
-                                                    } else {
-                                                        format!("failed: {}", reason)
-                                                    }
-                                                }
-                                            } else {
+                                        let failed_message = if let Some(reason) =
+                                            summary.failure_reason.clone()
+                                        {
+                                            if reason.is_empty() {
                                                 format!("failed {}", task_id)
-                                            };
+                                            } else {
+                                                let truncated =
+                                                    reason.chars().take(150).collect::<String>();
+                                                if reason.chars().count() > 150 {
+                                                    format!("failed: {}…", truncated)
+                                                } else {
+                                                    format!("failed: {}", reason)
+                                                }
+                                            }
+                                        } else {
+                                            format!("failed {}", task_id)
+                                        };
                                         workers[idx].tool_line = failed_message.clone();
                                         append_worker_command(&mut workers[idx], &failed_message);
                                         workers[idx].breadcrumb = "failed".to_string();
@@ -560,8 +581,10 @@ pub fn run_worker_pool_fsm(
                                                 "final_state": summary.final_state.as_str()
                                             }),
                                         );
-                                        if summary.final_state == crate::types::WorkerState::Failed {
-                                            let unresolved = store.mark_unresolved(&task_id, &worker_id)?;
+                                        if summary.final_state == crate::types::WorkerState::Failed
+                                        {
+                                            let unresolved =
+                                                store.mark_unresolved(&task_id, &worker_id)?;
                                             append_run_log(
                                                 "warn",
                                                 "worker.task.unresolved",
@@ -580,7 +603,10 @@ pub fn run_worker_pool_fsm(
                                             workers[idx].state = "unresolved".to_string();
                                             workers[idx].tool_line = unresolved_message.clone();
                                             workers[idx].breadcrumb = "unresolved".to_string();
-                                            append_worker_command(&mut workers[idx], &unresolved_message);
+                                            append_worker_command(
+                                                &mut workers[idx],
+                                                &unresolved_message,
+                                            );
                                         } else {
                                             let _ = store.release_lease(&task_id, &worker_id)?;
                                             emit_record(RecordEntry::BacklogMutation(
@@ -602,7 +628,10 @@ pub fn run_worker_pool_fsm(
                         // Re-claim for doing worker slot
                         if shutdown_error.is_none()
                             && !quit_requested
-                            && completed.saturating_add(active_doing).saturating_add(active_merging) < target
+                            && completed
+                                .saturating_add(active_doing)
+                                .saturating_add(active_merging)
+                                < target
                         {
                             let worker_id = workers[idx].worker_id.clone();
                             let claimed_task = store.claim_next(
@@ -694,7 +723,11 @@ pub fn run_worker_pool_fsm(
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                     }
-                    Ok(PoolResultMessage::MergeResult { task_id, worker_id, result }) => {
+                    Ok(PoolResultMessage::MergeResult {
+                        task_id,
+                        worker_id,
+                        result,
+                    }) => {
                         active_merging = active_merging.saturating_sub(1);
                         if shutdown_error.is_some() {
                             request_interrupt();
@@ -713,26 +746,34 @@ pub fn run_worker_pool_fsm(
                                     );
                                     let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID);
                                     workers[merge_row_idx].state = "failed".to_string();
-                                    let fail_msg = format!("merge failed: {}", msg.chars().take(100).collect::<String>());
+                                    let fail_msg = format!(
+                                        "merge failed: {}",
+                                        msg.chars().take(100).collect::<String>()
+                                    );
                                     workers[merge_row_idx].tool_line = fail_msg.clone();
                                     append_worker_command(&mut workers[merge_row_idx], &fail_msg);
                                 }
                                 Ok(summary) => {
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
-                                        emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                            seq: next_seq(),
-                                            timestamp_ns: timestamp_ns(),
-                                            worker_id: worker_id.clone(),
-                                            operation: "mark_complete".to_string(),
-                                            task_id: task_id.clone(),
-                                            result_ok: true,
-                                        }));
+                                        emit_record(RecordEntry::BacklogMutation(
+                                            BacklogMutationRecord {
+                                                seq: next_seq(),
+                                                timestamp_ns: timestamp_ns(),
+                                                worker_id: worker_id.clone(),
+                                                operation: "mark_complete".to_string(),
+                                                task_id: task_id.clone(),
+                                                result_ok: true,
+                                            },
+                                        ));
                                         completed = completed.saturating_add(1);
                                         workers[merge_row_idx].state = "complete".to_string();
                                         let done_msg = format!("merged {}", task_id);
                                         workers[merge_row_idx].tool_line = done_msg.clone();
-                                        append_worker_command(&mut workers[merge_row_idx], &done_msg);
+                                        append_worker_command(
+                                            &mut workers[merge_row_idx],
+                                            &done_msg,
+                                        );
                                         workers[merge_row_idx].breadcrumb = "complete".to_string();
                                         workers[merge_row_idx].lease_held = false;
                                         append_run_log(
@@ -747,10 +788,17 @@ pub fn run_worker_pool_fsm(
                                     } else {
                                         let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID)?;
                                         workers[merge_row_idx].state = "failed".to_string();
-                                        let fail_msg = summary.failure_reason.as_deref().unwrap_or("merge failed");
-                                        let truncated = fail_msg.chars().take(100).collect::<String>();
+                                        let fail_msg = summary
+                                            .failure_reason
+                                            .as_deref()
+                                            .unwrap_or("merge failed");
+                                        let truncated =
+                                            fail_msg.chars().take(100).collect::<String>();
                                         workers[merge_row_idx].tool_line = truncated.clone();
-                                        append_worker_command(&mut workers[merge_row_idx], &truncated);
+                                        append_worker_command(
+                                            &mut workers[merge_row_idx],
+                                            &truncated,
+                                        );
                                         workers[merge_row_idx].breadcrumb = "failed".to_string();
                                         workers[merge_row_idx].lease_held = false;
                                     }
@@ -1141,16 +1189,27 @@ fn append_worker_state_events(
 ) -> bool {
     let events = recent_worker_state_events(*last_worker_state_line, max_events);
     let mut updated = false;
-    for (line, worker_id, state) in events {
+    for (line, worker_id, state, details) in events {
         for worker in workers.iter_mut() {
             if worker.worker_id != worker_id {
                 continue;
             }
-            if worker.state != state {
+            let details = details.trim();
+            let state_label = format_state_label(&state);
+            let tool_line = if details.is_empty() {
+                state_label
+            } else {
+                format!("{state_label} ({details})")
+            };
+            if worker.state != state || worker.tool_line != tool_line {
                 worker.state = state.clone();
                 worker.breadcrumb = format!("state>{state}");
-                worker.tool_line = format!("running {state}");
-                append_worker_command(worker, &format!("state {state}"));
+                worker.tool_line = tool_line;
+                if details.is_empty() {
+                    append_worker_command(worker, &format!("state {state}"));
+                } else {
+                    append_worker_command(worker, &format!("state {state}: {details}"));
+                }
                 updated = true;
             }
             break;

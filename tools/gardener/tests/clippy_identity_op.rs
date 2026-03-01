@@ -9,10 +9,15 @@ fn workspace_clippy_lint_configuration_enforces_identity_op_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -32,10 +37,15 @@ fn workspace_clippy_lint_configuration_enforces_expect_used_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -55,10 +65,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_clamp_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -78,10 +93,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_find_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -101,10 +121,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_memcpy_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -124,10 +149,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_filter_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -147,10 +177,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_flatten_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -170,10 +205,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_map_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -193,10 +233,15 @@ fn workspace_clippy_lint_configuration_enforces_redundant_static_lifetimes_deny(
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -233,10 +278,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_try_fold_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -256,10 +306,15 @@ fn workspace_clippy_lint_configuration_enables_manual_unwrap_or_warn() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -279,10 +334,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_range_contains_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -302,10 +362,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_non_exhaustive_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -325,10 +390,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_ok_or_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -348,10 +418,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_retain_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -371,10 +446,15 @@ fn workspace_clippy_lint_configuration_enforces_manual_strip_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -394,10 +474,15 @@ fn workspace_clippy_lint_configuration_enforces_unnecessary_sort_by_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -417,10 +502,15 @@ fn workspace_clippy_lint_configuration_enables_needless_borrowed_reference_warn(
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -463,10 +553,15 @@ fn workspace_clippy_lint_configuration_enables_needless_question_mark_warn() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -486,10 +581,15 @@ fn workspace_clippy_lint_configuration_enables_needless_update_warn() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -509,10 +609,15 @@ fn workspace_clippy_lint_configuration_enforces_needless_late_init_deny() {
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")
@@ -532,10 +637,15 @@ fn workspace_clippy_lint_configuration_enables_unnecessary_lazy_evaluations_deny
     manifest_path.pop();
     manifest_path.push("Cargo.toml");
 
-    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
-        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
 
-    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
 
     let level = manifest
         .get("workspace")

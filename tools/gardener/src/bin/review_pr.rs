@@ -1,6 +1,6 @@
 use gardener::errors::GardenerError;
 use gardener::logging::append_run_log;
-use gardener::phase_cli::{step, print_agent_event, resolve_worktree_from_pr, PhaseRuntime};
+use gardener::phase_cli::{print_agent_event, resolve_worktree_from_pr, step, PhaseRuntime};
 use gardener::review_phase::{run_review, ReviewContext};
 
 fn main() -> Result<(), GardenerError> {
@@ -18,7 +18,14 @@ fn main() -> Result<(), GardenerError> {
     let (worktree_path, branch, pr_number) =
         resolve_worktree_from_pr(&rt.runner, &rt.scope, pr, "review-pr")?;
 
-    step("review-pr", "RUN", &format!("pr={pr_number} branch={branch} worktree={}", worktree_path.display()));
+    step(
+        "review-pr",
+        "RUN",
+        &format!(
+            "pr={pr_number} branch={branch} worktree={}",
+            worktree_path.display()
+        ),
+    );
 
     let outcome = run_review(&ReviewContext {
         cfg: &rt.cfg,
@@ -38,10 +45,14 @@ fn main() -> Result<(), GardenerError> {
         on_agent_event: Some(&|event| print_agent_event("review-pr", event)),
     })?;
 
-    step("review-pr", "DONE", &format!(
-        "verdict={:?} suggestions={}",
-        outcome.verdict,
-        outcome.suggestions.len()
-    ));
+    step(
+        "review-pr",
+        "DONE",
+        &format!(
+            "verdict={:?} suggestions={}",
+            outcome.verdict,
+            outcome.suggestions.len()
+        ),
+    );
     Ok(())
 }

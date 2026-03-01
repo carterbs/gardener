@@ -1,19 +1,25 @@
 #![deny(clippy::manual_strip, clippy::needless_update, clippy::redundant_clone)]
 
 pub mod agent;
+pub mod agent_turn;
 pub mod backlog_snapshot;
 pub mod backlog_store;
 pub mod config;
+pub mod do_phase;
 pub mod errors;
 pub mod friction_analysis;
 pub mod fsm;
 pub mod gh;
 pub mod git;
+pub mod git_phase;
 pub mod hotkeys;
 pub mod learning_loop;
 pub mod log_retention;
 pub mod logging;
+pub mod merge_loop;
 pub mod output_envelope;
+pub mod phase_cli;
+pub mod plan_phase;
 pub mod postmerge_analysis;
 pub mod postmortem;
 pub mod pr_audit;
@@ -29,6 +35,7 @@ pub mod quality_grades;
 pub mod quality_scoring;
 pub mod replay;
 pub mod repo_intelligence;
+pub mod review_phase;
 pub mod runtime;
 pub mod seed_runner;
 pub mod seeding;
@@ -40,13 +47,6 @@ pub mod triage_discovery;
 pub mod triage_interview;
 pub mod tui;
 pub mod types;
-pub mod agent_turn;
-pub mod do_phase;
-pub mod git_phase;
-pub mod merge_loop;
-pub mod phase_cli;
-pub mod plan_phase;
-pub mod review_phase;
 pub mod understand_phase;
 pub mod worker;
 pub mod worker_identity;
@@ -58,20 +58,20 @@ use agent::factory::AdapterFactory;
 use agent::{probe_and_persist, validate_model};
 use backlog_snapshot::export_markdown_snapshot;
 use backlog_store::BacklogStore;
-use std::collections::HashMap;
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
+use gh::GhClient;
 use logging::{
     append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
     structured_fallback_line,
 };
 use replay::recorder::emit_record;
 use replay::recording::{BacklogSnapshotRecord, BacklogTaskRecord, RecordEntry};
-use gh::GhClient;
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
+use std::collections::HashMap;
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
@@ -348,13 +348,8 @@ pub fn run_with_runtime(
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
             let mut cfg_for_startup = cfg;
-            let _ = run_startup_audits(
-                runtime,
-                &mut cfg_for_startup,
-                &startup.scope,
-                false,
-                false,
-            )?;
+            let _ =
+                run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false, false)?;
             return Ok(0);
         }
 
@@ -485,7 +480,11 @@ pub fn run_with_runtime(
             if !cfg_for_startup.execution.test_mode {
                 if let Ok(open_prs) = GhClient::new(
                     runtime.process_runner.as_ref(),
-                    startup.scope.repo_root.as_ref().unwrap_or(&startup.scope.working_dir),
+                    startup
+                        .scope
+                        .repo_root
+                        .as_ref()
+                        .unwrap_or(&startup.scope.working_dir),
                 )
                 .list_open_prs()
                 {
@@ -493,25 +492,25 @@ pub fn run_with_runtime(
                         .into_iter()
                         .filter(|pr| pr.head_ref_name.starts_with("gardener/"))
                         .map(|pr| (pr.head_ref_name, pr.number))
-                    .collect::<HashMap<_, _>>();
-                for task in startup_backlog
-                    .iter()
-                    .filter(|task| task.related_pr.is_none())
-                {
-                    let branch = worktree_branch_for(&task.task_id);
-                    if let Some(pr_number) = open_pr_map.get(&branch).copied() {
-                        let _ = store.set_related_pr(&task.task_id, pr_number as i64, &branch);
+                        .collect::<HashMap<_, _>>();
+                    for task in startup_backlog
+                        .iter()
+                        .filter(|task| task.related_pr.is_none())
+                    {
+                        let branch = worktree_branch_for(&task.task_id);
+                        if let Some(pr_number) = open_pr_map.get(&branch).copied() {
+                            let _ = store.set_related_pr(&task.task_id, pr_number as i64, &branch);
+                        }
                     }
+                    let _ = store.promote_ready_with_pr();
+                } else {
+                    append_run_log(
+                        "warn",
+                        "backlog.startup.open_prs_skipped",
+                        json!({ "cwd": startup.scope.working_dir.display().to_string() }),
+                    );
                 }
-                let _ = store.promote_ready_with_pr();
-            } else {
-                append_run_log(
-                    "warn",
-                    "backlog.startup.open_prs_skipped",
-                    json!({ "cwd": startup.scope.working_dir.display().to_string() }),
-                );
-            }
-            startup_backlog = store.list_tasks()?;
+                startup_backlog = store.list_tasks()?;
             }
             emit_record(RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
                 tasks: startup_backlog

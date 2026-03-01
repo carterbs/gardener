@@ -1,7 +1,7 @@
 use gardener::errors::GardenerError;
-use gardener::logging::append_run_log;
-use gardener::phase_cli::{step, print_agent_event, PhaseRuntime};
 use gardener::git_phase::{run_git_push, GitPushContext};
+use gardener::logging::append_run_log;
+use gardener::phase_cli::{print_agent_event, step, PhaseRuntime};
 
 fn main() -> Result<(), GardenerError> {
     append_run_log("info", "bin.git_push.started", serde_json::json!({}));
@@ -19,7 +19,11 @@ fn main() -> Result<(), GardenerError> {
     let worktree_path = std::path::PathBuf::from(&worktree);
     let branch = format!("gardener/{}", rt.identity.worker_id);
 
-    step("git-push", "RUN", &format!("task={task} worktree={worktree} branch={branch}"));
+    step(
+        "git-push",
+        "RUN",
+        &format!("task={task} worktree={worktree} branch={branch}"),
+    );
 
     let outcome = run_git_push(&GitPushContext {
         cfg: &rt.cfg,
@@ -38,10 +42,16 @@ fn main() -> Result<(), GardenerError> {
         on_agent_event: Some(&|event| print_agent_event("git-push", event)),
     })?;
 
-    step("git-push", "DONE", &format!("pr_number={} pr_url={}", outcome.pr_number, outcome.pr_url));
+    step(
+        "git-push",
+        "DONE",
+        &format!("pr_number={} pr_url={}", outcome.pr_number, outcome.pr_url),
+    );
     Ok(())
 }
 
 fn get_arg(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }

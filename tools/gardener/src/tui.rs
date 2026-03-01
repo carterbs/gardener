@@ -1,6 +1,6 @@
 use crate::errors::GardenerError;
-use crate::logging::{current_run_id, current_run_log_path};
 use crate::hotkeys::{dashboard_controls_legend, report_controls_legend};
+use crate::logging::{current_run_id, current_run_log_path};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -80,12 +80,7 @@ const TRIAGE_STAGE_LABELS: [&str; 4] = [
     "Build project profile",
     "Seed prioritized backlog",
 ];
-const WIZARD_STEP_LABELS: [&str; 4] = [
-    "Parallelism",
-    "Validation",
-    "Docs",
-    "Notes",
-];
+const WIZARD_STEP_LABELS: [&str; 4] = ["Parallelism", "Validation", "Docs", "Notes"];
 const WORKER_EQUIPMENT_NAMES: [&str; 9] = [
     "Lawn Mower",
     "Leaf Blower",
@@ -146,7 +141,6 @@ impl StartupHeadline {
             ellipsis_phase: source.ellipsis_phase,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -317,7 +311,10 @@ impl AppState {
                     message: line.clone(),
                 })
                 .collect(),
-            triage_artifacts: artifacts.iter().map(|line| parse_triage_artifact(line)).collect(),
+            triage_artifacts: artifacts
+                .iter()
+                .map(|line| parse_triage_artifact(line))
+                .collect(),
             startup_headline,
             workers: Vec::new(),
             backlog: Vec::new(),
@@ -466,8 +463,7 @@ impl WorkerMetrics {
     }
 }
 
-impl ParsedBacklogPriority {
-}
+impl ParsedBacklogPriority {}
 
 fn parse_backlog_priority(token: &str) -> Option<ParsedBacklogPriority> {
     match token {
@@ -522,10 +518,7 @@ fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
     if title.is_empty() {
         None
     } else {
-        Some(ParsedBacklogItem {
-            priority,
-            title,
-        })
+        Some(ParsedBacklogItem { priority, title })
     }
 }
 
@@ -845,7 +838,10 @@ fn draw_dashboard_frame(
         Span::raw(format!("{}  ", stats.active)),
         Span::styled("failed ", Style::default().fg(Color::Red)),
         Span::raw(format!("{}   ", stats.failed)),
-        Span::styled("unresolved ", Style::default().fg(Color::Rgb(214, 112, 214))),
+        Span::styled(
+            "unresolved ",
+            Style::default().fg(Color::Rgb(214, 112, 214)),
+        ),
         Span::raw(format!("{}   ", stats.unresolved)),
         Span::styled(
             "P0",
@@ -999,10 +995,9 @@ fn draw_dashboard_frame(
     });
     let worker_end = (worker_offset + worker_row_capacity).min(app_state.workers.len());
 
-    let command_stream_max_width =
-        workers_panel[1]
-            .width
-            .saturating_sub(8 + "Commands: ".len() as u16) as usize;
+    let command_stream_max_width = workers_panel[1]
+        .width
+        .saturating_sub(8 + "Commands: ".len() as u16) as usize;
     let command_scroll_offset = current_command_scroll_offset();
     let worker_items = app_state
         .workers
@@ -1024,21 +1019,24 @@ fn draw_dashboard_frame(
             };
             let flow_line = worker_flow_chain_spans(&row.state);
             let command_stream = worker_command_stream(&row.command_details);
-            let command_stream = command_stream_window(&command_stream, command_stream_max_width, command_scroll_offset);
+            let command_stream = command_stream_window(
+                &command_stream,
+                command_stream_max_width,
+                command_scroll_offset,
+            );
             let mut flow_spans = Vec::new();
             flow_spans.push(Span::raw("    "));
-            flow_spans.push(Span::styled(
-                "Flow: ",
-                Style::default().fg(Color::Blue),
-            ));
+            flow_spans.push(Span::styled("Flow: ", Style::default().fg(Color::Blue)));
             flow_spans.extend(flow_line);
             let lines = if compact_view || compact_worker_row {
-                vec![Line::from(vec![
-                    Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
-                    Span::raw(": "),
-                    Span::raw(row.task.clone()),
-                ]),
-                Line::from(flow_spans)]
+                vec![
+                    Line::from(vec![
+                        Span::styled(format!("{} {:<3}", marker, row.name), worker_style),
+                        Span::raw(": "),
+                        Span::raw(row.task.clone()),
+                    ]),
+                    Line::from(flow_spans),
+                ]
             } else {
                 vec![
                     Line::from(vec![
@@ -1081,10 +1079,7 @@ fn draw_dashboard_frame(
         )])),
         workers_panel[0],
     );
-    frame.render_widget(
-        List::new(worker_items),
-        workers_panel[1],
-    );
+    frame.render_widget(List::new(worker_items), workers_panel[1]);
 
     let ordered_backlog = app_state.backlog;
     let content_capacity = body[2].height.saturating_sub(2) as usize;
@@ -1429,7 +1424,11 @@ pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
             .map_err(|e| GardenerError::Io(e.to_string()))?
             .height
             .saturating_sub(8) as usize;
-        let lines = report.lines().take(available_lines).collect::<Vec<_>>().join("\n");
+        let lines = report
+            .lines()
+            .take(available_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
         terminal
             .draw(|frame| draw_report_frame(frame, path, &lines))
             .map(|_| ())
@@ -1600,7 +1599,9 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
     if current == "idle" {
         return vec![Span::styled(
             "Idle",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
         )];
     }
     if current == "unknown" {
@@ -1628,9 +1629,7 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
             };
             let style = if is_current {
                 if step == "failed" {
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                         .fg(Color::Green)
@@ -1705,7 +1704,8 @@ fn command_stream_window(stream: &str, width: usize, offset: usize) -> String {
 fn normalize_worker_state(state: &str) -> &str {
     match state {
         "init" | "boot" | "backlog_sync" | "working" | "seeding" => "understand",
-        "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "unresolved" | "idle" => state,
+        "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "unresolved"
+        | "idle" => state,
         _ => "unknown",
     }
 }
@@ -1875,9 +1875,7 @@ pub fn run_repo_health_wizard(
                     Line::from(""),
                     Line::from(Span::styled(
                         help,
-                        Style::default()
-                            .fg(Color::Gray)
-                            .add_modifier(Modifier::DIM),
+                        Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
@@ -1899,7 +1897,11 @@ pub fn run_repo_health_wizard(
                     ),
                     Span::raw("  "),
                     Span::styled(
-                        if step < 3 { "Enter →" } else { "Enter to finish" },
+                        if step < 3 {
+                            "Enter →"
+                        } else {
+                            "Enter to finish"
+                        },
                         Style::default().fg(Color::Rgb(170, 178, 210)),
                     ),
                 ]))
@@ -1996,8 +1998,8 @@ mod tests {
     use super::{
         format_breadcrumb, format_state_label, render_dashboard, render_dashboard_at_tick,
         render_triage, reset_workers_scroll, scroll_workers_down, scroll_workers_up, AppState,
-        StageState, BacklogView, QueueStats, StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow,
-        WorkerState,
+        BacklogView, QueueStats, StageState, StartupHeadlineView, WorkerCard, WorkerMetrics,
+        WorkerRow, WorkerState,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -2073,7 +2075,9 @@ mod tests {
             80,
             40,
         );
-        let backlog_section_start = frame.find("BACKLOG (PRIORITY ORDER)").expect("backlog heading");
+        let backlog_section_start = frame
+            .find("BACKLOG (PRIORITY ORDER)")
+            .expect("backlog heading");
         let backlog_section = &frame[backlog_section_start..];
         let p0 = backlog_section.find("P0").expect("p0 row");
         let p1 = backlog_section.find("P1").expect("p1 row");
@@ -2194,7 +2198,10 @@ mod tests {
             120,
             30,
         );
-        assert_eq!(format_breadcrumb("boot>backlog_sync"), "Boot > Backlog Sync");
+        assert_eq!(
+            format_breadcrumb("boot>backlog_sync"),
+            "Boot > Backlog Sync"
+        );
         assert_eq!(format_breadcrumb("state>merging"), "Merging");
         assert_eq!(format_state_label("backlog_sync"), "Backlog Sync");
         assert_eq!(format_state_label("merging"), "Merging");

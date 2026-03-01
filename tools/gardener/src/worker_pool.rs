@@ -465,59 +465,64 @@ fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(
     if !terminal.stdin_is_tty() {
         return Ok(());
     }
+    let mut has_copied = false;
     // Poll until the user presses any key. poll_key returns None on timeout,
     // Some(key) when a key arrives. For fake terminals with an empty queue
     // the first poll immediately returns None and we exit — this prevents
     // test hangs while still blocking on a real TTY until input is received.
     loop {
         match terminal.poll_key(100)? {
-            Some(INTERRUPT_SENTINEL_KEY) => {
-                if let Some(target) = copy_target {
-                    if let Err(error) = terminal.copy_to_clipboard(target) {
-                        append_run_log(
-                            "warn",
-                            "worker_pool.error_copy.failed",
-                            json!({
-                                "worker_id": WORKER_POOL_ID,
-                                "error": error.to_string()
-                            }),
-                        );
-                    } else {
-                        append_run_log(
-                            "info",
-                            "worker_pool.error_copy.success",
-                            json!({
-                                "worker_id": WORKER_POOL_ID
-                            }),
-                        );
-                    }
+            Some(INTERRUPT_SENTINEL_KEY) if copy_target.is_some() => {
+                let target = copy_target.unwrap_or("");
+                if let Err(error) = terminal.copy_to_clipboard(target) {
+                    append_run_log(
+                        "warn",
+                        "worker_pool.error_copy.failed",
+                        json!({
+                            "worker_id": WORKER_POOL_ID,
+                            "error": error.to_string()
+                        }),
+                    );
+                } else {
+                    append_run_log(
+                        "info",
+                        "worker_pool.error_copy.success",
+                        json!({
+                            "worker_id": WORKER_POOL_ID
+                        }),
+                    );
                 }
-                return Ok(());
+                has_copied = true;
+                continue;
             }
+            Some(INTERRUPT_SENTINEL_KEY) => return Ok(()),
             Some(key) if is_copy_shortcut_key(key) && copy_target.is_some() => {
-                if let Some(target) = copy_target {
-                    if let Err(error) = terminal.copy_to_clipboard(target) {
-                        append_run_log(
-                            "warn",
-                            "worker_pool.error_copy.failed",
-                            json!({
-                                "worker_id": WORKER_POOL_ID,
-                                "error": error.to_string()
-                            }),
-                        );
-                    } else {
-                        append_run_log(
-                            "info",
-                            "worker_pool.error_copy.success",
-                            json!({
-                                "worker_id": WORKER_POOL_ID
-                            }),
-                        );
-                    }
+                let target = copy_target.unwrap_or("");
+                if let Err(error) = terminal.copy_to_clipboard(target) {
+                    append_run_log(
+                        "warn",
+                        "worker_pool.error_copy.failed",
+                        json!({
+                            "worker_id": WORKER_POOL_ID,
+                            "error": error.to_string()
+                        }),
+                    );
+                } else {
+                    append_run_log(
+                        "info",
+                        "worker_pool.error_copy.success",
+                        json!({
+                            "worker_id": WORKER_POOL_ID
+                        }),
+                    );
                 }
+                has_copied = true;
+                continue;
+            }
+            Some(_) if has_copied && copy_target.is_some() => return Ok(()),
+            Some(_) => {
                 return Ok(());
             }
-            Some(_) => return Ok(()),
             None => {
                 // On a real terminal the key listener is running; keep waiting.
                 // In test mode (FakeTerminal) None means queue exhausted: exit.
@@ -909,7 +914,7 @@ mod tests {
     use crate::task_identity::TaskKind;
     use crate::types::RuntimeScope;
     use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::sync::{atomic::Ordering, Arc};
     use tempfile::TempDir;
 
     fn seed_task(store: &BacklogStore, title: &str) {
@@ -926,6 +931,24 @@ mod tests {
                 related_branch: None,
             })
             .expect("seed task");
+    }
+
+    struct KeyListenerActiveGuard {
+        previous: bool,
+    }
+
+    impl KeyListenerActiveGuard {
+        fn force_on() -> Self {
+            let previous = crate::runtime::KEY_LISTENER_ACTIVE.load(Ordering::SeqCst);
+            crate::runtime::KEY_LISTENER_ACTIVE.store(true, Ordering::SeqCst);
+            Self { previous }
+        }
+    }
+
+    impl Drop for KeyListenerActiveGuard {
+        fn drop(&mut self) {
+            crate::runtime::KEY_LISTENER_ACTIVE.store(self.previous, Ordering::SeqCst);
+        }
     }
 
     fn test_scope(dir: &TempDir) -> RuntimeScope {
@@ -1187,6 +1210,20 @@ mod tests {
         terminal.enqueue_keys(['c']);
         wait_for_quit(&terminal, Some("error line from agent"))
             .expect("wait should complete after copy shortcut");
+        assert_eq!(
+            terminal.clipboard_copies(),
+            vec!["error line from agent".to_string()]
+        );
+    }
+
+    #[test]
+    fn wait_for_quit_copies_error_on_copy_shortcut_and_waits_for_confirmation_key_when_listener_active(
+    ) {
+        let _listener_guard = KeyListenerActiveGuard::force_on();
+        let terminal = FakeTerminal::new(true);
+        terminal.enqueue_keys(['c', 'x']);
+        wait_for_quit(&terminal, Some("error line from agent"))
+            .expect("wait should complete after copy + confirm key");
         assert_eq!(
             terminal.clipboard_copies(),
             vec!["error line from agent".to_string()]

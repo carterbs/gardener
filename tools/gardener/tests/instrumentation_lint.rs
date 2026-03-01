@@ -181,11 +181,11 @@ fn remove_test_modules(source: &str) -> String {
             if let Some(next_line) = lines.peek() {
                 if next_line.trim_start().starts_with("mod tests") {
                     let mut brace_depth = 0isize;
-    for test_line in lines.by_ref() {
-        for ch in test_line.chars() {
-            if ch == '{' {
-                brace_depth += 1;
-            } else if ch == '}' {
+                    for test_line in lines.by_ref() {
+                        for ch in test_line.chars() {
+                            if ch == '{' {
+                                brace_depth += 1;
+                            } else if ch == '}' {
                                 brace_depth -= 1;
                             }
                         }
@@ -382,13 +382,13 @@ fn linter_e2e_binary_spawn_requires_log_isolation() {
         message.push_str(
             "The following test files spawn the gardener binary (CARGO_BIN_EXE_gardener)\n",
         );
-        message.push_str(
-            "but do not set GARDENER_LOG_PATH, so the child process writes to the\n",
-        );
+        message.push_str("but do not set GARDENER_LOG_PATH, so the child process writes to the\n");
         message.push_str(
             "live ~/.gardener/otel-logs.jsonl and pollutes production observability data.\n\n",
         );
-        message.push_str("Fix: pass .env(\"GARDENER_LOG_PATH\", dir.path().join(\"otel-logs.jsonl\"))\n");
+        message.push_str(
+            "Fix: pass .env(\"GARDENER_LOG_PATH\", dir.path().join(\"otel-logs.jsonl\"))\n",
+        );
         message.push_str("alongside GARDENER_DB_PATH in every fixture that spawns the binary.\n\n");
         message.push_str("Violations:\n");
         for v in &violations {

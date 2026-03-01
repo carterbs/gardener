@@ -254,6 +254,7 @@ fn discovery_lost_when_interview_write_line_fails() {
 }
 
 #[test]
+#[ignore] // launches real TUI wizard via run_repo_health_wizard
 fn unknown_sha_written_to_profile_after_git_failure() {
     // B1: head lookup failure is persisted as "unknown" and still writes a profile.
     let scope = default_scope();

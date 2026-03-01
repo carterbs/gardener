@@ -141,7 +141,7 @@ fn workspace_clippy_lint_configuration_enforces_manual_flatten_warn() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_map_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_map_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -160,7 +160,7 @@ fn workspace_clippy_lint_configuration_enables_manual_map_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_map is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]

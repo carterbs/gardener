@@ -396,42 +396,60 @@ pub fn generate_pr_title_body(
     cwd: &Path,
     task_summary: &str,
 ) -> Result<(String, String), GardenerError> {
+    // Fetch full commit messages separated by NUL bytes.
     let log_out = runner.run(ProcessRequest {
         program: "git".to_string(),
         args: vec![
             "log".to_string(),
             "main..HEAD".to_string(),
-            "--format=%s".to_string(),
+            "--reverse".to_string(),
+            "--format=%B%x00".to_string(),
         ],
         cwd: Some(cwd.to_path_buf()),
     })?;
-    let subjects: Vec<&str> = log_out
+
+    let commits: Vec<(&str, &str)> = log_out
         .stdout
-        .lines()
+        .split('\0')
         .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .filter(|s| !s.is_empty())
+        .map(|msg| {
+            // Split each commit message into subject (first line) and body (rest).
+            match msg.split_once('\n') {
+                Some((subj, rest)) => (subj.trim(), rest.trim()),
+                None => (msg, ""),
+            }
+        })
         .collect();
 
-    let title = if subjects.len() == 1 {
-        subjects[0].to_string()
-    } else {
+    let title = commits
+        .first()
+        .map(|(subj, _)| subj.to_string())
+        .unwrap_or_else(|| task_summary.to_string());
+
+    let body = if commits.len() == 1 {
+        let (_, desc) = commits[0];
+        if desc.is_empty() {
+            task_summary.to_string()
+        } else {
+            desc.to_string()
+        }
+    } else if commits.is_empty() {
         task_summary.to_string()
-    };
-
-    let commit_log = if subjects.is_empty() {
-        String::new()
     } else {
-        format!(
-            "\n\n## Commits\n\n{}",
-            subjects
-                .iter()
-                .map(|s| format!("- {s}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
+        let entries: Vec<String> = commits
+            .iter()
+            .map(|(subj, desc)| {
+                if desc.is_empty() {
+                    format!("- {subj}")
+                } else {
+                    format!("- {subj}\n\n  {desc}")
+                }
+            })
+            .collect();
+        format!("{task_summary}\n\n## Commits\n\n{}", entries.join("\n"))
     };
 
-    let body = format!("{task_summary}{commit_log}");
     Ok((title, body))
 }
 
@@ -677,18 +695,33 @@ mod tests {
     }
 
     #[test]
-    fn generate_pr_title_body_single_commit() {
+    fn generate_pr_title_body_single_commit_no_description() {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
-            stdout: "feat: add widget\n".to_string(),
+            stdout: "feat: add widget\n\0".to_string(),
             stderr: String::new(),
         }));
         let (title, body) =
             generate_pr_title_body(&runner, std::path::Path::new("/repo"), "add a widget")
                 .expect("ok");
         assert_eq!(title, "feat: add widget");
-        assert!(body.contains("add a widget"));
+        assert_eq!(body, "add a widget");
+    }
+
+    #[test]
+    fn generate_pr_title_body_single_commit_with_description() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: add widget\n\nAdds the widget component with tests.\n\0".to_string(),
+            stderr: String::new(),
+        }));
+        let (title, body) =
+            generate_pr_title_body(&runner, std::path::Path::new("/repo"), "add a widget")
+                .expect("ok");
+        assert_eq!(title, "feat: add widget");
+        assert_eq!(body, "Adds the widget component with tests.");
     }
 
     #[test]
@@ -696,14 +729,16 @@ mod tests {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
-            stdout: "feat: first\nfix: second\n".to_string(),
+            stdout: "feat: first\n\nFirst description.\n\0fix: second\n\0".to_string(),
             stderr: String::new(),
         }));
         let (title, body) =
             generate_pr_title_body(&runner, std::path::Path::new("/repo"), "my task summary")
                 .expect("ok");
-        assert_eq!(title, "my task summary");
+        assert_eq!(title, "feat: first");
+        assert!(body.contains("my task summary"));
         assert!(body.contains("- feat: first"));
+        assert!(body.contains("First description."));
         assert!(body.contains("- fix: second"));
     }
 

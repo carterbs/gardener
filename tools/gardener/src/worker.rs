@@ -1408,11 +1408,11 @@ fn teardown_after_completion(
     }
 }
 
-fn worktree_branch_for(task_id: &str) -> String {
+pub(crate) fn worktree_branch_for(task_id: &str) -> String {
     format!("gardener/{}", worktree_slug_for_task(task_id))
 }
 
-fn worktree_path_for(repo_root: &Path, task_id: &str) -> PathBuf {
+pub(crate) fn worktree_path_for(repo_root: &Path, task_id: &str) -> PathBuf {
     let base = env::var("HOME").map_or_else(
         |_| repo_root.to_path_buf(),
         |_home| PathBuf::from("/tmp/gardener-worktrees"),

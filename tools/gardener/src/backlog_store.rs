@@ -140,6 +140,17 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<Option<BacklogTask>>>,
     },
+    SetRelatedPr {
+        task_id: String,
+        pr_number: i64,
+        branch: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    PromoteReadyWithPr {
+        now: i64,
+        reply: oneshot::Sender<StoreResult<usize>>,
+    },
 }
 
 pub struct BacklogStore {
@@ -176,7 +187,10 @@ impl BacklogStore {
         append_run_log(
             "info",
             "backlog_store.open",
-            json!({ "path": path.display().to_string() }),
+            json!({
+                "path": path.display().to_string(),
+                "path_state": backlog_path_state(&path),
+            }),
         );
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| GardenerError::Database(e.to_string()))?;
@@ -192,7 +206,10 @@ impl BacklogStore {
                 append_run_log(
                     "error",
                     "backlog_store.open.zero_byte_rejected",
-                    json!({ "path": path.display().to_string() }),
+                    json!({
+                        "path": path.display().to_string(),
+                        "path_state": backlog_path_state(&path),
+                    }),
                 );
                 return Err(GardenerError::Database(format!(
                     "backlog database is 0 bytes (corrupt): {}",
@@ -232,8 +249,20 @@ impl BacklogStore {
         run_migrations(&mut write_conn)?;
 
         let (write_tx, mut write_rx) = mpsc::channel(128);
+        let writer_path = path.clone();
         let writer_join = thread::spawn(move || {
             while let Some(cmd) = write_rx.blocking_recv() {
+                let (operation, command_payload) = write_cmd_details(&cmd);
+                append_run_log(
+                    "debug",
+                    "backlog_store.write_command.received",
+                    json!({
+                        "operation": operation,
+                        "command": command_payload,
+                        "path": writer_path.display().to_string(),
+                        "path_state": backlog_path_state(&writer_path),
+                    }),
+                );
                 match cmd {
                     WriteCmd::Upsert { task, now, reply } => {
                         let result = upsert_task(&write_conn, &task, now).and_then(|_| {
@@ -242,6 +271,19 @@ impl BacklogStore {
                                     GardenerError::Database("row missing after upsert".to_string())
                                 })
                         });
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                json!({
+                                    "task_id": task.task_id,
+                                    "status": task.status.as_str(),
+                                    "priority": task.priority.as_str(),
+                                    "attempt_count": task.attempt_count,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::ClaimNext {
@@ -252,6 +294,24 @@ impl BacklogStore {
                     } => {
                         let result =
                             claim_next(&mut write_conn, &lease_owner, lease_expires_at, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                task.as_ref().map_or_else(
+                                    || json!({ "claimed": false }),
+                                    |claimed| {
+                                        json!({
+                                            "claimed": true,
+                                            "task_id": claimed.task_id,
+                                            "status": claimed.status.as_str(),
+                                            "attempt_count": claimed.attempt_count,
+                                        })
+                                    },
+                                )
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkInProgress {
@@ -261,6 +321,18 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = mark_in_progress(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkComplete {
@@ -270,10 +342,28 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = mark_complete(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::RecoverStale { now, reply } => {
                         let result = recover_stale(&write_conn, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|count| json!({ "recovered_count": count })),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::ReleaseLease {
@@ -283,6 +373,18 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = release_lease(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkUnresolved {
@@ -292,6 +394,18 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkMergePending {
@@ -302,6 +416,18 @@ impl BacklogStore {
                     } => {
                         let result =
                             mark_merge_pending(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::ClaimMergePending {
@@ -309,8 +435,58 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
+                        let result = claim_merge_pending(&write_conn, &merge_worker_id, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                task.as_ref().map_or_else(
+                                    || json!({ "claimed": false }),
+                                    |claimed| {
+                                        json!({
+                                            "claimed": true,
+                                            "task_id": claimed.task_id,
+                                            "status": claimed.status.as_str(),
+                                        })
+                                    },
+                                )
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::SetRelatedPr {
+                        task_id,
+                        pr_number,
+                        branch,
+                        now,
+                        reply,
+                    } => {
                         let result =
-                            claim_merge_pending(&write_conn, &merge_worker_id, now);
+                            set_related_pr(&write_conn, &task_id, pr_number, &branch, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "pr_number": pr_number,
+                                    "branch": branch,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::PromoteReadyWithPr { now, reply } => {
+                        let result = promote_ready_with_pr(&write_conn, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|count| json!({ "count": count })),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                 }
@@ -691,6 +867,87 @@ impl BacklogStore {
         result
     }
 
+    /// Attach PR metadata to a task if it has not already been linked.
+    pub fn set_related_pr(
+        &self,
+        task_id: &str,
+        pr_number: i64,
+        branch: &str,
+    ) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::SetRelatedPr {
+                task_id: task_id.to_string(),
+                pr_number,
+                branch: branch.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.related_pr_set",
+                    json!({
+                        "task_id": task_id,
+                        "pr_number": pr_number,
+                        "branch": branch,
+                    }),
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.related_pr_set.failed",
+                    json!({
+                        "task_id": task_id,
+                        "pr_number": pr_number,
+                        "branch": branch,
+                        "error": e.to_string(),
+                    }),
+                );
+            }
+        }
+        result
+    }
+
+    /// Promote ready tasks that already have related PR metadata into merge_pending.
+    pub fn promote_ready_with_pr(&self) -> StoreResult<usize> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::PromoteReadyWithPr {
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(count) if *count > 0 => {
+                append_run_log(
+                    "info",
+                    "backlog.tasks.promoted_to_merge_pending",
+                    json!({ "count": count }),
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.tasks.promoted_to_merge_pending.failed",
+                    json!({ "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
@@ -802,6 +1059,213 @@ impl BacklogStore {
     }
 }
 
+fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
+    match cmd {
+        WriteCmd::Upsert { task, now, .. } => (
+            "upsert",
+            json!({
+                "task_id": compute_task_id_from_new_task(task),
+                "scope_key": task.scope_key,
+                "priority": task.priority.as_str(),
+                "source": task.source,
+                "now": now,
+            }),
+        ),
+        WriteCmd::ClaimNext {
+            lease_owner,
+            lease_expires_at,
+            now,
+            ..
+        } => (
+            "claim_next",
+            json!({
+                "lease_owner": lease_owner,
+                "lease_expires_at": lease_expires_at,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkInProgress {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_in_progress",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkComplete {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_complete",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::RecoverStale { now, .. } => (
+            "recover_stale",
+            json!({
+                "now": now,
+            }),
+        ),
+        WriteCmd::ReleaseLease {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "release_lease",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkUnresolved {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_unresolved",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkMergePending {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_merge_pending",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::ClaimMergePending {
+            merge_worker_id,
+            now,
+            ..
+        } => (
+            "claim_merge_pending",
+            json!({
+                "merge_worker_id": merge_worker_id,
+                "now": now,
+            }),
+        ),
+        WriteCmd::SetRelatedPr {
+            task_id,
+            pr_number,
+            branch,
+            now,
+            ..
+        } => (
+            "set_related_pr",
+            json!({
+                "task_id": task_id,
+                "pr_number": pr_number,
+                "branch": branch,
+                "now": now,
+            }),
+        ),
+        WriteCmd::PromoteReadyWithPr { now, .. } => (
+            "promote_ready_with_pr",
+            json!({
+                "now": now,
+            }),
+        ),
+    }
+}
+
+fn log_write_result(
+    path: &Path,
+    operation: &str,
+    ok_payload: &Result<serde_json::Value, &GardenerError>,
+    maybe_error: Option<&GardenerError>,
+) {
+    match maybe_error {
+        Some(error) => {
+            append_run_log(
+                "error",
+                "backlog_store.write_command.failed",
+                json!({
+                    "operation": operation,
+                    "error": error.to_string(),
+                    "path": path.display().to_string(),
+                    "path_state": backlog_path_state(path),
+                }),
+            );
+        }
+        None => {
+            append_run_log(
+                "info",
+                "backlog_store.write_command.applied",
+                json!({
+                    "operation": operation,
+                    "result": ok_payload.as_ref().ok(),
+                    "path": path.display().to_string(),
+                    "path_state": backlog_path_state(path),
+                }),
+            );
+        }
+    }
+}
+
+pub(crate) fn backlog_path_state(path: &Path) -> serde_json::Value {
+    let file = |p: &Path| match std::fs::metadata(p) {
+        Ok(meta) => {
+            let modified_unix_ms = meta
+                .modified()
+                .ok()
+                .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            json!({
+                "exists": true,
+                "size_bytes": meta.len(),
+                "modified_unix_ms": modified_unix_ms,
+            })
+        }
+        Err(_) => json!({
+            "exists": false,
+        }),
+    };
+
+    let wal_path = path.with_extension("sqlite-wal");
+    let shm_path = path.with_extension("sqlite-shm");
+    let bak_path = path.with_extension("sqlite.bak");
+    json!({
+        "main": {
+            "path": path.display().to_string(),
+            "meta": file(path),
+        },
+        "wal": {
+            "path": wal_path.display().to_string(),
+            "meta": file(&wal_path),
+        },
+        "shm": {
+            "path": shm_path.display().to_string(),
+            "meta": file(&shm_path),
+        },
+        "backup": {
+            "path": bak_path.display().to_string(),
+            "meta": file(&bak_path),
+        },
+    })
+}
+
 #[derive(Clone)]
 struct ReadPool {
     conns: Arc<Vec<Mutex<Connection>>>,
@@ -849,6 +1313,7 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
         (1_i64, include_str!("../migrations/0001_backlog.sql")),
         (2_i64, include_str!("../migrations/0002_backlog.sql")),
         (3_i64, include_str!("../migrations/0003_backlog.sql")),
+        (4_i64, include_str!("../migrations/0004_merge_pending.sql")),
     ];
 
     conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); COMMIT;")
@@ -1167,9 +1632,8 @@ fn claim_merge_pending(
         "backlog_store.claim_merge_pending.started",
         json!({ "merge_worker_id": merge_worker_id }),
     );
-    // Claim oldest merge_pending task (FIFO)
-    let changed = conn
-        .execute(
+    let task = conn
+        .query_row(
             "UPDATE backlog_tasks
              SET status = 'in_progress', lease_owner = ?1, last_updated = ?2
              WHERE task_id = (
@@ -1177,28 +1641,62 @@ fn claim_merge_pending(
                  WHERE status = 'merge_pending'
                  ORDER BY last_updated ASC
                  LIMIT 1
-             )",
+             )
+             RETURNING task_id, kind, title, details, scope_key, priority, status,
+                       last_updated, lease_owner, lease_expires_at, source,
+                       related_pr, related_branch, rationale, attempt_count, created_at",
             params![merge_worker_id, now],
-        )
-        .map_err(db_err)?;
-    if changed == 0 {
-        return Ok(None);
-    }
-    // Fetch the just-claimed task
-    let task = conn
-        .query_row(
-            "SELECT task_id, kind, title, details, scope_key, priority, status,
-                    last_updated, lease_owner, lease_expires_at, source,
-                    related_pr, related_branch, rationale, attempt_count, created_at
-             FROM backlog_tasks
-             WHERE lease_owner = ?1 AND status = 'in_progress'
-             ORDER BY last_updated DESC LIMIT 1",
-            params![merge_worker_id],
             row_to_task,
         )
         .optional()
         .map_err(db_err)?;
     Ok(task)
+}
+
+fn set_related_pr(
+    conn: &Connection,
+    task_id: &str,
+    pr_number: i64,
+    branch: &str,
+    now: i64,
+) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.set_related_pr.started",
+        json!({
+            "task_id": task_id,
+            "pr_number": pr_number,
+            "branch": branch,
+        }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET related_pr = COALESCE(related_pr, ?2),
+                 related_branch = COALESCE(related_branch, ?3),
+                 last_updated = ?1
+             WHERE task_id = ?4",
+            params![now, pr_number, branch, task_id],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn promote_ready_with_pr(conn: &Connection, now: i64) -> StoreResult<usize> {
+    append_run_log(
+        "debug",
+        "backlog_store.promote_ready_with_pr.started",
+        json!({}),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'merge_pending', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
+             WHERE status = 'ready' AND related_pr IS NOT NULL",
+            params![now],
+        )
+        .map_err(db_err)?;
+    Ok(changed)
 }
 
 fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
@@ -1207,20 +1705,35 @@ fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
         "backlog_store.recover_stale.started",
         json!({ "now": now }),
     );
-    let changed = conn
+    let non_pr_recovered = conn
         .execute(
             "UPDATE backlog_tasks
              SET status = 'ready',
                  lease_owner = NULL,
                  lease_expires_at = NULL,
                  last_updated = ?1
-             WHERE status = 'in_progress'
+             WHERE (status = 'in_progress'
                 OR status = 'merge_pending'
-                OR (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at < ?1))",
+                OR (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at < ?1)))
+                AND related_pr IS NULL",
             [now],
         )
         .map_err(db_err)?;
-    Ok(changed)
+    let pr_recovered = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'merge_pending',
+                 lease_owner = NULL,
+                 lease_expires_at = NULL,
+                 last_updated = ?1
+             WHERE (status = 'in_progress'
+                OR status = 'merge_pending'
+                OR (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at < ?1)))
+                AND related_pr IS NOT NULL",
+            [now],
+        )
+        .map_err(db_err)?;
+    Ok(non_pr_recovered + pr_recovered)
 }
 
 fn fetch_task(conn: &Connection, task_id: &str) -> StoreResult<Option<BacklogTask>> {

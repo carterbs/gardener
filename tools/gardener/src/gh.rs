@@ -25,6 +25,13 @@ pub struct MergeCommit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OpenPrEntry {
+    pub number: u64,
+    #[serde(rename = "headRefName")]
+    pub head_ref_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Mergeable {
     Mergeable,
@@ -202,6 +209,54 @@ impl<'a> GhClient<'a> {
             }),
         );
         Ok(pr)
+    }
+
+    pub fn list_open_prs(&self) -> Result<Vec<OpenPrEntry>, GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.list_open.started",
+            json!({ "cwd": self.cwd.display().to_string() }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "list".to_string(),
+                "--state".to_string(),
+                "open".to_string(),
+                "--json".to_string(),
+                "number,headRefName".to_string(),
+                "--limit".to_string(),
+                "200".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "gh.pr.list_open.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "gh pr list failed: {}",
+                out.stderr
+            )));
+        }
+        let list: Vec<OpenPrEntry> = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid gh pr list json: {e}")))?;
+        append_run_log(
+            "info",
+            "gh.pr.list_open.succeeded",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "count": list.len(),
+            }),
+        );
+        Ok(list)
     }
 
     pub fn check_mergeability(&self, pr_number: u64) -> Result<PrMergeability, GardenerError> {
@@ -802,6 +857,47 @@ mod tests {
         let m = gh.check_mergeability(10).expect("ok");
         assert_eq!(m.mergeable, Mergeable::Conflicting);
         assert_eq!(m.merge_state_status, MergeStateStatus::Dirty);
+    }
+
+    #[test]
+    fn list_open_prs_reports_open_prs() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"[{"number":123,"headRefName":"gardener/task-1"},{"number":124,"headRefName":"main"}]"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let list = gh.list_open_prs().expect("ok");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].number, 123);
+        assert_eq!(list[0].head_ref_name, "gardener/task-1");
+    }
+
+    #[test]
+    fn list_open_prs_fails_when_command_fails() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "boom".to_string(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh.list_open_prs().expect_err("must fail");
+        assert!(format!("{err}").contains("gh pr list failed"));
+    }
+
+    #[test]
+    fn list_open_prs_fails_when_json_invalid() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "invalid".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh.list_open_prs().expect_err("must fail");
+        assert!(format!("{err}").contains("invalid gh pr list json"));
     }
 
     #[test]

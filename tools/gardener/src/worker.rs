@@ -70,6 +70,7 @@ fn merge_phase_lock() -> &'static Mutex<()> {
     MERGE_PHASE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+const MAX_GITTING_REMEDIATION: u32 = 3;
 const MAX_MERGE_REMEDIATION: u32 = 3;
 const MERGEABILITY_POLL_MAX: u32 = 12;
 const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -143,7 +144,7 @@ fn execute_task_live(
     let registry = PromptRegistry::v1().with_retry_rebase(attempt_count);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
-    let learning_loop = LearningLoop::default();
+    let mut learning_loop = LearningLoop::default();
     let mut logs = Vec::new();
     let factory = AdapterFactory::with_defaults();
     let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
@@ -320,7 +321,97 @@ fn execute_task_live(
         }),
     );
 
-    git.push_with_rebase_recovery(&branch)?;
+    for attempt in 0..MAX_GITTING_REMEDIATION {
+        match git.push_with_rebase_recovery(&branch) {
+            Ok(()) => {
+                append_run_log(
+                    "info",
+                    "worker.gitting.deterministic.succeeded",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "task_id": task_id,
+                        "branch": branch,
+                        "attempt": attempt + 1
+                    }),
+                );
+                break;
+            }
+            Err(push_err) => {
+                if attempt + 1 >= MAX_GITTING_REMEDIATION {
+                    append_run_log(
+                        "error",
+                        "worker.gitting.deterministic.exhausted",
+                        json!({
+                            "worker_id": identity.worker_id,
+                            "task_id": task_id,
+                            "branch": branch,
+                            "attempts": MAX_GITTING_REMEDIATION,
+                            "error": push_err.to_string()
+                        }),
+                    );
+                    return Ok(WorkerRunSummary {
+                        worker_id: identity.worker_id,
+                        session_id: identity.session.session_id,
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason: Some(format!(
+                            "gitting failed after {} remediation attempts: {}",
+                            MAX_GITTING_REMEDIATION, push_err
+                        )),
+                    });
+                }
+
+                append_run_log(
+                    "warn",
+                    "worker.gitting.deterministic.remediation",
+                    json!({
+                        "worker_id": identity.worker_id,
+                        "task_id": task_id,
+                        "branch": branch,
+                        "attempt": attempt + 1,
+                        "error": push_err.to_string()
+                    }),
+                );
+                learning_loop.ingest_failure(
+                    WorkerState::Gitting,
+                    "deterministic push failed",
+                    vec![
+                        format!("branch={branch}"),
+                        format!("attempt={}", attempt + 1),
+                        format!("error={push_err}"),
+                    ],
+                );
+                let remediation_result = run_agent_turn(TurnContext {
+                    cfg,
+                    process_runner,
+                    scope,
+                    worktree_path: &worktree_path,
+                    factory: &factory,
+                    registry: &registry,
+                    learning_loop: &learning_loop,
+                    identity: &identity,
+                    state: WorkerState::Gitting,
+                    task_summary,
+                    attempt_count,
+                })?;
+                logs.push(remediation_result.log_event);
+                if remediation_result.terminal == AgentTerminal::Failure {
+                    let failure_reason = extract_failure_reason(&remediation_result.payload);
+                    return Ok(WorkerRunSummary {
+                        worker_id: identity.worker_id,
+                        session_id: identity.session.session_id,
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason,
+                    });
+                }
+
+                git.commit_all("fix: gitting remediation")?;
+            }
+        }
+    }
 
     let gh = GhClient::new(process_runner, &worktree_path);
     let (title, body) = generate_pr_title_body(process_runner, &worktree_path, task_summary)?;

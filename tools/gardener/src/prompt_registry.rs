@@ -20,6 +20,7 @@ impl PromptRegistry {
         templates.insert(WorkerState::Understand, understand_template());
         templates.insert(WorkerState::Planning, planning_template());
         templates.insert(WorkerState::Doing, doing_template());
+        templates.insert(WorkerState::Gitting, gitting_remediation_template());
         templates.insert(WorkerState::Reviewing, reviewing_template());
         templates.insert(WorkerState::Merging, merge_remediation_template());
 
@@ -203,6 +204,32 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
+fn gitting_remediation_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-gitting-remediation",
+        body: r#"Intent: remediate git publication failures after deterministic push handling failed.
+
+The deterministic gitting pipeline failed to publish this branch. Failure details are provided in [knowledge_context].
+
+## Steps
+
+1. Read [knowledge_context] and identify the exact cause of the publication failure.
+2. Inspect and fix source files as needed (for example unresolved conflict markers, missing merged changes, or failing validation-related edits).
+3. Run the project validation command to confirm the worktree is publish-ready.
+4. Return a concise summary and changed files.
+
+## Rules
+
+- Do NOT run git push, git commit, gh pr create, gh pr merge, or any other git/gh commands that move code.
+- You may inspect git state (`git status`, `git diff`, `git show`) only for diagnosis.
+- Keep changes scoped to making publication deterministic and safe.
+
+Guardrails: do not move git state; only fix source files and validate.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
 fn merge_remediation_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-merge-remediation",
@@ -288,6 +315,7 @@ mod tests {
             WorkerState::Understand,
             WorkerState::Planning,
             WorkerState::Doing,
+            WorkerState::Gitting,
             WorkerState::Reviewing,
             WorkerState::Merging,
         ] {
@@ -304,5 +332,16 @@ mod tests {
             .expect("template exists");
         assert_eq!(tpl.version, "v1-merge-remediation");
         assert!(tpl.body.contains("do not run git/gh commands"));
+    }
+
+    #[test]
+    fn gitting_remediation_template_prohibits_git_moves() {
+        let registry = PromptRegistry::v1();
+        let tpl = registry
+            .template_for(WorkerState::Gitting)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-gitting-remediation");
+        assert!(tpl.body.contains("Do NOT run git push, git commit"));
+        assert!(tpl.body.contains("git status"));
     }
 }

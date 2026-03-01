@@ -6,6 +6,7 @@ use gardener::friction_analysis::{
     extract_worker_timeline, findings_to_tasks, run_friction_analysis, FrictionAnalysisInput,
     FrictionAnalysisOutcome,
 };
+use gardener::logging::append_run_log;
 use gardener::runtime::ProductionRuntime;
 use gardener::startup::backlog_db_path;
 use std::path::PathBuf;
@@ -82,6 +83,16 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
     }
 
     eprintln!("Timeline: {} bytes, {} events", timeline.len(), timeline.lines().count());
+    append_run_log(
+        "info",
+        "friction_analysis.timeline.extracted",
+        serde_json::json!({
+            "run_id": args.run_id,
+            "worker_id": args.worker_id,
+            "bytes": timeline.len(),
+            "events": timeline.lines().count()
+        }),
+    );
 
     if args.timeline_only {
         println!("{timeline}");

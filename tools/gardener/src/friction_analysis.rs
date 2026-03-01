@@ -513,21 +513,21 @@ mod tests {
                 ]
             }
         }))
-        .unwrap()
+        .expect("serialize otel line")
     }
 
     fn write_log_file(dir: &Path, lines: &[String]) -> PathBuf {
         let path = dir.join("otel-logs.jsonl");
-        let mut file = std::fs::File::create(&path).unwrap();
+        let mut file = std::fs::File::create(&path).expect("create log file");
         for line in lines {
-            writeln!(file, "{}", line).unwrap();
+            writeln!(file, "{}", line).expect("write log line");
         }
         path
     }
 
     #[test]
     fn extract_filters_by_worker_and_run() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         let lines = vec![
             otel_line("run-1", "w1", "worker.started", "INFO", 5),
             otel_line("run-1", "w2", "worker.started", "INFO", 5),
@@ -536,7 +536,7 @@ mod tests {
         ];
         let path = write_log_file(dir.path(), &lines);
 
-        let result = extract_worker_timeline(&path, "run-1", "w1").unwrap();
+        let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
         assert!(result.contains("worker.started"), "should include worker.started");
         assert!(result.contains("agent.turn.completed"), "should include agent.turn.completed");
         assert!(!result.contains("w2"), "should not include w2 events");
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn extract_drops_noise_events() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         let lines = vec![
             otel_line("run-1", "w1", "boot.stage.init", "INFO", 5),
             otel_line("run-1", "w1", "prompt.rendered.v1", "DEBUG", 1),
@@ -554,7 +554,7 @@ mod tests {
         ];
         let path = write_log_file(dir.path(), &lines);
 
-        let result = extract_worker_timeline(&path, "run-1", "w1").unwrap();
+        let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
         assert!(!result.contains("boot.stage"), "should drop boot.stage");
         assert!(!result.contains("prompt.rendered"), "should drop prompt.rendered");
         assert!(result.contains("worker.task.started"));
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn extract_keeps_high_severity_regardless_of_type() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         let lines = vec![
             otel_line("run-1", "w1", "some.random.event", "WARN", 9),
             otel_line("run-1", "w1", "another.event", "ERROR", 13),
@@ -570,7 +570,7 @@ mod tests {
         ];
         let path = write_log_file(dir.path(), &lines);
 
-        let result = extract_worker_timeline(&path, "run-1", "w1").unwrap();
+        let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
         assert!(result.contains("some.random.event"), "WARN should be kept");
         assert!(result.contains("another.event"), "ERROR should be kept");
         assert!(!result.contains("boring.debug"), "DEBUG should be dropped");
@@ -583,13 +583,13 @@ mod tests {
             "run-1",
             "w1",
         )
-        .unwrap();
+        .expect("extract timeline from missing file");
         assert!(result.is_empty());
     }
 
     #[test]
     fn extract_truncates_oversized_results() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         // Create many events that exceed 32KB
         let lines: Vec<String> = (0..2000)
             .map(|i| {
@@ -604,7 +604,7 @@ mod tests {
             .collect();
         let path = write_log_file(dir.path(), &lines);
 
-        let result = extract_worker_timeline(&path, "run-1", "w1").unwrap();
+        let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
         assert!(
             result.contains("[..."),
             "should contain omission marker"
@@ -617,19 +617,19 @@ mod tests {
 
     #[test]
     fn extract_handles_malformed_json() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("otel-logs.jsonl");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "not valid json").unwrap();
-        writeln!(file, "{{}}").unwrap(); // valid but no matching fields
+        let mut file = std::fs::File::create(&path).expect("create log file");
+        writeln!(file, "not valid json").expect("write line");
+        writeln!(file, "{{}}").expect("write line"); // valid but no matching fields
         writeln!(
             file,
             "{}",
             otel_line("run-1", "w1", "worker.started", "INFO", 5)
         )
-        .unwrap();
+        .expect("write line");
 
-        let result = extract_worker_timeline(&path, "run-1", "w1").unwrap();
+        let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
         assert!(result.contains("worker.started"));
         assert_eq!(result.lines().count(), 1);
     }
@@ -646,7 +646,7 @@ mod tests {
             }],
             "smooth_run": false
         }"#;
-        let resp: FrictionAnalysisResponse = serde_json::from_str(json_str).unwrap();
+        let resp: FrictionAnalysisResponse = serde_json::from_str(json_str).expect("deserialize response");
         assert_eq!(resp.findings.len(), 1);
         assert!(!resp.smooth_run);
         assert_eq!(resp.findings[0].category, "tool_failure");
@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn response_deserializes_smooth_run() {
         let json_str = r#"{"findings": [], "smooth_run": true}"#;
-        let resp: FrictionAnalysisResponse = serde_json::from_str(json_str).unwrap();
+        let resp: FrictionAnalysisResponse = serde_json::from_str(json_str).expect("deserialize response");
         assert!(resp.findings.is_empty());
         assert!(resp.smooth_run);
     }

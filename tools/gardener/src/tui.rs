@@ -692,8 +692,7 @@ fn merge_worker_card_item(
                 Span::styled(
                     command_stream,
                     Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::DIM),
+                        .fg(Color::Gray),
                 ),
             ]),
         ]
@@ -1233,8 +1232,7 @@ fn draw_dashboard_frame(
                         Span::styled(
                             command_stream,
                             Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::DIM),
+                                .fg(Color::Gray),
                         ),
                     ]),
                 ]

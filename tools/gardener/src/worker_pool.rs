@@ -131,6 +131,21 @@ pub fn run_worker_pool_fsm(
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let command_poll_chunk = 32;
     let mut completed = 0usize;
+
+    let mark_merge_worker_busy = |workers: &mut [WorkerRow],
+                                      last_activity_pulse: &mut Vec<Instant>,
+                                      merge_row_idx: usize,
+                                      pr_number: u64,
+                                      task_summary: &str| {
+        workers[merge_row_idx].state = "merging".to_string();
+        workers[merge_row_idx].task_title = format!("PR #{pr_number}: {task_summary}");
+        let merge_msg = format!("merging PR #{pr_number}");
+        workers[merge_row_idx].tool_line = merge_msg.clone();
+        append_worker_command(&mut workers[merge_row_idx], &merge_msg);
+        workers[merge_row_idx].breadcrumb = "merging".to_string();
+        workers[merge_row_idx].lease_held = true;
+        last_activity_pulse[merge_row_idx] = Instant::now();
+    };
     refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
     render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
@@ -156,13 +171,13 @@ pub fn run_worker_pool_fsm(
             .unwrap_or(&scope.working_dir);
         let worktree_client = WorktreeClient::new(runtime.process_runner.as_ref(), repo_root);
         let maybe_start_merge = |active_merging: &mut usize,
-                                     merge_tx: &mut Option<mpsc::Sender<MergeRequest>>|
-         -> Result<bool, GardenerError> {
+                                 merge_tx: &mut Option<mpsc::Sender<MergeRequest>>|
+         -> Result<Option<(u64, String)>, GardenerError> {
             if *active_merging >= 1 {
-                return Ok(false);
+                return Ok(None);
             }
             let Some(task) = store.claim_merge_pending(MERGE_WORKER_ID)? else {
-                return Ok(false);
+                return Ok(None);
             };
             let task_id = task.task_id.clone();
             let pr_number = match task.related_pr.and_then(|n| u64::try_from(n).ok()) {
@@ -177,7 +192,7 @@ pub fn run_worker_pool_fsm(
                         }),
                     );
                     let _ = store.release_lease(&task.task_id, MERGE_WORKER_ID);
-                    return Ok(false);
+                    return Ok(None);
                 }
             };
             let branch = task
@@ -197,14 +212,15 @@ pub fn run_worker_pool_fsm(
                     }),
                 );
                 let _ = store.release_lease(&task.task_id, MERGE_WORKER_ID);
-                return Ok(false);
+                return Ok(None);
             }
             if let Some(mtx) = merge_tx {
                 let identity = WorkerIdentity::new(MERGE_WORKER_ID);
+                let task_summary = task.title;
                 let _ = mtx.send(MergeRequest {
                     slot_idx: 0,
                     task_id: task.task_id,
-                    task_summary: task.title,
+                    task_summary: task_summary.clone(),
                     attempt_count: task.attempt_count,
                     worker_id: identity.worker_id,
                     session_id: identity.session.session_id,
@@ -214,9 +230,9 @@ pub fn run_worker_pool_fsm(
                     logs: Vec::new(),
                 });
                 *active_merging = active_merging.saturating_add(1);
-                return Ok(true);
+                return Ok(Some((pr_number, task_summary)));
             }
-            Ok(false)
+            Ok(None)
         };
         let mut claimed = Vec::new();
         let mut claimed_any = false;
@@ -286,8 +302,17 @@ pub fn run_worker_pool_fsm(
         ) = mpsc::channel();
         let runtime_scope = scope.clone();
         let mut merge_tx = Some(merge_tx);
-        if maybe_start_merge(&mut active_merging, &mut merge_tx)? {
+        if let Some((pr_number, task_summary)) =
+            maybe_start_merge(&mut active_merging, &mut merge_tx)?
+        {
             claimed_any = true;
+            mark_merge_worker_busy(
+                &mut workers,
+                &mut last_activity_pulse,
+                merge_row_idx,
+                pr_number,
+                &task_summary,
+            );
         }
 
         if !claimed_any && active_merging == 0 {
@@ -433,16 +458,17 @@ pub fn run_worker_pool_fsm(
                                     append_worker_command(&mut workers[idx], &handoff_msg);
                                     workers[idx].breadcrumb = "handoff>merge".to_string();
                                     workers[idx].lease_held = false;
-                                    // Update merge worker TUI row
-                                    workers[merge_row_idx].state = "merging".to_string();
-                                    workers[merge_row_idx].task_title = format!("PR #{}", req.pr_number);
-                                    let merge_msg = format!("merging PR #{}", req.pr_number);
-                                    workers[merge_row_idx].tool_line = merge_msg.clone();
-                                    append_worker_command(&mut workers[merge_row_idx], &merge_msg);
-                                    workers[merge_row_idx].breadcrumb = "merging".to_string();
-                                    workers[merge_row_idx].lease_held = true;
-                                    last_activity_pulse[merge_row_idx] = Instant::now();
-                                    let _ = maybe_start_merge(&mut active_merging, &mut merge_tx)?;
+                                    if let Some((pr_number, task_summary)) =
+                                        maybe_start_merge(&mut active_merging, &mut merge_tx)?
+                                    {
+                                        mark_merge_worker_busy(
+                                            &mut workers,
+                                            &mut last_activity_pulse,
+                                            merge_row_idx,
+                                            pr_number,
+                                            &task_summary,
+                                        );
+                                    }
                                     append_run_log(
                                         "info",
                                         "worker.task.handoff_to_merge",
@@ -731,7 +757,17 @@ pub fn run_worker_pool_fsm(
                                 }
                             }
                         }
-                        let _ = maybe_start_merge(&mut active_merging, &mut merge_tx)?;
+                        if let Some((pr_number, task_summary)) =
+                            maybe_start_merge(&mut active_merging, &mut merge_tx)?
+                        {
+                            mark_merge_worker_busy(
+                                &mut workers,
+                                &mut last_activity_pulse,
+                                merge_row_idx,
+                                pr_number,
+                                &task_summary,
+                            );
+                        }
                         // Reset merge row to idle if no more merges pending
                         if active_merging == 0 {
                             workers[merge_row_idx].state = "idle".to_string();
@@ -1173,11 +1209,16 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
             }
             crate::backlog_store::TaskStatus::MergePending => {
                 stats.merge_pending += 1;
+                let task_title = task.title.clone();
+                let merge_title = match task.related_pr.and_then(|pr| u64::try_from(pr).ok()) {
+                    Some(pr_number) => format!("{task_title} (PR #{pr_number})"),
+                    None => task_title,
+                };
                 backlog.in_progress.push(format!(
                     "MRG {} {} {}",
                     task.priority.as_str(),
                     short_task_id(&task.task_id),
-                    task.title
+                    merge_title
                 ));
             }
             crate::backlog_store::TaskStatus::Failed => stats.failed += 1,

@@ -65,6 +65,8 @@ pub fn map_claude_event(raw: &Value) -> AgentEvent {
     let event_type = raw.get("type").and_then(Value::as_str).unwrap_or("unknown");
 
     let kind = match event_type {
+        "system" => AgentEventKind::ThreadStarted,
+        "assistant" => AgentEventKind::Message,
         "message_start" => AgentEventKind::ThreadStarted,
         "content_block_start" => AgentEventKind::TurnStarted,
         "content_block_delta" => AgentEventKind::Message,

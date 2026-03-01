@@ -173,78 +173,136 @@ pub fn step(binary_name: &str, label: &str, detail: &str) {
 }
 
 pub fn print_agent_event(binary_name: &str, event: &AgentEvent) {
-    let payload = &event.payload;
-    let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    use crate::protocol::AgentEventKind;
 
-    match event_type {
-        // Streaming text delta — agent is writing/thinking
-        "content_block_delta" => {
+    let payload = &event.payload;
+
+    match &event.kind {
+        // "assistant" event — message.content has text/tool_use blocks
+        // "content_block_delta" — streaming delta with delta.text
+        AgentEventKind::Message => {
+            // Claude Code format: assistant event with message.content array
+            if let Some(blocks) = payload
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                print_content_blocks(binary_name, blocks);
+            }
+            // Raw API streaming format: content_block_delta with delta.text
             if let Some(text) = payload
                 .get("delta")
                 .and_then(|d| d.get("text"))
                 .and_then(|t| t.as_str())
             {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    for line in trimmed.lines() {
-                        let line = line.trim();
-                        if !line.is_empty() {
-                            eprintln!("[{binary_name} {}] AGENT: {line}", ts());
-                        }
-                    }
+                print_agent_text(binary_name, text);
+            }
+        }
+        // content_block_start — may announce a tool_use block
+        AgentEventKind::TurnStarted => {
+            if let Some(cb) = payload.get("content_block") {
+                if cb.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let name = cb.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                    eprintln!("[{binary_name} {}] TOOL: {name}", ts());
                 }
             }
         }
-        // Standalone tool_use — agent is calling a tool
-        "tool_use" => {
+        // Standalone tool_use event
+        AgentEventKind::ToolCall => {
             let name = payload.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-            let command = payload
-                .get("input")
-                .and_then(|i| i.get("command"))
-                .and_then(|c| c.as_str());
-            if let Some(cmd) = command {
-                eprintln!("[{binary_name} {}] TOOL: {name}: {cmd}", ts());
-            } else {
+            let detail = summarize_tool_input(name, payload.get("input"));
+            if detail.is_empty() {
                 eprintln!("[{binary_name} {}] TOOL: {name}", ts());
+            } else {
+                eprintln!("[{binary_name} {}] TOOL: {name}: {detail}", ts());
             }
         }
-        // Final result — contains message.content blocks with full output
-        "result" => {
-            let content = payload.get("message").and_then(|m| m.get("content"));
-            let Some(blocks) = content.and_then(|c| c.as_array()) else {
-                return;
-            };
-            for block in blocks {
-                match block.get("type").and_then(|t| t.as_str()) {
-                    Some("tool_use") => {
-                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                        let command = block
-                            .get("input")
-                            .and_then(|i| i.get("command"))
-                            .and_then(|c| c.as_str());
-                        if let Some(cmd) = command {
-                            eprintln!("[{binary_name} {}] TOOL: {name}: {cmd}", ts());
-                        } else {
-                            eprintln!("[{binary_name} {}] TOOL: {name}", ts());
-                        }
-                    }
-                    Some("text") => {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                for line in trimmed.lines().take(20) {
-                                    let line = line.trim();
-                                    if !line.is_empty() {
-                                        eprintln!("[{binary_name} {}] AGENT: {line}", ts());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+        // Final result
+        AgentEventKind::TurnCompleted | AgentEventKind::TurnFailed => {
+            // result event with message.content blocks
+            if let Some(blocks) = payload
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array())
+            {
+                print_content_blocks(binary_name, blocks);
+            }
+            // result event with top-level result text
+            if let Some(text) = payload.get("result").and_then(|r| r.as_str()) {
+                print_agent_text(binary_name, text);
             }
         }
         _ => {}
+    }
+}
+
+fn print_content_blocks(binary_name: &str, blocks: &[serde_json::Value]) {
+    for block in blocks {
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("tool_use") => {
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                let detail = summarize_tool_input(name, block.get("input"));
+                if detail.is_empty() {
+                    eprintln!("[{binary_name} {}] TOOL: {name}", ts());
+                } else {
+                    eprintln!("[{binary_name} {}] TOOL: {name}: {detail}", ts());
+                }
+            }
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                    print_agent_text(binary_name, text);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn summarize_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> String {
+    let Some(input) = input else { return String::new() };
+    match tool_name {
+        "Bash" => input.get("command").and_then(|c| c.as_str())
+            .map(|s| truncate_str(s, 120))
+            .unwrap_or_default(),
+        "Read" => input.get("file_path").and_then(|p| p.as_str())
+            .unwrap_or("").to_string(),
+        "Write" => input.get("file_path").and_then(|p| p.as_str())
+            .unwrap_or("").to_string(),
+        "Edit" => {
+            let path = input.get("file_path").and_then(|p| p.as_str()).unwrap_or("");
+            let old = input.get("old_string").and_then(|s| s.as_str())
+                .map(|s| truncate_str(s, 40))
+                .unwrap_or_default();
+            if old.is_empty() { path.to_string() } else { format!("{path} ({old})") }
+        }
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+            format!("/{pattern}/ in {path}")
+        }
+        "Glob" => input.get("pattern").and_then(|p| p.as_str())
+            .unwrap_or("").to_string(),
+        _ => String::new(),
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    let first_line = s.lines().next().unwrap_or("").trim();
+    if first_line.len() <= max {
+        first_line.to_string()
+    } else {
+        format!("{}...", &first_line[..max])
+    }
+}
+
+fn print_agent_text(binary_name: &str, text: &str) {
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        for line in trimmed.lines().take(20) {
+            let line = line.trim();
+            if !line.is_empty() {
+                eprintln!("[{binary_name} {}] AGENT: {line}", ts());
+            }
+        }
     }
 }

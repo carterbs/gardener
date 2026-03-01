@@ -141,22 +141,43 @@ mod tests {
     fn worker_activity_state_as_str_covers_all_variants() {
         assert_eq!(WorkerActivityState::Claimed.as_str(), "claimed");
         assert_eq!(WorkerActivityState::Starting.as_str(), "starting");
-        assert_eq!(WorkerActivityState::WorktreePreparing.as_str(), "worktree_preparing");
-        assert_eq!(WorkerActivityState::WorktreeReady.as_str(), "worktree_ready");
+        assert_eq!(
+            WorkerActivityState::WorktreePreparing.as_str(),
+            "worktree_preparing"
+        );
+        assert_eq!(
+            WorkerActivityState::WorktreeReady.as_str(),
+            "worktree_ready"
+        );
         assert_eq!(WorkerActivityState::Understand.as_str(), "understand");
         assert_eq!(WorkerActivityState::Planning.as_str(), "planning");
         assert_eq!(WorkerActivityState::Doing.as_str(), "doing");
         assert_eq!(WorkerActivityState::Commit.as_str(), "commit");
         assert_eq!(WorkerActivityState::Gitting.as_str(), "gitting");
-        assert_eq!(WorkerActivityState::GittingRemediation.as_str(), "gitting_remediation");
+        assert_eq!(
+            WorkerActivityState::GittingRemediation.as_str(),
+            "gitting_remediation"
+        );
         assert_eq!(WorkerActivityState::PrCreating.as_str(), "pr_creating");
         assert_eq!(WorkerActivityState::Reviewing.as_str(), "reviewing");
         assert_eq!(WorkerActivityState::Merging.as_str(), "merging");
         assert_eq!(WorkerActivityState::MergePolling.as_str(), "merge_polling");
-        assert_eq!(WorkerActivityState::MergeFromMain.as_str(), "merge_from_main");
-        assert_eq!(WorkerActivityState::MergeRemediation.as_str(), "merge_remediation");
-        assert_eq!(WorkerActivityState::CiFailureRemediation.as_str(), "ci_failure_remediation");
-        assert_eq!(WorkerActivityState::PostMergeValidation.as_str(), "post_merge_validation");
+        assert_eq!(
+            WorkerActivityState::MergeFromMain.as_str(),
+            "merge_from_main"
+        );
+        assert_eq!(
+            WorkerActivityState::MergeRemediation.as_str(),
+            "merge_remediation"
+        );
+        assert_eq!(
+            WorkerActivityState::CiFailureRemediation.as_str(),
+            "ci_failure_remediation"
+        );
+        assert_eq!(
+            WorkerActivityState::PostMergeValidation.as_str(),
+            "post_merge_validation"
+        );
         assert_eq!(WorkerActivityState::Teardown.as_str(), "teardown");
         assert_eq!(WorkerActivityState::Complete.as_str(), "complete");
         assert_eq!(WorkerActivityState::Failed.as_str(), "failed");

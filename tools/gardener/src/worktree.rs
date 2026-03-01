@@ -168,7 +168,8 @@ impl<'a> WorktreeClient<'a> {
                     }),
                 );
                 return Err(GardenerError::Process(
-                    "worktree create failed: path exists and is not registered as a git worktree".to_string(),
+                    "worktree create failed: path exists and is not registered as a git worktree"
+                        .to_string(),
                 ));
             }
         }
@@ -196,10 +197,8 @@ impl<'a> WorktreeClient<'a> {
         if out.exit_code != 0 {
             let branch_exists = self.branch_exists(branch)?;
             let branch_collision = branch_exists
-                || out
-                    .stderr
-                    .to_lowercase()
-                    .contains("fatal: a branch named") && out.stderr.to_lowercase().contains("already exists");
+                || out.stderr.to_lowercase().contains("fatal: a branch named")
+                    && out.stderr.to_lowercase().contains("already exists");
             if branch_collision {
                 append_run_log(
                     "warn",
@@ -600,8 +599,7 @@ mod tests {
         runner.push_response(Ok(ProcessOutput {
             exit_code: 255,
             stdout: String::new(),
-            stderr:
-                "fatal: a branch named 'task-1' already exists\n".to_string(),
+            stderr: "fatal: a branch named 'task-1' already exists\n".to_string(),
         }));
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,

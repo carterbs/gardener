@@ -128,6 +128,8 @@ Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate task
 - Do not add speculative features, extra configuration, or "nice to have" improvements beyond scope.
 - Keep changes focused. Three similar lines of code are better than a premature abstraction.
 - Do not edit unrelated shared coordination/state files unless the task explicitly requires it.
+- Do not bypass quality gates. If tests/lints/coverage checks fail, fix code/tests instead of weakening checks.
+- Do not lower thresholds or expand excludes/ignore lists (coverage, lint, test, validation config) unless the task explicitly requires a policy change.
 
 ## Verification (mandatory)
 
@@ -139,9 +141,9 @@ After implementation, you MUST verify your work actually works:
 - Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
-Guardrails: max 100 turns, keep patch minimal, include changed files list.
-Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
-commit_message must be a concise conventional-commit style message describing what was implemented.
+Guardrails: max 100 turns, keep patch minimal.
+After all verification passes, commit your work: `git add -A && git commit -m "<msg>"` where <msg> is a conventional-commit subject describing what you implemented (e.g. "feat: enable clippy::needless_update", "fix: correct state transition on timeout"). Do not use generic messages like "implement task changes".
+Output schema must be JSON envelope with payload fields: summary.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -171,6 +173,8 @@ Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate task
 6. If tests or lints fail, fix the issues before returning.
 
 Follow existing patterns in the codebase. Do not refactor surrounding code unless the task calls for it. Do not add speculative features beyond scope.
+- Do not bypass quality gates. If tests/lints/coverage checks fail, fix code/tests instead of weakening checks.
+- Do not lower thresholds or expand excludes/ignore lists (coverage, lint, test, validation config) unless the task explicitly requires a policy change.
 
 ## Verification (mandatory)
 
@@ -181,9 +185,9 @@ After implementation, verify your work actually works:
 - Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
-Guardrails: max 100 turns, keep patch minimal, include changed files list.
-Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
-commit_message must be a concise conventional-commit style message describing what was implemented.
+Guardrails: max 100 turns, keep patch minimal.
+After all verification passes, commit your work: `git add -A && git commit -m "<msg>"` where <msg> is a conventional-commit subject describing what you implemented (e.g. "feat: enable clippy::needless_update", "fix: correct state transition on timeout"). Do not use generic messages like "implement task changes".
+Output schema must be JSON envelope with payload fields: summary.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -210,6 +214,7 @@ You are an independent reviewer. Your job is to ensure the implementation is cor
 - **Conventions**: Does the code follow project naming, file structure, and architecture conventions?
 - **Scope**: Are the changes focused on the task, or does the implementation include unrelated refactors, speculative features, or unnecessary abstractions?
 - **Quality**: Is the code clear and maintainable? Are there obvious simplifications? Would a human reviewer flag anything as over-engineered or under-documented?
+- **Integrity of checks**: Did implementation preserve validation standards? Any attempt to weaken gates (for example coverage ignores/excludes or lower thresholds) must be treated as a failure unless explicitly requested by the task.
 
 ## Verdict
 
@@ -243,6 +248,7 @@ This is remediation-only work. Keep changes minimal and strictly tied to the rep
 - Do NOT run git push, git commit, gh pr create, gh pr merge, or any other git/gh commands that move code.
 - You may inspect git state (`git status`, `git diff`, `git show`) only for diagnosis.
 - Keep changes scoped to making publication deterministic and safe.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
 Guardrails: do not move git state; only fix source files and validate.
 When your turn is complete, stop after two plain-text lines:
@@ -266,16 +272,68 @@ The deterministic merge pipeline tried to merge your PR and failed. Information 
 - If CI is failing: identify and fix the test/lint/build failures.
 - If the branch is behind main: rebase onto origin/main and resolve any resulting conflicts.
 
-## Rules
+## Autonomy
 
-- Do NOT run git push, git commit, gh pr merge, or any other git/gh commands that move code.
-- Just fix the source files. Your changes will be committed and pushed automatically by the pipeline.
-- Run the project's validation command to verify your fixes before returning.
+You have full autonomy. Fix the code, commit your changes, and push. The pipeline is the safety net.
+- Run the project's validation command to verify your fixes before pushing.
 - Keep edits minimal and mergeability-focused; avoid unrelated refactors.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
-Guardrails: do not run git/gh commands; only fix source files.
 Output schema must be JSON envelope with payload fields: summary, files_changed.
 summary must include what was fixed and the validation command/result.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+pub fn merge_main_conflict_resolution_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-merge-main-conflict",
+        body: r#"Intent: resolve merge conflicts after merging origin/main into this branch.
+
+## Context
+The pipeline ran `git merge origin/main` and there are conflicts in one or more files.
+Failure details are in [knowledge_context].
+
+## Steps
+1. Find all files with conflict markers (<<<<<<< / ======= / >>>>>>>).
+2. Resolve each conflict by choosing the correct code or combining both sides.
+3. Remove all conflict markers — no file should contain <<<<<<< when you are done.
+4. Run the project's validation command to confirm everything passes.
+
+## Autonomy
+You have full autonomy. Fix the conflicts, commit your changes, and push. The pipeline is the safety net.
+- Keep changes minimal — only resolve conflicts, do not refactor.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
+
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+pub fn ci_failure_remediation_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-ci-failure-remediation",
+        body: r#"Intent: fix CI failures so this PR can be merged.
+
+## Context
+
+CI checks failed on this PR. The failure logs are provided in [knowledge_context].
+
+## Steps
+
+1. Read the CI failure logs in [knowledge_context] carefully.
+2. Identify the root cause of each failure (test failure, lint error, build error, etc.).
+3. Fix the source code to resolve the failures.
+4. Run the project's validation command locally to confirm your fixes pass.
+
+## Autonomy
+
+You have full autonomy. Fix the code, commit your changes, and push. The pipeline is the safety net.
+- Keep edits minimal and CI-fix-focused; avoid unrelated refactors.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
+
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+summary must include what CI failures were fixed and the validation command/result.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -309,7 +367,7 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 
 #[cfg(test)]
 mod tests {
-    use super::PromptRegistry;
+    use super::{ci_failure_remediation_template, PromptRegistry};
     use crate::types::WorkerState;
 
     #[test]
@@ -319,7 +377,9 @@ mod tests {
             .template_for(WorkerState::Doing)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-doing-retry-rebase");
-        assert!(tpl.body.contains("git fetch origin main && git rebase origin/main"));
+        assert!(tpl
+            .body
+            .contains("git fetch origin main && git rebase origin/main"));
     }
 
     #[test]
@@ -347,13 +407,23 @@ mod tests {
     }
 
     #[test]
-    fn merge_remediation_template_prohibits_git_commands() {
+    fn merge_remediation_template_grants_autonomy() {
         let registry = PromptRegistry::v1();
         let tpl = registry
             .template_for(WorkerState::Merging)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-merge-remediation");
-        assert!(tpl.body.contains("do not run git/gh commands"));
+        assert!(tpl.body.contains("full autonomy"));
+        assert!(!tpl.body.contains("Do NOT run git push"));
+    }
+
+    #[test]
+    fn ci_failure_remediation_template_references_knowledge_context() {
+        let tpl = ci_failure_remediation_template();
+        assert_eq!(tpl.version, "v1-ci-failure-remediation");
+        assert!(tpl.body.contains("[knowledge_context]"));
+        assert!(tpl.body.contains("full autonomy"));
+        assert!(tpl.body.contains("<<GARDENER_JSON_START>>"));
     }
 
     #[test]

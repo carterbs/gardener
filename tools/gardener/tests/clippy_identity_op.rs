@@ -183,7 +183,7 @@ fn workspace_clippy_lint_configuration_enables_redundant_static_lifetimes_warn()
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.redundant_static_lifetimes is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]

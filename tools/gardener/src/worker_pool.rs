@@ -162,10 +162,10 @@ pub fn run_worker_pool_fsm(
                 result_ok: true,
             }));
 
-            workers[idx].state = "doing".to_string();
+            workers[idx].state = "claimed".to_string();
             workers[idx].task_title = task.title.clone();
             workers[idx].tool_line = "claimed".to_string();
-            workers[idx].breadcrumb = "claim>doing".to_string();
+            workers[idx].breadcrumb = "claim>claimed".to_string();
             workers[idx].lease_held = true;
             append_worker_command(&mut workers[idx], "claimed");
             refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
@@ -412,10 +412,10 @@ pub fn run_worker_pool_fsm(
                                     result_ok: true,
                                 }));
 
-                                workers[idx].state = "doing".to_string();
+                                workers[idx].state = "claimed".to_string();
                                 workers[idx].task_title = task.title.clone();
                                 workers[idx].tool_line = "claimed".to_string();
-                                workers[idx].breadcrumb = "claim>doing".to_string();
+                                workers[idx].breadcrumb = "claim>claimed".to_string();
                                 workers[idx].lease_held = true;
                                 append_worker_command(&mut workers[idx], "claimed");
                                 let now = Instant::now();
@@ -690,7 +690,7 @@ fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
                 redraw_dashboard = true;
             }
             Some(AppHotkeyAction::ParkEscalate) => {
-                let active = workers.iter().filter(|row| row.state == "doing").count();
+                let active = workers.iter().filter(|row| row.lease_held).count();
                 let task = store.upsert_task(crate::backlog_store::NewTask {
                     kind: TaskKind::Maintenance,
                     title: format!("Escalation requested for {active} active worker(s)"),

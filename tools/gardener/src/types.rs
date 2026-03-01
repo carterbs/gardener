@@ -57,6 +57,62 @@ impl WorkerState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerActivityState {
+    Claimed,
+    Starting,
+    WorktreePreparing,
+    WorktreeReady,
+    Understand,
+    Planning,
+    Doing,
+    Commit,
+    Gitting,
+    GittingRemediation,
+    PrCreating,
+    Reviewing,
+    Merging,
+    MergeLockWaiting,
+    MergeLockHeld,
+    MergePolling,
+    MergeRemediation,
+    PostMergeValidation,
+    Teardown,
+    Complete,
+    Failed,
+    Parked,
+}
+
+impl WorkerActivityState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Starting => "starting",
+            Self::WorktreePreparing => "worktree_preparing",
+            Self::WorktreeReady => "worktree_ready",
+            Self::Understand => "understand",
+            Self::Planning => "planning",
+            Self::Doing => "doing",
+            Self::Commit => "commit",
+            Self::Gitting => "gitting",
+            Self::GittingRemediation => "gitting_remediation",
+            Self::PrCreating => "pr_creating",
+            Self::Reviewing => "reviewing",
+            Self::Merging => "merging",
+            Self::MergeLockWaiting => "merge_lock_waiting",
+            Self::MergeLockHeld => "merge_lock_held",
+            Self::MergePolling => "merge_polling",
+            Self::MergeRemediation => "merge_remediation",
+            Self::PostMergeValidation => "post_merge_validation",
+            Self::Teardown => "teardown",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+            Self::Parked => "parked",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationCommandResolution {
     pub command: String,

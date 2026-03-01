@@ -973,7 +973,8 @@ fn draw_dashboard_frame(
     };
     let mut backlog_rows = requested_backlog_rows;
     if visible_worker_count >= 3 {
-        let minimum_worker_rows = (visible_worker_count.min(3) * worker_row_height_for_layout + 1) as u16;
+        let minimum_worker_rows =
+            (visible_worker_count.min(3) * worker_row_height_for_layout + 1) as u16;
         let max_backlog_rows = remaining.saturating_sub(minimum_worker_rows);
         let minimum_backlog_rows = if app_state.backlog.is_empty() {
             0
@@ -1282,13 +1283,11 @@ fn draw_dashboard_frame(
     let merge_row = workers.iter().find(|row| row.worker_id == "merge-worker");
     let merge_command_stream_max_width = merge_queue_panel[1]
         .width
-        .saturating_sub(8 + "Commands: ".len() as u16) as usize;
+        .saturating_sub(8 + "Commands: ".len() as u16)
+        as usize;
 
-    let backlog_items = backlog_items_with_capacity(
-        &ordered_backlog,
-        backlog_list_capacity,
-        "No backlog items",
-    );
+    let backlog_items =
+        backlog_items_with_capacity(&ordered_backlog, backlog_list_capacity, "No backlog items");
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             "BACKLOG (PRIORITY ORDER)",
@@ -1323,14 +1322,12 @@ fn draw_dashboard_frame(
         )])),
         merge_right_panel[0],
     );
-    let merge_worker_items = vec![
-        merge_worker_card_item(
-            merge_row,
-            compact_view || compact_worker_row,
-            merge_command_stream_max_width,
-            command_scroll_offset,
-        ),
-    ];
+    let merge_worker_items = vec![merge_worker_card_item(
+        merge_row,
+        compact_view || compact_worker_row,
+        merge_command_stream_max_width,
+        command_scroll_offset,
+    )];
     let merge_worker_card = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -2648,7 +2645,7 @@ mod tests {
             active: workers.len(),
             failed: 0,
             unresolved: 0,
-                merge_pending: 0,
+            merge_pending: 0,
             p0: 0,
             p1: workers.len(),
             p2: 0,

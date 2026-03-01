@@ -707,10 +707,17 @@ where
 }
 
 fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerError> {
-    append_run_log("debug", "startup.summarize_active_backlog.started", json!({}));
+    append_run_log(
+        "debug",
+        "startup.summarize_active_backlog.started",
+        json!({}),
+    );
     let mut lines = Vec::new();
     for task in store.list_tasks()?.into_iter() {
-        if matches!(task.status, crate::backlog_store::TaskStatus::Complete | crate::backlog_store::TaskStatus::Failed) {
+        if matches!(
+            task.status,
+            crate::backlog_store::TaskStatus::Complete | crate::backlog_store::TaskStatus::Failed
+        ) {
             continue;
         }
         let details = task.details.replace('\n', " ").trim().to_string();
@@ -1006,8 +1013,8 @@ fn report_stamp_is_stale(
 mod tests {
     use super::{
         backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
-        extract_message_preview, fallback_seed_tasks, quality_stamp_path,
-        report_stamp_is_stale, seed_generation, should_seed_backlog, summarize_seed_agent_event,
+        extract_message_preview, fallback_seed_tasks, quality_stamp_path, report_stamp_is_stale,
+        seed_generation, should_seed_backlog, summarize_seed_agent_event,
     };
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;

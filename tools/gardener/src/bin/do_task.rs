@@ -35,11 +35,7 @@ fn main() -> Result<(), GardenerError> {
         on_agent_event: Some(&|event| print_agent_event("do-task", event)),
     })?;
 
-    step("do-task", "DONE", &format!(
-        "commit_message={} files_changed={}",
-        outcome.commit_message,
-        outcome.files_changed.len()
-    ));
+    step("do-task", "DONE", &format!("summary={}", outcome.summary));
     Ok(())
 }
 

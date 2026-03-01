@@ -14,7 +14,7 @@ fn main() -> Result<(), GardenerError> {
             std::process::exit(1);
         });
 
-    let rt = PhaseRuntime::init("merge-pr")?;
+    let mut rt = PhaseRuntime::init("merge-pr")?;
 
     let (worktree_path, branch, pr_number) =
         resolve_worktree_from_pr(&rt.runner, &rt.scope, pr, "merge-pr")?;
@@ -24,14 +24,14 @@ fn main() -> Result<(), GardenerError> {
     let gh = GhClient::new(&rt.runner, &worktree_path);
     let git = GitClient::new(&rt.runner, &worktree_path);
 
-    let outcome = run_merge_loop(&MergeLoopContext {
+    let outcome = run_merge_loop(&mut MergeLoopContext {
         cfg: &rt.cfg,
         process_runner: &rt.runner,
         scope: &rt.scope,
         worktree_path: &worktree_path,
         factory: &rt.factory,
         registry: &rt.registry,
-        learning_loop: &rt.learning_loop,
+        learning_loop: &mut rt.learning_loop,
         identity: &rt.identity,
         task_summary: &format!("Merge PR #{pr_number}"),
         attempt_count: 1,

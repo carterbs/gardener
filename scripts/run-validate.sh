@@ -16,9 +16,6 @@ for linter in "${CUSTOM_LINTERS[@]}"; do
   "$linter"
 done
 
-echo "Running project validation command: cargo test -p gardener --all-targets"
-cargo test -p gardener --all-targets
-
 if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
   echo "Installing coverage tool: cargo-llvm-cov --locked"
   cargo install cargo-llvm-cov --locked

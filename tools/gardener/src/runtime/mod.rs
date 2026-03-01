@@ -1166,15 +1166,9 @@ mod tests {
     #[test]
     fn backlog_path_detector_matches_primary_and_sidecar_files() {
         assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite")));
-        assert!(is_backlog_related_path(Path::new(
-            "/tmp/backlog.sqlite-wal"
-        )));
-        assert!(is_backlog_related_path(Path::new(
-            "/tmp/backlog.sqlite-shm"
-        )));
-        assert!(is_backlog_related_path(Path::new(
-            "/tmp/backlog.sqlite.bak"
-        )));
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite-wal")));
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite-shm")));
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite.bak")));
         assert!(!is_backlog_related_path(Path::new("/tmp/not-backlog.txt")));
     }
 

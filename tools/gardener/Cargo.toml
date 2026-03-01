@@ -14,6 +14,30 @@ path = "src/lib.rs"
 name = "gardener"
 path = "src/main.rs"
 
+[[bin]]
+name = "understand"
+path = "src/bin/understand.rs"
+
+[[bin]]
+name = "plan"
+path = "src/bin/plan.rs"
+
+[[bin]]
+name = "do-task"
+path = "src/bin/do_task.rs"
+
+[[bin]]
+name = "git-push"
+path = "src/bin/git_push.rs"
+
+[[bin]]
+name = "review-pr"
+path = "src/bin/review_pr.rs"
+
+[[bin]]
+name = "merge-pr"
+path = "src/bin/merge_pr.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

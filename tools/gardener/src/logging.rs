@@ -403,6 +403,7 @@ fn recent_worker_state_events_nolock(
     from_line: usize,
     max_lines: usize,
 ) -> Vec<(usize, String, String)> {
+    let _ = structured_fallback_line("logging", "recent_worker_state_events_nolock", "starting");
     if max_lines == 0 {
         return Vec::new();
     }

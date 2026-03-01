@@ -283,10 +283,14 @@ fn codex_empty_stdout_exit_zero_is_error() {
         stderr: String::new(),
     }));
     let adapter = CodexAdapter;
-    let err = adapter
+    let result = adapter
         .execute(&runner, &codex_context(), "do a task", None)
-        .expect_err("terminal event required");
-    assert!(format!("{err}").contains("missing turn.completed or turn.failed"));
+        .expect("empty stdout synthesizes terminal failure");
+    assert_eq!(result.terminal, AgentTerminal::Failure);
+    assert!(result.payload["reason"]
+        .as_str()
+        .unwrap_or("")
+        .contains("missing turn.completed or turn.failed"));
 }
 
 #[test]

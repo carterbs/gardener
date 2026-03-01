@@ -880,7 +880,7 @@ fn execute_task_live(
     fsm.transition(WorkerState::Complete)?;
 
     let teardown =
-        teardown_after_completion(&worktree_client, &worktree_path, &merge_output, &repo_root_git);
+        teardown_after_completion(&worktree_client, &worktree_path, &merge_output, &repo_root_git, &identity.worker_id);
     append_run_log(
         "info",
         "worker.task.complete",
@@ -1670,6 +1670,7 @@ fn teardown_after_completion(
     worktree_path: &Path,
     output: &MergingOutput,
     repo_git: &GitClient<'_>,
+    worker_id: &str,
 ) -> TeardownReport {
     let worktree_cleaned = if output.merged {
         worktree_client.cleanup_on_completion(worktree_path).is_ok()
@@ -1681,7 +1682,7 @@ fn teardown_after_completion(
             append_run_log(
                 "warn",
                 "worker.teardown.pull_main_failed",
-                json!({ "error": err.to_string() }),
+                json!({ "worker_id": worker_id, "error": err.to_string() }),
             );
             false
         } else {

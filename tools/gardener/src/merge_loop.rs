@@ -132,11 +132,18 @@ pub fn run_merge_loop(ctx: &mut MergeLoopContext<'_>) -> Result<MergeLoopOutcome
             (_, MergeStateStatus::Behind) => {
                 step(ctx, "REMEDIATE", "branch is behind main, merging main");
                 if let Err(e) = merge_main_and_push(ctx, branch, attempt) {
-                    step(ctx, "REMEDIATE", &format!("merge-from-main failed: {e}"));
-                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                        return Ok(MergeLoopOutcome::Failed {
-                            reason: format!("failed to merge main into branch: {e}"),
-                        });
+                    step(ctx, "REMEDIATE", &format!("git merge failed ({e}), falling back to agent remediation"));
+                    ctx.learning_loop.ingest_failure(
+                        WorkerState::Merging,
+                        "merge from main failed, agent remediation needed",
+                        vec![format!("error={e}")],
+                    );
+                    let remediation_result = run_agent_turn(agent_turn_from_ctx(ctx, None))?;
+                    if remediation_result.terminal == AgentTerminal::Failure {
+                        let reason = remediation_result.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("agent remediation failed").to_string();
+                        if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                            return Ok(MergeLoopOutcome::Failed { reason });
+                        }
                     }
                 }
                 continue;
@@ -145,11 +152,19 @@ pub fn run_merge_loop(ctx: &mut MergeLoopContext<'_>) -> Result<MergeLoopOutcome
             (Mergeable::Conflicting, _) | (_, MergeStateStatus::Dirty) => {
                 step(ctx, "REMEDIATE", "conflicts detected, merging main into branch");
                 if let Err(e) = merge_main_and_push(ctx, branch, attempt) {
-                    step(ctx, "REMEDIATE", &format!("conflict resolution failed: {e}"));
-                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                        return Ok(MergeLoopOutcome::Failed {
-                            reason: format!("conflict resolution failed: {e}"),
-                        });
+                    step(ctx, "REMEDIATE", &format!("git merge failed ({e}), falling back to agent remediation"));
+                    // Git-level merge failed — let the agent fix it
+                    ctx.learning_loop.ingest_failure(
+                        WorkerState::Merging,
+                        "merge from main failed, agent remediation needed",
+                        vec![format!("error={e}")],
+                    );
+                    let remediation_result = run_agent_turn(agent_turn_from_ctx(ctx, None))?;
+                    if remediation_result.terminal == AgentTerminal::Failure {
+                        let reason = remediation_result.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("agent remediation failed").to_string();
+                        if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                            return Ok(MergeLoopOutcome::Failed { reason });
+                        }
                     }
                 }
                 continue;

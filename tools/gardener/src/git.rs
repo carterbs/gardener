@@ -324,18 +324,21 @@ impl<'a> GitClient<'a> {
             );
             return Ok(RebaseResult::Clean);
         }
-        let stderr = merge.stderr.clone();
-        if is_merge_conflict(&stderr) {
+        let combined = format!("{}\n{}", merge.stdout, merge.stderr);
+        if is_merge_conflict(&combined) {
             append_run_log(
                 "warn",
                 "git.merge_from_main.conflict",
                 json!({
                     "cwd": self.cwd.display().to_string(),
-                    "stderr": stderr
+                    "stdout": merge.stdout,
+                    "stderr": merge.stderr
                 }),
             );
             // Leave merge in progress — agent resolves markers, commit_all completes it
-            return Ok(RebaseResult::Conflict { stderr });
+            return Ok(RebaseResult::Conflict {
+                stderr: combined.trim().to_string(),
+            });
         }
         // Unknown error — abort the merge and return Err
         append_run_log(
@@ -344,12 +347,14 @@ impl<'a> GitClient<'a> {
             json!({
                 "cwd": self.cwd.display().to_string(),
                 "exit_code": merge.exit_code,
-                "stderr": stderr
+                "stdout": merge.stdout,
+                "stderr": merge.stderr
             }),
         );
         let _ = self.run(["git", "merge", "--abort"]);
         Err(GardenerError::Process(format!(
-            "git merge origin/main failed: {stderr}"
+            "git merge origin/main failed: {}",
+            combined.trim()
         )))
     }
 

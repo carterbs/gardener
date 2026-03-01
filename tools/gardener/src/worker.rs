@@ -729,15 +729,36 @@ pub fn execute_merge_phase(
                     scope, req, &factory, &registry, &identity, pr, branch, worker_id,
                     task_id, attempt,
                 ) {
-                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                    // Git-level merge failed — let the agent fix it
+                    emit_worker_activity_state_with(
+                        worker_id, task_id, WorkerActivityState::MergeRemediation,
+                        json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    );
+                    learning_loop.ingest_failure(
+                        WorkerState::Merging,
+                        "merge from main failed, agent remediation needed",
+                        vec![format!("error={e}")],
+                    );
+                    let remediation_result = run_agent_turn(AgentTurnInput {
+                        cfg, process_runner, scope,
+                        worktree_path: &req.worktree_path,
+                        factory: &factory, registry: &registry,
+                        learning_loop: &learning_loop, identity: &identity,
+                        state: WorkerState::Merging,
+                        task_summary: &req.task_summary,
+                        attempt_count: req.attempt_count,
+                        prompt_override: None, on_event: None,
+                    })?;
+                    logs.push(log_event_from(&remediation_result, WorkerState::Merging));
+                    if remediation_result.terminal == AgentTerminal::Failure
+                        && attempt + 1 >= MAX_MERGE_REMEDIATION
+                    {
                         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                        let failure_reason = extract_failure_reason(&remediation_result.payload);
                         return Ok(WorkerRunSummary {
                             worker_id: req.worker_id.clone(),
                             session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed,
-                            logs,
-                            teardown: None,
-                            failure_reason: Some(format!("failed to merge main into branch: {e}")),
+                            final_state: WorkerState::Failed, logs, teardown: None, failure_reason,
                         });
                     }
                 }
@@ -756,15 +777,36 @@ pub fn execute_merge_phase(
                     scope, req, &factory, &registry, &identity, pr, branch, worker_id,
                     task_id, attempt,
                 ) {
-                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                    // Git-level merge failed — let the agent fix it
+                    emit_worker_activity_state_with(
+                        worker_id, task_id, WorkerActivityState::MergeRemediation,
+                        json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    );
+                    learning_loop.ingest_failure(
+                        WorkerState::Merging,
+                        "conflict resolution failed, agent remediation needed",
+                        vec![format!("error={e}")],
+                    );
+                    let remediation_result = run_agent_turn(AgentTurnInput {
+                        cfg, process_runner, scope,
+                        worktree_path: &req.worktree_path,
+                        factory: &factory, registry: &registry,
+                        learning_loop: &learning_loop, identity: &identity,
+                        state: WorkerState::Merging,
+                        task_summary: &req.task_summary,
+                        attempt_count: req.attempt_count,
+                        prompt_override: None, on_event: None,
+                    })?;
+                    logs.push(log_event_from(&remediation_result, WorkerState::Merging));
+                    if remediation_result.terminal == AgentTerminal::Failure
+                        && attempt + 1 >= MAX_MERGE_REMEDIATION
+                    {
                         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                        let failure_reason = extract_failure_reason(&remediation_result.payload);
                         return Ok(WorkerRunSummary {
                             worker_id: req.worker_id.clone(),
                             session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed,
-                            logs,
-                            teardown: None,
-                            failure_reason: Some(format!("conflict resolution failed: {e}")),
+                            final_state: WorkerState::Failed, logs, teardown: None, failure_reason,
                         });
                     }
                 }

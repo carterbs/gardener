@@ -37,49 +37,104 @@ pub struct UnderstandOutcome {
 }
 
 pub fn run_understand(ctx: &UnderstandContext<'_>) -> Result<UnderstandOutcome, GardenerError> {
-    append_run_log("info", "understand_phase.started", json!({ "worker_id": ctx.identity.worker_id, "task_summary": ctx.task_summary }));
-    if let Some(on_step) = ctx.on_step { on_step("UNDERSTAND", "starting understand phase"); }
+    append_run_log(
+        "info",
+        "understand_phase.started",
+        json!({ "worker_id": ctx.identity.worker_id, "task_summary": ctx.task_summary }),
+    );
+    if let Some(on_step) = ctx.on_step {
+        on_step("UNDERSTAND", "starting understand phase");
+    }
 
     let result = run_agent_turn(AgentTurnInput {
-        cfg: ctx.cfg, process_runner: ctx.process_runner, scope: ctx.scope,
-        worktree_path: ctx.worktree_path, factory: ctx.factory, registry: ctx.registry,
-        learning_loop: ctx.learning_loop, identity: ctx.identity,
-        state: WorkerState::Understand, task_summary: ctx.task_summary,
-        attempt_count: ctx.attempt_count, prompt_override: None, on_event: ctx.on_agent_event,
+        cfg: ctx.cfg,
+        process_runner: ctx.process_runner,
+        scope: ctx.scope,
+        worktree_path: ctx.worktree_path,
+        factory: ctx.factory,
+        registry: ctx.registry,
+        learning_loop: ctx.learning_loop,
+        identity: ctx.identity,
+        state: WorkerState::Understand,
+        task_summary: ctx.task_summary,
+        attempt_count: ctx.attempt_count,
+        prompt_override: None,
+        on_event: ctx.on_agent_event,
     })?;
 
     if result.terminal == AgentTerminal::Failure {
-        let reason = result.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("understand phase failed").to_string();
-        return Err(GardenerError::Process(format!("understand phase agent failure: {reason}")));
+        let reason = result
+            .payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("understand phase failed")
+            .to_string();
+        return Err(GardenerError::Process(format!(
+            "understand phase agent failure: {reason}"
+        )));
     }
 
-    let understand = parse_understand_output(&result.payload, &ctx.identity.worker_id, ctx.task_summary);
+    let understand =
+        parse_understand_output(&result.payload, &ctx.identity.worker_id, ctx.task_summary);
     if let Some(on_step) = ctx.on_step {
-        on_step("UNDERSTAND", &format!("classified as {:?}: {}", understand.task_type, understand.reasoning));
+        on_step(
+            "UNDERSTAND",
+            &format!(
+                "classified as {:?}: {}",
+                understand.task_type, understand.reasoning
+            ),
+        );
     }
 
     Ok(UnderstandOutcome {
-        category: understand.task_type, reasoning: understand.reasoning,
-        prompt_version: result.prompt_version, context_manifest_hash: result.context_manifest_hash,
+        category: understand.task_type,
+        reasoning: understand.reasoning,
+        prompt_version: result.prompt_version,
+        context_manifest_hash: result.context_manifest_hash,
     })
 }
 
-pub(crate) fn parse_understand_output(payload: &serde_json::Value, worker_id: &str, task_summary: &str) -> UnderstandOutput {
-    if let Ok(parsed) = serde_json::from_value::<UnderstandOutput>(payload.clone()) { return parsed; }
+pub(crate) fn parse_understand_output(
+    payload: &serde_json::Value,
+    worker_id: &str,
+    task_summary: &str,
+) -> UnderstandOutput {
+    if let Ok(parsed) = serde_json::from_value::<UnderstandOutput>(payload.clone()) {
+        return parsed;
+    }
     let fallback = classify_task(task_summary);
-    append_run_log("warn", "worker.understand.payload_invalid", json!({
-        "worker_id": worker_id, "task_summary": task_summary,
-        "fallback_task_type": format!("{fallback:?}"), "payload": payload,
-    }));
-    UnderstandOutput { task_type: fallback, reasoning: "fallback deterministic keyword classifier (invalid understand payload)".to_string() }
+    append_run_log(
+        "warn",
+        "worker.understand.payload_invalid",
+        json!({
+            "worker_id": worker_id, "task_summary": task_summary,
+            "fallback_task_type": format!("{fallback:?}"), "payload": payload,
+        }),
+    );
+    UnderstandOutput {
+        task_type: fallback,
+        reasoning: "fallback deterministic keyword classifier (invalid understand payload)"
+            .to_string(),
+    }
 }
 
 pub fn classify_task(task_summary: &str) -> TaskCategory {
     let lower = task_summary.to_ascii_lowercase();
-    if lower.contains("bug") || lower.contains("fix") { TaskCategory::Bugfix }
-    else if lower.contains("refactor") { TaskCategory::Refactor }
-    else if lower.contains("feature") || lower.contains("build") || lower.contains("implement") || lower.contains("replace") { TaskCategory::Feature }
-    else if lower.contains("infra") { TaskCategory::Infra }
-    else if lower.contains("chore") { TaskCategory::Chore }
-    else { TaskCategory::Task }
+    if lower.contains("bug") || lower.contains("fix") {
+        TaskCategory::Bugfix
+    } else if lower.contains("refactor") {
+        TaskCategory::Refactor
+    } else if lower.contains("feature")
+        || lower.contains("build")
+        || lower.contains("implement")
+        || lower.contains("replace")
+    {
+        TaskCategory::Feature
+    } else if lower.contains("infra") {
+        TaskCategory::Infra
+    } else if lower.contains("chore") {
+        TaskCategory::Chore
+    } else {
+        TaskCategory::Task
+    }
 }

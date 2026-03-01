@@ -1,31 +1,30 @@
 use crate::agent::factory::AdapterFactory;
-use crate::config::{effective_agent_for_state, effective_model_for_state, AppConfig};
+use crate::agent_turn::{run_agent_turn, AgentTurnInput, AgentTurnOutput};
+use crate::config::AppConfig;
+use crate::do_phase::{parse_doing_output, select_commit_message};
 use crate::errors::GardenerError;
 use crate::fsm::{
-    DoingOutput, FsmSnapshot, MergingOutput, ReviewVerdict, ReviewingOutput, UnderstandOutput,
-    MAX_REVIEW_LOOPS,
+    DoingOutput, FsmSnapshot, MergingOutput, ReviewVerdict, ReviewingOutput, MAX_REVIEW_LOOPS,
 };
 use crate::gh::{generate_pr_title_body, GhClient};
 use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
+use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
-use crate::prompt_context::PromptContextItem;
-use crate::prompt_knowledge::to_prompt_lines;
-use crate::prompt_registry::{merge_main_conflict_resolution_template, PromptRegistry, PromptTemplate};
-use crate::prompts::{render_prompt_with_body, render_state_prompt};
+use crate::prompt_registry::{merge_main_conflict_resolution_template, PromptRegistry};
 use crate::protocol::AgentTerminal;
-use crate::replay::recorder::{emit_record, get_recording_worker_id, next_seq, timestamp_ns};
-use crate::replay::recording::{AgentTurnRecord, RecordEntry};
+use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
+use crate::understand_phase::{classify_task, parse_understand_output};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerLogEvent {
@@ -86,9 +85,6 @@ struct ReviewArtifact {
 }
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
-const MAX_MERGE_REMEDIATION: u32 = 3;
-const MERGEABILITY_POLL_MAX: u32 = 10;
-const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
     let raw = payload
@@ -218,7 +214,7 @@ fn execute_task_live(
     }
 
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Understand);
-    let understand_result = run_agent_turn(TurnContext {
+    let understand_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
         scope,
@@ -231,8 +227,9 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: None,
+        on_event: None,
     })?;
-    logs.push(understand_result.log_event);
+    logs.push(log_event_from(&understand_result, WorkerState::Understand));
     if understand_result.terminal == AgentTerminal::Failure {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
         let failure_reason = extract_failure_reason(&understand_result.payload);
@@ -270,7 +267,7 @@ fn execute_task_live(
 
     if fsm.state == WorkerState::Planning {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Planning);
-        let planning_result = run_agent_turn(TurnContext {
+        let planning_result = run_agent_turn(AgentTurnInput {
             cfg,
             process_runner,
             scope,
@@ -283,8 +280,9 @@ fn execute_task_live(
             task_summary,
             attempt_count,
             prompt_override: None,
+            on_event: None,
         })?;
-        logs.push(planning_result.log_event);
+        logs.push(log_event_from(&planning_result, WorkerState::Planning));
         if planning_result.terminal == AgentTerminal::Failure {
             emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
             let failure_reason = extract_failure_reason(&planning_result.payload);
@@ -309,7 +307,7 @@ fn execute_task_live(
     }
 
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing);
-    let doing_result = run_agent_turn(TurnContext {
+    let doing_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
         scope,
@@ -322,8 +320,9 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: None,
+        on_event: None,
     })?;
-    logs.push(doing_result.log_event);
+    logs.push(log_event_from(&doing_result, WorkerState::Doing));
     if doing_result.terminal == AgentTerminal::Failure {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
         let failure_reason = extract_failure_reason(&doing_result.payload);
@@ -454,7 +453,7 @@ fn execute_task_live(
                     task_id,
                     WorkerActivityState::GittingRemediation,
                 );
-                let remediation_result = run_agent_turn(TurnContext {
+                let remediation_result = run_agent_turn(AgentTurnInput {
                     cfg,
                     process_runner,
                     scope,
@@ -467,8 +466,9 @@ fn execute_task_live(
                     task_summary,
                     attempt_count,
                     prompt_override: None,
+                    on_event: None,
                 })?;
-                logs.push(remediation_result.log_event);
+                logs.push(log_event_from(&remediation_result, WorkerState::Gitting));
                 if remediation_result.terminal == AgentTerminal::Failure {
                     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
                     let failure_reason = extract_failure_reason(&remediation_result.payload);
@@ -505,7 +505,7 @@ fn execute_task_live(
     // --- Reviewing ---
     fsm.transition(WorkerState::Reviewing)?;
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Reviewing);
-    let reviewing_result = run_agent_turn(TurnContext {
+    let reviewing_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
         scope,
@@ -518,8 +518,9 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: None,
+        on_event: None,
     })?;
-    logs.push(reviewing_result.log_event);
+    logs.push(log_event_from(&reviewing_result, WorkerState::Reviewing));
     if reviewing_result.terminal == AgentTerminal::Failure {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
         let failure_reason = extract_failure_reason(&reviewing_result.payload);
@@ -750,7 +751,7 @@ pub fn execute_merge_phase(
                             vec![format!("stderr={stderr}")],
                         );
                         let conflict_tpl = merge_main_conflict_resolution_template();
-                        let conflict_result = run_agent_turn(TurnContext {
+                        let conflict_result = run_agent_turn(AgentTurnInput {
                             cfg,
                             process_runner,
                             scope,
@@ -763,8 +764,9 @@ pub fn execute_merge_phase(
                             task_summary: &req.task_summary,
                             attempt_count: req.attempt_count,
                             prompt_override: Some(&conflict_tpl),
+                            on_event: None,
                         })?;
-                        logs.push(conflict_result.log_event);
+                        logs.push(log_event_from(&conflict_result, WorkerState::Merging));
                         if conflict_result.terminal != AgentTerminal::Failure {
                             git.commit_all("fix: merge main into branch")?;
                             git.push_with_rebase_recovery(branch)?;
@@ -818,7 +820,8 @@ pub fn execute_merge_phase(
                     ],
                 );
 
-                let remediation_result = run_agent_turn(TurnContext {
+                // Agent remediation turn — agent fixes code
+                let remediation_result = run_agent_turn(AgentTurnInput {
                     cfg,
                     process_runner,
                     scope,
@@ -831,8 +834,9 @@ pub fn execute_merge_phase(
                     task_summary: &req.task_summary,
                     attempt_count: req.attempt_count,
                     prompt_override: None,
+                    on_event: None,
                 })?;
-                logs.push(remediation_result.log_event);
+                logs.push(log_event_from(&remediation_result, WorkerState::Merging));
                 if remediation_result.terminal == AgentTerminal::Failure {
                     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
                     let failure_reason = extract_failure_reason(&remediation_result.payload);
@@ -997,7 +1001,7 @@ fn execute_task_simulated(
     let mut learning_loop = LearningLoop::default();
     let mut logs = Vec::new();
 
-    let understand = UnderstandOutput {
+    let understand = crate::fsm::UnderstandOutput {
         task_type: classify_task(task_summary),
         reasoning: "deterministic keyword classifier".to_string(),
     };
@@ -1007,7 +1011,7 @@ fn execute_task_simulated(
         fsm.transition(WorkerState::Doing)?;
     }
 
-    let prepared = prepare_prompt(
+    let prepared = crate::agent_turn::prepare_prompt(
         cfg,
         &registry,
         &learning_loop,
@@ -1017,7 +1021,11 @@ fn execute_task_simulated(
         1,
         None,
     )?;
-    logs.push(prepared.log_event(fsm.state));
+    logs.push(WorkerLogEvent {
+        state: fsm.state,
+        prompt_version: prepared.prompt_version,
+        context_manifest_hash: prepared.context_manifest_hash,
+    });
 
     let _doing_output: DoingOutput = parse_typed_payload(
         &format!(
@@ -1115,408 +1123,11 @@ fn execute_task_simulated(
     })
 }
 
-struct PreparedPrompt {
-    prompt_version: String,
-    context_manifest_hash: String,
-    rendered: String,
-}
-
-impl PreparedPrompt {
-    fn log_event(&self, state: WorkerState) -> WorkerLogEvent {
-        WorkerLogEvent {
-            state,
-            prompt_version: self.prompt_version.clone(),
-            context_manifest_hash: self.context_manifest_hash.clone(),
-        }
-    }
-}
-
-struct TurnResult {
-    terminal: AgentTerminal,
-    payload: serde_json::Value,
-    log_event: WorkerLogEvent,
-}
-
-struct TurnContext<'a> {
-    cfg: &'a AppConfig,
-    process_runner: &'a dyn ProcessRunner,
-    scope: &'a RuntimeScope,
-    worktree_path: &'a Path,
-    factory: &'a AdapterFactory,
-    registry: &'a PromptRegistry,
-    learning_loop: &'a LearningLoop,
-    identity: &'a WorkerIdentity,
-    state: WorkerState,
-    task_summary: &'a str,
-    attempt_count: i64,
-    prompt_override: Option<&'a PromptTemplate>,
-}
-
-fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError> {
-    let TurnContext {
-        cfg,
-        process_runner,
-        scope,
-        worktree_path,
-        factory,
-        registry,
-        learning_loop,
-        identity,
+fn log_event_from(output: &AgentTurnOutput, state: WorkerState) -> WorkerLogEvent {
+    WorkerLogEvent {
         state,
-        task_summary,
-        attempt_count,
-        prompt_override,
-    } = context;
-    let prepared = prepare_prompt(
-        cfg,
-        registry,
-        learning_loop,
-        state,
-        &identity.worker_id,
-        task_summary,
-        attempt_count,
-        prompt_override,
-    )?;
-    let backend = effective_agent_for_state(cfg, state).ok_or_else(|| {
-        GardenerError::InvalidConfig(format!("no backend configured for {state:?}"))
-    })?;
-    let model = effective_model_for_state(cfg, state);
-    let adapter = factory.get(backend).ok_or_else(|| {
-        GardenerError::InvalidConfig(format!("adapter not registered for {:?}", backend))
-    })?;
-    let output_file = scope.working_dir.join(format!(
-        ".cache/gardener/worker-output-{}-{}.json",
-        identity.worker_id,
-        state.as_str()
-    ));
-    if let Some(parent) = output_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| GardenerError::Io(e.to_string()))?;
-    }
-    let estimated_prompt_tokens = prepared.rendered.split_whitespace().count();
-    append_run_log(
-        "info",
-        "agent.turn.started",
-        json!({
-            "worker_id": identity.worker_id,
-            "session_id": identity.session.session_id,
-            "state": state.as_str(),
-            "backend": backend.as_str(),
-            "model": model,
-            "worktree": worktree_path.display().to_string(),
-            "output_file": output_file.display().to_string(),
-            "initial_prompt_est_tokens": estimated_prompt_tokens
-        }),
-    );
-    crate::logging::append_run_log_untruncated(
-        "info",
-        "agent.turn.prompt",
-        json!({
-            "worker_id": identity.worker_id,
-            "session_id": identity.session.session_id,
-            "state": state.as_str(),
-            "prompt": prepared.rendered
-        }),
-    );
-    let max_turns = Some(max_turns_for_state(cfg, state));
-    let step = adapter.execute(
-        process_runner,
-        &crate::agent::AdapterContext {
-            worker_id: identity.worker_id.clone(),
-            session_id: identity.session.session_id.clone(),
-            sandbox_id: identity.session.sandbox_id.clone(),
-            model,
-            cwd: worktree_path.to_path_buf(),
-            prompt_version: prepared.prompt_version.clone(),
-            context_manifest_hash: prepared.context_manifest_hash.clone(),
-            output_schema: None,
-            output_file: Some(output_file),
-            permissive_mode: cfg.execution.permissions_mode == "permissive_v1",
-            max_turns,
-        },
-        &prepared.rendered,
-        None,
-    )?;
-    append_run_log(
-        if step.terminal == AgentTerminal::Success {
-            "info"
-        } else {
-            "error"
-        },
-        "agent.turn.finished",
-        json!({
-            "worker_id": identity.worker_id,
-            "session_id": identity.session.session_id,
-            "state": state.as_str(),
-            "terminal": match step.terminal {
-                AgentTerminal::Success => "success",
-                AgentTerminal::Failure => "failure"
-            },
-            "diagnostic_count": step.diagnostics.len()
-        }),
-    );
-    emit_record(RecordEntry::AgentTurn(AgentTurnRecord {
-        seq: next_seq(),
-        timestamp_ns: timestamp_ns(),
-        worker_id: get_recording_worker_id(),
-        state: state.as_str().to_string(),
-        terminal: match step.terminal {
-            AgentTerminal::Success => "success".to_string(),
-            AgentTerminal::Failure => "failure".to_string(),
-        },
-        payload: step.payload.clone(),
-        diagnostic_count: step.diagnostics.len(),
-    }));
-    Ok(TurnResult {
-        terminal: step.terminal,
-        payload: step.payload,
-        log_event: prepared.log_event(state),
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_prompt(
-    cfg: &AppConfig,
-    registry: &PromptRegistry,
-    learning_loop: &LearningLoop,
-    state: WorkerState,
-    worker_id: &str,
-    task_summary: &str,
-    attempt_count: i64,
-    prompt_override: Option<&PromptTemplate>,
-) -> Result<PreparedPrompt, GardenerError> {
-    append_run_log(
-        "debug",
-        "worker.prompt.prepare",
-        json!({
-            "worker_id": worker_id,
-            "state": state.as_str(),
-            "knowledge_entries": learning_loop.entries().len(),
-            "prompt_override": prompt_override.is_some()
-        }),
-    );
-    let knowledge = to_prompt_lines(
-        learning_loop.entries(),
-        cfg.learning.deactivate_below_confidence,
-    )
-    .join("\n");
-
-    let items = vec![
-        ctx_item(
-            "task_packet",
-            "task",
-            "task-hash",
-            "task input",
-            100,
-            task_summary,
-        ),
-        ctx_item(
-            "repo_context",
-            "repo",
-            "repo-hash",
-            "repo snapshot",
-            90,
-            "repo context",
-        ),
-        ctx_item(
-            "evidence_context",
-            "evidence",
-            "ev-hash",
-            "evidence-ranked",
-            80,
-            "evidence context",
-        ),
-        ctx_item(
-            "execution_context",
-            "execution",
-            "exec-hash",
-            "state+identity",
-            70,
-            &format!(
-                "state={state:?};backend={:?};attempt_count={attempt_count}",
-                effective_agent_for_state(cfg, state)
-            ),
-        ),
-        ctx_item(
-            "knowledge_context",
-            "knowledge",
-            "know-hash",
-            "learning loop",
-            60,
-            if knowledge.trim().is_empty() {
-                "no prior knowledge"
-            } else {
-                &knowledge
-            },
-        ),
-    ];
-
-    let rendered = if let Some(tpl) = prompt_override {
-        render_prompt_with_body(tpl.body, tpl.version, state, items)?
-    } else {
-        render_state_prompt(registry, state, items)?
-    };
-
-    let _parsed = parse_typed_payload::<serde_json::Value>(
-        &format!(
-            "{}{{\"schema_version\":1,\"state\":\"{}\",\"payload\":{{\"ok\":true}}}}{}",
-            START_MARKER,
-            state.as_str(),
-            END_MARKER
-        ),
-        state,
-    )?;
-
-    let prompt_version = rendered.prompt_version;
-    let context_manifest_hash = rendered.packet.context_manifest.manifest_hash;
-    append_run_log(
-        "debug",
-        "worker.prompt.ready",
-        json!({
-            "worker_id": worker_id,
-            "state": state.as_str(),
-            "prompt_version": prompt_version,
-            "context_manifest_hash": context_manifest_hash
-        }),
-    );
-    Ok(PreparedPrompt {
-        prompt_version,
-        context_manifest_hash,
-        rendered: rendered.rendered,
-    })
-}
-
-fn parse_understand_output(
-    payload: &serde_json::Value,
-    worker_id: &str,
-    task_summary: &str,
-) -> UnderstandOutput {
-    if let Ok(parsed) = serde_json::from_value::<UnderstandOutput>(payload.clone()) {
-        return parsed;
-    }
-    let fallback = classify_task(task_summary);
-    append_run_log(
-        "warn",
-        "worker.understand.payload_invalid",
-        json!({
-            "worker_id": worker_id,
-            "task_summary": task_summary,
-            "fallback_task_type": format!("{fallback:?}"),
-            "payload": payload,
-        }),
-    );
-    UnderstandOutput {
-        task_type: fallback,
-        reasoning: "fallback deterministic keyword classifier (invalid understand payload)"
-            .to_string(),
-    }
-}
-
-fn parse_doing_output(
-    payload: &serde_json::Value,
-    worker_id: &str,
-    task_summary: &str,
-) -> DoingOutput {
-    if let Ok(parsed) = serde_json::from_value::<DoingOutput>(payload.clone()) {
-        return parsed;
-    }
-    append_run_log(
-        "warn",
-        "worker.doing.payload_invalid",
-        json!({
-            "worker_id": worker_id,
-            "task_summary": task_summary,
-            "payload": payload,
-        }),
-    );
-    DoingOutput {
-        summary: task_summary.to_string(),
-        files_changed: vec![],
-        commit_message: fallback_commit_message(task_summary),
-    }
-}
-
-fn select_commit_message(raw_message: &str, worker_id: &str, task_summary: &str) -> String {
-    let trimmed = raw_message.trim();
-    if is_valid_commit_message(trimmed) {
-        return trimmed.to_string();
-    }
-    let fallback = fallback_commit_message(task_summary);
-    append_run_log(
-        "warn",
-        "worker.doing.commit_message_invalid",
-        json!({
-            "worker_id": worker_id,
-            "provided": raw_message,
-            "fallback": fallback,
-        }),
-    );
-    fallback
-}
-
-fn is_valid_commit_message(message: &str) -> bool {
-    if message.is_empty() {
-        return false;
-    }
-    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lowered = normalized.to_ascii_lowercase();
-    if matches!(
-        lowered.as_str(),
-        "feat: implement task changes"
-            | "implement task changes"
-            | "wip"
-            | "update code"
-            | "misc changes"
-            | "fix stuff"
-    ) {
-        return false;
-    }
-    match normalized.split_once(':') {
-        Some((kind, desc)) => {
-            let kind = kind.trim();
-            let desc = desc.trim();
-            !kind.is_empty() && !desc.is_empty()
-        }
-        None => false,
-    }
-}
-
-fn fallback_commit_message(task_summary: &str) -> String {
-    let first_line = task_summary.lines().next().unwrap_or_default().trim();
-    if first_line.is_empty() {
-        return "feat: implement requested changes".to_string();
-    }
-    let normalized = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
-    let max_desc_len = 72usize.saturating_sub("feat: ".len());
-    let desc = normalized.chars().take(max_desc_len).collect::<String>();
-    if desc.is_empty() {
-        "feat: implement requested changes".to_string()
-    } else {
-        format!("feat: {desc}")
-    }
-}
-
-fn parse_reviewing_output(payload: &serde_json::Value) -> ReviewingOutput {
-    let verdict = payload
-        .get("verdict")
-        .and_then(serde_json::Value::as_str)
-        .map(|v| match v.to_ascii_lowercase().as_str() {
-            "needs_changes" => ReviewVerdict::NeedsChanges,
-            _ => ReviewVerdict::Approve,
-        })
-        .unwrap_or(ReviewVerdict::Approve);
-    let suggestions = payload
-        .get("suggestions")
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    ReviewingOutput {
-        verdict,
-        suggestions,
+        prompt_version: output.prompt_version.clone(),
+        context_manifest_hash: output.context_manifest_hash.clone(),
     }
 }
 
@@ -1696,71 +1307,20 @@ fn worktree_slug_suffix(task_id: &str) -> String {
 
 const WORKTREE_TASK_SLUG_PREFIX_CHARS: usize = 14;
 
-fn ctx_item(
-    section: &str,
-    source_id: &str,
-    source_hash: &str,
-    rationale: &str,
-    rank: u32,
-    content: &str,
-) -> PromptContextItem {
-    PromptContextItem {
-        section: section.to_string(),
-        source_id: source_id.to_string(),
-        source_hash: source_hash.to_string(),
-        rationale: rationale.to_string(),
-        rank,
-        content: content.to_string(),
-    }
-}
-
-fn max_turns_for_state(cfg: &AppConfig, state: WorkerState) -> u32 {
-    match state {
-        WorkerState::Understand => cfg.prompts.turn_budget.understand,
-        WorkerState::Planning => cfg.prompts.turn_budget.planning,
-        WorkerState::Doing => cfg.prompts.turn_budget.doing,
-        WorkerState::Gitting => cfg.prompts.turn_budget.gitting,
-        WorkerState::Reviewing => cfg.prompts.turn_budget.reviewing,
-        WorkerState::Merging => cfg.prompts.turn_budget.merging,
-        WorkerState::Seeding
-        | WorkerState::Complete
-        | WorkerState::Failed
-        | WorkerState::Parked => cfg.prompts.turn_budget.doing,
-    }
-}
-
-fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
-    let lower = task_summary.to_ascii_lowercase();
-    if lower.contains("bug") || lower.contains("fix") {
-        crate::fsm::TaskCategory::Bugfix
-    } else if lower.contains("refactor") {
-        crate::fsm::TaskCategory::Refactor
-    } else if lower.contains("feature")
-        || lower.contains("build")
-        || lower.contains("implement")
-        || lower.contains("replace")
-    {
-        crate::fsm::TaskCategory::Feature
-    } else if lower.contains("infra") {
-        crate::fsm::TaskCategory::Infra
-    } else if lower.contains("chore") {
-        crate::fsm::TaskCategory::Chore
-    } else {
-        crate::fsm::TaskCategory::Task
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_task, extract_failure_reason, fallback_commit_message, parse_doing_output,
-        parse_reviewing_output, parse_understand_output, review_artifact_path, sanitize_for_branch,
-        select_commit_message, worktree_branch_for, worktree_path_for, worktree_slug_for_task,
+        execute_task, extract_failure_reason, review_artifact_path, sanitize_for_branch,
+        worktree_branch_for, worktree_path_for, worktree_slug_for_task,
         worktree_slug_suffix, WorkerOutcome, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
+    use crate::do_phase::{fallback_commit_message, parse_doing_output, select_commit_message};
+    use crate::review_phase::parse_reviewing_output;
     use crate::runtime::FakeProcessRunner;
     use crate::types::{RuntimeScope, WorkerState};
+    use crate::understand_phase::parse_understand_output;
     use std::path::PathBuf;
 
     #[test]
@@ -1810,13 +1370,13 @@ mod tests {
     #[test]
     fn classify_build_and_implement_as_feature_for_planning() {
         assert_eq!(
-            super::classify_task(
+            crate::understand_phase::classify_task(
                 "GARD-04: Build Triage mode — Live activity and Triage artifacts cards"
             ),
             crate::fsm::TaskCategory::Feature
         );
         assert_eq!(
-            super::classify_task(
+            crate::understand_phase::classify_task(
                 "GARD-02: Implement global frame — header, footer, and mode switching"
             ),
             crate::fsm::TaskCategory::Feature

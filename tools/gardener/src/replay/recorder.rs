@@ -209,8 +209,8 @@ mod tests {
     #[test]
     fn recording_process_runner_delegates_and_records() {
         use tempfile::NamedTempFile;
-        let tmp = NamedTempFile::new().unwrap();
-        init_session_recorder(tmp.path()).unwrap();
+        let tmp = NamedTempFile::new().expect("create temp file for recording");
+        init_session_recorder(tmp.path()).expect("initialize session recorder");
 
         let fake = Arc::new(FakeProcessRunner::default());
         fake.push_response(Ok(ProcessOutput {
@@ -225,14 +225,15 @@ mod tests {
                 args: vec!["hello".to_string()],
                 cwd: None,
             })
-            .unwrap();
-        let out = runner.wait(handle).unwrap();
+            .expect("spawn process");
+        let out = runner.wait(handle).expect("wait process output");
         assert_eq!(out.stdout, "hello");
         assert_eq!(fake.spawned().len(), 1);
 
         clear_session_recorder();
-        let contents = std::fs::read_to_string(tmp.path()).unwrap();
-        let line: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
+        let contents = std::fs::read_to_string(tmp.path()).expect("read recorder output");
+        let line: serde_json::Value = serde_json::from_str(contents.trim())
+            .expect("parse recorder output json");
         assert_eq!(line["type"], "process_call");
         assert_eq!(line["request"]["program"], "echo");
     }

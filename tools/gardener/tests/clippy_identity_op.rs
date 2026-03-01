@@ -141,6 +141,52 @@ fn workspace_clippy_lint_configuration_enables_manual_map_warn() {
 }
 
 #[test]
+fn workspace_clippy_lint_configuration_enables_manual_try_fold_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("manual_try_fold"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.manual_try_fold is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
+fn workspace_clippy_lint_configuration_enables_manual_unwrap_or_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("manual_unwrap_or"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.manual_unwrap_or is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
 fn workspace_clippy_lint_configuration_enables_manual_range_contains_warn() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();

@@ -1166,6 +1166,7 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
         (1_i64, include_str!("../migrations/0001_backlog.sql")),
         (2_i64, include_str!("../migrations/0002_backlog.sql")),
         (3_i64, include_str!("../migrations/0003_backlog.sql")),
+        (4_i64, include_str!("../migrations/0004_merge_pending.sql")),
     ];
 
     conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); COMMIT;")

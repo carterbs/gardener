@@ -150,7 +150,20 @@ pub fn append_run_log(level: &str, event_type: &str, payload: Value) {
     append_run_log_nolock(level, event_type, payload);
 }
 
+/// Like `append_run_log` but skips the 4 KB payload truncation.
+/// Use for large payloads that must be logged in full (e.g. rendered prompts).
+pub fn append_run_log_untruncated(level: &str, event_type: &str, payload: Value) {
+    let _guard = run_log_activity_lock()
+        .lock()
+        .expect("run log activity lock");
+    append_run_log_inner(level, event_type, payload, false);
+}
+
 fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
+    append_run_log_inner(level, event_type, payload, true);
+}
+
+fn append_run_log_inner(level: &str, event_type: &str, payload: Value, truncate: bool) {
     let logger = {
         let logger_slot = run_logger_slot().lock().expect("run logger lock");
         logger_slot.clone()
@@ -166,9 +179,13 @@ fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
 
     let ts_ns = now_unix_nanos();
     let (severity_text, severity_number) = to_otel_severity(level);
-    let truncated_payload = truncate_json(payload, logger.max_payload_bytes);
+    let final_payload = if truncate {
+        truncate_json(payload, logger.max_payload_bytes)
+    } else {
+        payload
+    };
     let payload_string =
-        serde_json::to_string(&truncated_payload).unwrap_or_else(|_| "\"<encode-error>\"".into());
+        serde_json::to_string(&final_payload).unwrap_or_else(|_| "\"<encode-error>\"".into());
 
     let line = json!({
         "resource": {
@@ -202,7 +219,7 @@ fn append_run_log_nolock(level: &str, event_type: &str, payload: Value) {
             "flags": 1
         },
         "event_type": event_type,
-        "payload": truncated_payload
+        "payload": final_payload
     });
 
     let _ = logger.append_json(&line);

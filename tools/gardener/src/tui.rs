@@ -638,12 +638,14 @@ fn merge_worker_card_item(
     command_stream_max_width: usize,
     command_scroll_offset: usize,
 ) -> ListItem<'static> {
-    let (state, task, command_details) = row
+    let (state, task, tool_line, command_details) = row
         .map(|row| {
             (
                 row.state.clone(),
                 row.task_title.clone(),
-                row.command_details
+                row.tool_line.clone(),
+                row
+                    .command_details
                     .iter()
                     .map(|(timestamp, command)| CommandEntry {
                         timestamp: timestamp.clone(),
@@ -652,7 +654,12 @@ fn merge_worker_card_item(
                     .collect::<Vec<_>>(),
             )
         })
-        .unwrap_or(("idle".to_string(), "idle".to_string(), Vec::new()));
+        .unwrap_or((
+            "idle".to_string(),
+            "idle".to_string(),
+            "idle".to_string(),
+            Vec::new(),
+        ));
     let flow_line = worker_flow_chain_spans(&state);
     let mut flow_spans = Vec::new();
     flow_spans.push(Span::raw("    "));
@@ -676,6 +683,10 @@ fn merge_worker_card_item(
                 Span::raw(": "),
                 Span::raw(task),
             ]),
+            Line::from(vec![
+                Span::styled("Action: ", Style::default().fg(Color::Blue)),
+                Span::raw(tool_line),
+            ]),
             Line::from(flow_spans),
         ]
     } else {
@@ -684,6 +695,10 @@ fn merge_worker_card_item(
                 Span::styled("Merge Worker", worker_style),
                 Span::raw(": "),
                 Span::raw(task),
+            ]),
+            Line::from(vec![
+                Span::styled("Action: ", Style::default().fg(Color::Blue)),
+                Span::raw(tool_line),
             ]),
             Line::from(flow_spans),
             Line::from(vec![
@@ -2307,7 +2322,7 @@ mod tests {
         assert!(frame.contains("Workers"));
         assert!(!frame.contains("Problems"));
         assert!(frame.contains("Flow:"));
-        assert!(!frame.contains("Action:"));
+        assert!(frame.contains("Action:"));
         assert!(frame.contains("P0"));
         assert!(frame.contains("P2"));
         assert!(!frame.contains("status="));

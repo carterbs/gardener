@@ -138,7 +138,7 @@ pub fn run_worker_pool_fsm(
                                       pr_number: u64,
                                       task_summary: &str| {
         workers[merge_row_idx].state = "merging".to_string();
-        workers[merge_row_idx].task_title = format!("PR #{pr_number}: {task_summary}");
+        workers[merge_row_idx].task_title = format!("PR #{pr_number} {task_title}", task_title = task_summary);
         let merge_msg = format!("merging PR #{pr_number}");
         workers[merge_row_idx].tool_line = merge_msg.clone();
         append_worker_command(&mut workers[merge_row_idx], &merge_msg);

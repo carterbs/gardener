@@ -211,8 +211,6 @@ pub fn run_worker_pool_fsm(
                     let _ = tx.send((idx, task_id, result));
                 });
             }
-            drop(tx);
-
             while active > 0 {
                 if handle_hotkeys(&mut HotkeyState {
                     runtime,
@@ -375,6 +373,89 @@ pub fn run_worker_pool_fsm(
                             }
                         } else {
                             request_interrupt();
+                        }
+
+                        if shutdown_error.is_none()
+                            && !quit_requested
+                            && completed.saturating_add(active) < target
+                        {
+                            let worker_id = workers[idx].worker_id.clone();
+                            let claimed_task = store.claim_next(
+                                &worker_id,
+                                cfg.scheduler.lease_timeout_seconds as i64,
+                            )?;
+                            if let Some(task) = claimed_task {
+                                append_run_log(
+                                    "info",
+                                    "worker.task.claimed",
+                                    json!({
+                                        "worker_id": worker_id,
+                                        "task_id": task.task_id,
+                                        "title": task.title
+                                    }),
+                                );
+                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                                    seq: next_seq(),
+                                    timestamp_ns: timestamp_ns(),
+                                    worker_id: worker_id.clone(),
+                                    operation: "claim_next".to_string(),
+                                    task_id: task.task_id.clone(),
+                                    result_ok: true,
+                                }));
+                                let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
+                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                                    seq: next_seq(),
+                                    timestamp_ns: timestamp_ns(),
+                                    worker_id: worker_id.clone(),
+                                    operation: "mark_in_progress".to_string(),
+                                    task_id: task.task_id.clone(),
+                                    result_ok: true,
+                                }));
+
+                                workers[idx].state = "doing".to_string();
+                                workers[idx].task_title = task.title.clone();
+                                workers[idx].tool_line = "claimed".to_string();
+                                workers[idx].breadcrumb = "claim>doing".to_string();
+                                workers[idx].lease_held = true;
+                                append_worker_command(&mut workers[idx], "claimed");
+                                let now = Instant::now();
+                                last_activity_pulse[idx] = now;
+                                workers[idx].last_heartbeat_secs = 0;
+                                workers[idx].session_age_secs = 0;
+                                refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
+                                render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+
+                                let tx = tx.clone();
+                                let task_id = task.task_id.clone();
+                                let task_summary =
+                                    task_override.unwrap_or(task.title.as_str()).to_string();
+                                let attempt_count = task.attempt_count;
+                                let cfg = cfg.clone();
+                                let process_runner = runtime.process_runner.clone();
+                                let worker_scope = runtime_scope.clone();
+                                scope_guard.spawn(move || {
+                                    set_recording_worker_id(&worker_id);
+                                    let result = execute_task(
+                                        &cfg,
+                                        process_runner.as_ref(),
+                                        &worker_scope,
+                                        &worker_id,
+                                        &task_id,
+                                        &task_summary,
+                                        attempt_count,
+                                    );
+                                    let _ = tx.send((idx, task_id, result));
+                                });
+                                active = active.saturating_add(1);
+                            } else {
+                                workers[idx].state = "idle".to_string();
+                                workers[idx].task_title = "idle".to_string();
+                                workers[idx].lease_held = false;
+                                if workers[idx].tool_line != "waiting for claim" {
+                                    append_worker_command(&mut workers[idx], "waiting for claim");
+                                }
+                                workers[idx].tool_line = "waiting for claim".to_string();
+                            }
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;

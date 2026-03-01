@@ -25,6 +25,7 @@ fn zero_stats() -> QueueStats {
         active: 0,
         failed: 0,
         unresolved: 0,
+        merge_pending: 0,
         p0: 0,
         p1: 0,
         p2: 0,

@@ -16,10 +16,19 @@ pub fn render_state_prompt(
     items: Vec<PromptContextItem>,
 ) -> Result<PromptRenderResult, GardenerError> {
     let template = registry.template_for(state)?;
+    render_prompt_with_body(template.body, template.version, state, items)
+}
+
+pub fn render_prompt_with_body(
+    body: &str,
+    version: &str,
+    state: WorkerState,
+    items: Vec<PromptContextItem>,
+) -> Result<PromptRenderResult, GardenerError> {
     let packet = build_prompt_packet(state, items)?;
     let rendered = format!(
         "{}\n\n[task_packet]\n{}\n\n[repo_context]\n{}\n\n[evidence_context]\n{}\n\n[execution_context]\n{}\n\n[knowledge_context]\n{}\n\n[context_manifest_hash]\n{}\n",
-        template.body,
+        body,
         packet.task_packet,
         packet.repo_context,
         packet.evidence_context,
@@ -29,7 +38,7 @@ pub fn render_state_prompt(
     );
 
     Ok(PromptRenderResult {
-        prompt_version: template.version.to_string(),
+        prompt_version: version.to_string(),
         packet,
         rendered,
     })

@@ -282,6 +282,32 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
+pub fn merge_main_conflict_resolution_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-merge-main-conflict",
+        body: r#"Intent: resolve merge conflicts after merging origin/main into this branch.
+
+## Context
+The pipeline ran `git merge origin/main` and there are conflicts in one or more files.
+Failure details are in [knowledge_context].
+
+## Steps
+1. Find all files with conflict markers (<<<<<<< / ======= / >>>>>>>).
+2. Resolve each conflict by choosing the correct code or combining both sides.
+3. Remove all conflict markers — no file should contain <<<<<<< when you are done.
+4. Run the project's validation command to confirm everything passes.
+
+## Rules
+- Do NOT run git push, git commit, git merge, gh pr merge, or any git/gh commands that move code.
+- Just fix the source files. Your changes will be committed and pushed automatically.
+- Keep changes minimal — only resolve conflicts, do not refactor.
+
+Guardrails: no git/gh commands; only fix source files and validate.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
 #[allow(dead_code)] // wired up when post-merge validation creates a fix PR
 fn post_merge_fix_template() -> PromptTemplate {
     PromptTemplate {

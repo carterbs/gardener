@@ -6,14 +6,14 @@ use crate::fsm::{
     MAX_REVIEW_LOOPS,
 };
 use crate::gh::{generate_pr_title_body, GhClient};
-use crate::git::GitClient;
+use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
 use crate::prompt_context::PromptContextItem;
 use crate::prompt_knowledge::to_prompt_lines;
-use crate::prompt_registry::PromptRegistry;
-use crate::prompts::render_state_prompt;
+use crate::prompt_registry::{merge_main_conflict_resolution_template, PromptRegistry, PromptTemplate};
+use crate::prompts::{render_prompt_with_body, render_state_prompt};
 use crate::protocol::AgentTerminal;
 use crate::replay::recorder::{emit_record, get_recording_worker_id, next_seq, timestamp_ns};
 use crate::replay::recording::{AgentTurnRecord, RecordEntry};
@@ -237,6 +237,7 @@ fn execute_task_live(
         state: WorkerState::Understand,
         task_summary,
         attempt_count,
+        prompt_override: None,
     })?;
     logs.push(understand_result.log_event);
     if understand_result.terminal == AgentTerminal::Failure {
@@ -288,6 +289,7 @@ fn execute_task_live(
             state: WorkerState::Planning,
             task_summary,
             attempt_count,
+            prompt_override: None,
         })?;
         logs.push(planning_result.log_event);
         if planning_result.terminal == AgentTerminal::Failure {
@@ -326,6 +328,7 @@ fn execute_task_live(
         state: WorkerState::Doing,
         task_summary,
         attempt_count,
+        prompt_override: None,
     })?;
     logs.push(doing_result.log_event);
     if doing_result.terminal == AgentTerminal::Failure {
@@ -470,6 +473,7 @@ fn execute_task_live(
                     state: WorkerState::Gitting,
                     task_summary,
                     attempt_count,
+                    prompt_override: None,
                 })?;
                 logs.push(remediation_result.log_event);
                 if remediation_result.terminal == AgentTerminal::Failure {
@@ -520,6 +524,7 @@ fn execute_task_live(
         state: WorkerState::Reviewing,
         task_summary,
         attempt_count,
+        prompt_override: None,
     })?;
     logs.push(reviewing_result.log_event);
     if reviewing_result.terminal == AgentTerminal::Failure {
@@ -702,6 +707,86 @@ fn execute_task_live(
                     });
                 }
 
+                // --- Merge main into branch to get up to date ---
+                emit_worker_activity_state_with(
+                    worker_id,
+                    task_id,
+                    WorkerActivityState::MergeFromMain,
+                    json!({
+                        "pr_number": pr,
+                        "attempt": attempt + 1
+                    }),
+                );
+                match git.try_merge_from_main() {
+                    Ok(RebaseResult::Clean) => {
+                        append_run_log(
+                            "info",
+                            "worker.merging.merge_from_main.clean",
+                            json!({
+                                "worker_id": identity.worker_id,
+                                "pr_number": pr,
+                                "attempt": attempt + 1
+                            }),
+                        );
+                        git.push_with_rebase_recovery(&branch)?;
+                        continue;
+                    }
+                    Ok(RebaseResult::Conflict { stderr }) => {
+                        append_run_log(
+                            "warn",
+                            "worker.merging.merge_from_main.conflict",
+                            json!({
+                                "worker_id": identity.worker_id,
+                                "pr_number": pr,
+                                "attempt": attempt + 1,
+                                "stderr": stderr
+                            }),
+                        );
+                        learning_loop.ingest_failure(
+                            WorkerState::Merging,
+                            "merge from main had conflicts",
+                            vec![format!("stderr={stderr}")],
+                        );
+                        let conflict_tpl = merge_main_conflict_resolution_template();
+                        let conflict_result = run_agent_turn(TurnContext {
+                            cfg,
+                            process_runner,
+                            scope,
+                            worktree_path: &worktree_path,
+                            factory: &factory,
+                            registry: &registry,
+                            learning_loop: &learning_loop,
+                            identity: &identity,
+                            state: WorkerState::Merging,
+                            task_summary,
+                            attempt_count,
+                            prompt_override: Some(&conflict_tpl),
+                        })?;
+                        logs.push(conflict_result.log_event);
+                        if conflict_result.terminal != AgentTerminal::Failure {
+                            // Agent resolved — commit completes the merge, push, retry
+                            git.commit_all("fix: merge main into branch")?;
+                            git.push_with_rebase_recovery(&branch)?;
+                            continue;
+                        }
+                        // Agent couldn't resolve — fall through to existing remediation
+                    }
+                    Err(e) => {
+                        append_run_log(
+                            "warn",
+                            "worker.merging.merge_from_main.failed",
+                            json!({
+                                "worker_id": identity.worker_id,
+                                "pr_number": pr,
+                                "attempt": attempt + 1,
+                                "error": e.to_string()
+                            }),
+                        );
+                        // Fall through to existing remediation
+                    }
+                }
+
+                // --- Existing merge remediation (fallback for CI/other issues) ---
                 let status = gh.check_mergeability(pr)?;
                 append_run_log(
                     "warn",
@@ -724,6 +809,15 @@ fn execute_task_live(
                         "attempt": attempt + 1
                     }),
                 );
+                learning_loop.ingest_failure(
+                    WorkerState::Merging,
+                    "merge attempt failed",
+                    vec![
+                        format!("pr_number={pr}"),
+                        format!("attempt={}", attempt + 1),
+                        format!("error={merge_err}"),
+                    ],
+                );
 
                 // Agent remediation turn — agent fixes code
                 let remediation_result = run_agent_turn(TurnContext {
@@ -738,6 +832,7 @@ fn execute_task_live(
                     state: WorkerState::Merging,
                     task_summary,
                     attempt_count,
+                    prompt_override: None,
                 })?;
                 logs.push(remediation_result.log_event);
                 if remediation_result.terminal == AgentTerminal::Failure {
@@ -856,6 +951,7 @@ fn execute_task_simulated(
         &identity.worker_id,
         task_summary,
         1,
+        None,
     )?;
     logs.push(prepared.log_event(fsm.state));
 
@@ -989,6 +1085,7 @@ struct TurnContext<'a> {
     state: WorkerState,
     task_summary: &'a str,
     attempt_count: i64,
+    prompt_override: Option<&'a PromptTemplate>,
 }
 
 fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError> {
@@ -1004,6 +1101,7 @@ fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError>
         state,
         task_summary,
         attempt_count,
+        prompt_override,
     } = context;
     let prepared = prepare_prompt(
         cfg,
@@ -1013,6 +1111,7 @@ fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError>
         &identity.worker_id,
         task_summary,
         attempt_count,
+        prompt_override,
     )?;
     let backend = effective_agent_for_state(cfg, state).ok_or_else(|| {
         GardenerError::InvalidConfig(format!("no backend configured for {state:?}"))
@@ -1110,6 +1209,7 @@ fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError>
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prepare_prompt(
     cfg: &AppConfig,
     registry: &PromptRegistry,
@@ -1118,6 +1218,7 @@ fn prepare_prompt(
     worker_id: &str,
     task_summary: &str,
     attempt_count: i64,
+    prompt_override: Option<&PromptTemplate>,
 ) -> Result<PreparedPrompt, GardenerError> {
     append_run_log(
         "debug",
@@ -1125,7 +1226,8 @@ fn prepare_prompt(
         json!({
             "worker_id": worker_id,
             "state": state.as_str(),
-            "knowledge_entries": learning_loop.entries().len()
+            "knowledge_entries": learning_loop.entries().len(),
+            "prompt_override": prompt_override.is_some()
         }),
     );
     let knowledge = to_prompt_lines(
@@ -1134,59 +1236,61 @@ fn prepare_prompt(
     )
     .join("\n");
 
-    let rendered = render_state_prompt(
-        registry,
-        state,
-        vec![
-            ctx_item(
-                "task_packet",
-                "task",
-                "task-hash",
-                "task input",
-                100,
-                task_summary,
+    let items = vec![
+        ctx_item(
+            "task_packet",
+            "task",
+            "task-hash",
+            "task input",
+            100,
+            task_summary,
+        ),
+        ctx_item(
+            "repo_context",
+            "repo",
+            "repo-hash",
+            "repo snapshot",
+            90,
+            "repo context",
+        ),
+        ctx_item(
+            "evidence_context",
+            "evidence",
+            "ev-hash",
+            "evidence-ranked",
+            80,
+            "evidence context",
+        ),
+        ctx_item(
+            "execution_context",
+            "execution",
+            "exec-hash",
+            "state+identity",
+            70,
+            &format!(
+                "state={state:?};backend={:?};attempt_count={attempt_count}",
+                effective_agent_for_state(cfg, state)
             ),
-            ctx_item(
-                "repo_context",
-                "repo",
-                "repo-hash",
-                "repo snapshot",
-                90,
-                "repo context",
-            ),
-            ctx_item(
-                "evidence_context",
-                "evidence",
-                "ev-hash",
-                "evidence-ranked",
-                80,
-                "evidence context",
-            ),
-            ctx_item(
-                "execution_context",
-                "execution",
-                "exec-hash",
-                "state+identity",
-                70,
-                &format!(
-                    "state={state:?};backend={:?};attempt_count={attempt_count}",
-                    effective_agent_for_state(cfg, state)
-                ),
-            ),
-            ctx_item(
-                "knowledge_context",
-                "knowledge",
-                "know-hash",
-                "learning loop",
-                60,
-                if knowledge.trim().is_empty() {
-                    "no prior knowledge"
-                } else {
-                    &knowledge
-                },
-            ),
-        ],
-    )?;
+        ),
+        ctx_item(
+            "knowledge_context",
+            "knowledge",
+            "know-hash",
+            "learning loop",
+            60,
+            if knowledge.trim().is_empty() {
+                "no prior knowledge"
+            } else {
+                &knowledge
+            },
+        ),
+    ];
+
+    let rendered = if let Some(tpl) = prompt_override {
+        render_prompt_with_body(tpl.body, tpl.version, state, items)?
+    } else {
+        render_state_prompt(registry, state, items)?
+    };
 
     let _parsed = parse_typed_payload::<serde_json::Value>(
         &format!(

@@ -294,6 +294,65 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn try_merge_from_main(&self) -> Result<RebaseResult, GardenerError> {
+        append_run_log(
+            "info",
+            "git.merge_from_main.started",
+            json!({ "cwd": self.cwd.display().to_string() }),
+        );
+        let fetch = self.run(["git", "fetch", "origin", "main"])?;
+        if fetch.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.merge_from_main.fetch_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": fetch.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git fetch origin main failed: {}",
+                fetch.stderr
+            )));
+        }
+        let merge = self.run(["git", "merge", "origin/main", "--no-edit"])?;
+        if merge.exit_code == 0 {
+            append_run_log(
+                "info",
+                "git.merge_from_main.clean",
+                json!({ "cwd": self.cwd.display().to_string() }),
+            );
+            return Ok(RebaseResult::Clean);
+        }
+        let stderr = merge.stderr.clone();
+        if is_merge_conflict(&stderr) {
+            append_run_log(
+                "warn",
+                "git.merge_from_main.conflict",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": stderr
+                }),
+            );
+            // Leave merge in progress — agent resolves markers, commit_all completes it
+            return Ok(RebaseResult::Conflict { stderr });
+        }
+        // Unknown error — abort the merge and return Err
+        append_run_log(
+            "error",
+            "git.merge_from_main.failed",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "exit_code": merge.exit_code,
+                "stderr": stderr
+            }),
+        );
+        let _ = self.run(["git", "merge", "--abort"]);
+        Err(GardenerError::Process(format!(
+            "git merge origin/main failed: {stderr}"
+        )))
+    }
+
     pub fn rebase_onto_local(&self, base: &str) -> Result<(), GardenerError> {
         append_run_log(
             "info",
@@ -524,6 +583,11 @@ impl<'a> GitClient<'a> {
 }
 
 fn is_rebase_conflict(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("conflict") || lower.contains("unmerged files")
+}
+
+fn is_merge_conflict(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("conflict") || lower.contains("unmerged files")
 }
@@ -836,6 +900,89 @@ mod tests {
         assert!(err
             .to_string()
             .contains("post-merge validation command failed"));
+    }
+
+    #[test]
+    fn try_merge_from_main_clean() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // merge
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let result = GitClient::new(&runner, "/repo")
+            .try_merge_from_main()
+            .expect("merge from main should succeed");
+        assert_eq!(result, RebaseResult::Clean);
+        let spawned = runner.spawned();
+        assert!(spawned[0].args.contains(&"fetch".to_string()));
+        assert!(spawned[1].args.contains(&"merge".to_string()));
+        assert!(spawned[1].args.contains(&"origin/main".to_string()));
+    }
+
+    #[test]
+    fn try_merge_from_main_conflict_leaves_merge_in_progress() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // merge fails with conflict
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "CONFLICT (content): Merge conflict in src/lib.rs".to_string(),
+        }));
+        let result = GitClient::new(&runner, "/repo")
+            .try_merge_from_main()
+            .expect("should return conflict, not error");
+        match result {
+            RebaseResult::Conflict { stderr } => {
+                assert!(stderr.contains("CONFLICT"));
+            }
+            _ => panic!("expected conflict result"),
+        }
+        // Should NOT have called merge --abort
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 2, "should not abort on conflict");
+    }
+
+    #[test]
+    fn try_merge_from_main_unknown_error_aborts() {
+        let runner = FakeProcessRunner::default();
+        // fetch
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // merge fails with non-conflict error
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "fatal: refusing to merge unrelated histories".to_string(),
+        }));
+        // merge --abort
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .try_merge_from_main()
+            .expect_err("should error on unknown failure");
+        assert!(err.to_string().contains("git merge origin/main failed"));
+        let spawned = runner.spawned();
+        assert!(spawned[2].args.contains(&"--abort".to_string()));
     }
 
     #[test]

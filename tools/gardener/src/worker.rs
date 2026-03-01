@@ -71,8 +71,8 @@ fn merge_phase_lock() -> &'static Mutex<()> {
 }
 
 const MAX_MERGE_REMEDIATION: u32 = 3;
-const MERGEABILITY_POLL_MAX: u32 = 12;
-const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const MERGEABILITY_POLL_MAX: u32 = 10;
+const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
     let raw = payload
@@ -838,6 +838,16 @@ fn run_agent_turn(context: TurnContext<'_>) -> Result<TurnResult, GardenerError>
             "worktree": worktree_path.display().to_string(),
             "output_file": output_file.display().to_string(),
             "initial_prompt_est_tokens": estimated_prompt_tokens
+        }),
+    );
+    crate::logging::append_run_log_untruncated(
+        "info",
+        "agent.turn.prompt",
+        json!({
+            "worker_id": identity.worker_id,
+            "session_id": identity.session.session_id,
+            "state": state.as_str(),
+            "prompt": prepared.rendered
         }),
     );
     let max_turns = Some(max_turns_for_state(cfg, state));

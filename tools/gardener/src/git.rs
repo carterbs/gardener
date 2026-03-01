@@ -171,37 +171,51 @@ impl<'a> GitClient<'a> {
             }),
         );
 
-        let rebase = self.run(["git", "pull", "--rebase", "origin", branch])?;
-        if rebase.exit_code != 0 {
+        if !is_non_fast_forward_push(&first.stderr) {
             append_run_log(
                 "error",
-                "git.push.rebase_failed",
+                "git.push.failed_unrecoverable_first_attempt",
                 json!({
                     "cwd": self.cwd.display().to_string(),
                     "branch": branch,
-                    "exit_code": rebase.exit_code,
-                    "stderr": rebase.stderr
+                    "exit_code": first.exit_code,
+                    "stderr": first.stderr
                 }),
             );
-            return Err(GardenerError::Process(
-                "push/rebase recovery failed".to_string(),
-            ));
+            return Err(GardenerError::Process("push failed".to_string()));
         }
 
         append_run_log(
             "info",
-            "git.push.rebase_succeeded",
+            "git.push.non_fast_forward_detected",
             json!({
                 "cwd": self.cwd.display().to_string(),
                 "branch": branch
             }),
         );
 
-        let second = self.run(["git", "push", "origin", branch])?;
+        let fetch = self.run(["git", "fetch", "origin", branch])?;
+        if fetch.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.push.force_with_lease.fetch_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "branch": branch,
+                    "exit_code": fetch.exit_code,
+                    "stderr": fetch.stderr
+                }),
+            );
+            return Err(GardenerError::Process(
+                "push/force-with-lease recovery failed".to_string(),
+            ));
+        }
+
+        let second = self.run(["git", "push", "--force-with-lease", "origin", branch])?;
         if second.exit_code != 0 {
             append_run_log(
                 "error",
-                "git.push.failed_after_rebase",
+                "git.push.force_with_lease.failed",
                 json!({
                     "cwd": self.cwd.display().to_string(),
                     "branch": branch,
@@ -210,13 +224,13 @@ impl<'a> GitClient<'a> {
                 }),
             );
             return Err(GardenerError::Process(
-                "push failed after rebase recovery".to_string(),
+                "push/force-with-lease recovery failed".to_string(),
             ));
         }
 
         append_run_log(
             "info",
-            "git.push.succeeded",
+            "git.push.force_with_lease.succeeded",
             json!({
                 "cwd": self.cwd.display().to_string(),
                 "branch": branch,
@@ -514,6 +528,13 @@ fn is_rebase_conflict(stderr: &str) -> bool {
     lower.contains("conflict") || lower.contains("unmerged files")
 }
 
+fn is_non_fast_forward_push(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("non-fast-forward")
+        || lower.contains("tip of your current branch is behind")
+        || lower.contains("failed to push some refs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::GitClient;
@@ -521,12 +542,12 @@ mod tests {
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
 
     #[test]
-    fn push_rebase_recovery_path() {
+    fn push_force_with_lease_recovery_path() {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
             exit_code: 1,
             stdout: String::new(),
-            stderr: "push failed".to_string(),
+            stderr: "non-fast-forward".to_string(),
         }));
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
@@ -542,6 +563,62 @@ mod tests {
         GitClient::new(&runner, "/repo")
             .push_with_rebase_recovery("feature/x")
             .expect("recovered");
+        let spawned = runner.spawned();
+        assert_eq!(spawned[1].args, vec!["fetch", "origin", "feature/x"]);
+        assert_eq!(
+            spawned[2].args,
+            vec!["push", "--force-with-lease", "origin", "feature/x"]
+        );
+    }
+
+    #[test]
+    fn push_recovery_bails_on_non_recoverable_error() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "Permission denied (publickey).".to_string(),
+        }));
+        let err = GitClient::new(&runner, "/repo")
+            .push_with_rebase_recovery("feature/x")
+            .expect_err("should not attempt recovery");
+        assert!(err.to_string().contains("push failed"));
+        assert_eq!(runner.spawned().len(), 1);
+    }
+
+    #[test]
+    fn push_recovery_handles_logged_non_fast_forward_case_without_rebase() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "To github.com:carterbs/gardener.git\n ! [rejected]        gardener/worker-3-manual-quality-e9fccfb4844348f6 -> gardener/worker-3-manual-quality-e9fccfb4844348f6 (non-fast-forward)\nerror: failed to push some refs to 'github.com:carterbs/gardener.git'\nhint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart. If you want to integrate the remote changes,\nhint: use 'git pull' before pushing again.\n".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        GitClient::new(&runner, "/repo")
+            .push_with_rebase_recovery("gardener/worker-3-manual-quality-e9fccfb4844348f6")
+            .expect("recovered from logged non-fast-forward");
+        let spawned = runner.spawned();
+        let joined = spawned
+            .iter()
+            .flat_map(|cmd| cmd.args.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !joined.contains("pull --rebase"),
+            "recovery must not attempt pull --rebase: {joined}"
+        );
     }
 
     #[test]

@@ -519,10 +519,23 @@ where
 
 pub fn backup_db_if_exists(path: &Path) -> Result<Option<PathBuf>, GardenerError> {
     if !path.exists() {
+        append_run_log(
+            "debug",
+            "startup.backup.skipped_missing",
+            json!({ "path": path.display().to_string() }),
+        );
         return Ok(None);
     }
     let meta = std::fs::metadata(path).map_err(|e| GardenerError::Database(e.to_string()))?;
     if meta.len() == 0 {
+        append_run_log(
+            "error",
+            "startup.backup.skipped_zero_byte",
+            json!({
+                "path": path.display().to_string(),
+                "size_bytes": meta.len(),
+            }),
+        );
         return Ok(None);
     }
 
@@ -537,7 +550,26 @@ pub fn backup_db_if_exists(path: &Path) -> Result<Option<PathBuf>, GardenerError
                 "bak-{}",
                 ext.strip_prefix("sqlite-").unwrap_or(ext)
             ));
-            let _ = std::fs::copy(&sidecar, &sidecar_bak);
+            match std::fs::copy(&sidecar, &sidecar_bak) {
+                Ok(bytes) => append_run_log(
+                    "debug",
+                    "startup.backup.sidecar_copied",
+                    json!({
+                        "source": sidecar.display().to_string(),
+                        "backup": sidecar_bak.display().to_string(),
+                        "size_bytes": bytes,
+                    }),
+                ),
+                Err(error) => append_run_log(
+                    "warn",
+                    "startup.backup.sidecar_copy_failed",
+                    json!({
+                        "source": sidecar.display().to_string(),
+                        "backup": sidecar_bak.display().to_string(),
+                        "error": error.to_string(),
+                    }),
+                ),
+            };
         }
     }
 

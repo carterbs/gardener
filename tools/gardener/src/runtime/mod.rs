@@ -246,16 +246,40 @@ impl FileSystem for ProductionFileSystem {
     }
 
     fn write_string(&self, path: &Path, contents: &str) -> Result<(), GardenerError> {
-        let result = std::fs::write(path, contents).map_err(|e| GardenerError::Io(e.to_string()));
-        match &result {
-            Ok(()) => append_run_log(
-                "debug",
-                "runtime.fs.write",
+        if is_backlog_related_path(path) {
+            append_run_log(
+                "warn",
+                "backlog.fs.write.attempt",
                 json!({
                     "path": path.display().to_string(),
-                    "bytes": contents.len()
+                    "bytes": contents.len(),
+                    "zero_bytes": contents.is_empty(),
                 }),
-            ),
+            );
+        }
+        let result = std::fs::write(path, contents).map_err(|e| GardenerError::Io(e.to_string()));
+        match &result {
+            Ok(()) => {
+                append_run_log(
+                    "debug",
+                    "runtime.fs.write",
+                    json!({
+                        "path": path.display().to_string(),
+                        "bytes": contents.len()
+                    }),
+                );
+                if is_backlog_related_path(path) {
+                    append_run_log(
+                        if contents.is_empty() { "error" } else { "warn" },
+                        "backlog.fs.write.committed",
+                        json!({
+                            "path": path.display().to_string(),
+                            "bytes": contents.len(),
+                            "zero_bytes": contents.is_empty(),
+                        }),
+                    );
+                }
+            }
             Err(e) => append_run_log(
                 "error",
                 "runtime.fs.write_error",
@@ -273,15 +297,35 @@ impl FileSystem for ProductionFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), GardenerError> {
-        let result = std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
-        match &result {
-            Ok(()) => append_run_log(
-                "debug",
-                "runtime.fs.remove",
+        if is_backlog_related_path(path) {
+            append_run_log(
+                "error",
+                "backlog.fs.remove.attempt",
                 json!({
                     "path": path.display().to_string()
                 }),
-            ),
+            );
+        }
+        let result = std::fs::remove_file(path).map_err(|e| GardenerError::Io(e.to_string()));
+        match &result {
+            Ok(()) => {
+                append_run_log(
+                    "debug",
+                    "runtime.fs.remove",
+                    json!({
+                        "path": path.display().to_string()
+                    }),
+                );
+                if is_backlog_related_path(path) {
+                    append_run_log(
+                        "error",
+                        "backlog.fs.remove.committed",
+                        json!({
+                            "path": path.display().to_string()
+                        }),
+                    );
+                }
+            }
             Err(e) => append_run_log(
                 "warn",
                 "runtime.fs.remove_error",
@@ -719,6 +763,16 @@ fn is_copy_shortcut_key(key: char) -> bool {
     key.eq_ignore_ascii_case(&COPY_SHORTCUT_KEY)
 }
 
+fn is_backlog_related_path(path: &Path) -> bool {
+    let display = path.display().to_string();
+    display.ends_with("/backlog.sqlite")
+        || display.ends_with("/backlog.sqlite-wal")
+        || display.ends_with("/backlog.sqlite-shm")
+        || display.ends_with("/backlog.sqlite.bak")
+        || display.ends_with("/backlog.sqlite.bak-wal")
+        || display.ends_with("/backlog.sqlite.bak-shm")
+}
+
 pub struct ProductionRuntime {
     pub clock: Arc<dyn Clock>,
     pub file_system: Arc<dyn FileSystem>,
@@ -1094,12 +1148,12 @@ impl ProcessRunner for FakeProcessRunner {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_and_flush_lines, flush_trailing_line, is_copy_shortcut_key, Clock, FakeClock,
-        FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput, ProcessRequest,
-        ProcessRunner, Terminal,
+        append_and_flush_lines, flush_trailing_line, is_backlog_related_path, is_copy_shortcut_key,
+        Clock, FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem,
+        ProcessOutput, ProcessRequest, ProcessRunner, Terminal,
     };
     use crate::errors::GardenerError;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -1107,6 +1161,15 @@ mod tests {
         assert!(is_copy_shortcut_key('c'));
         assert!(is_copy_shortcut_key('C'));
         assert!(!is_copy_shortcut_key('x'));
+    }
+
+    #[test]
+    fn backlog_path_detector_matches_primary_and_sidecar_files() {
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite")));
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite-wal")));
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite-shm")));
+        assert!(is_backlog_related_path(Path::new("/tmp/backlog.sqlite.bak")));
+        assert!(!is_backlog_related_path(Path::new("/tmp/not-backlog.txt")));
     }
 
     #[test]

@@ -176,7 +176,10 @@ impl BacklogStore {
         append_run_log(
             "info",
             "backlog_store.open",
-            json!({ "path": path.display().to_string() }),
+            json!({
+                "path": path.display().to_string(),
+                "path_state": backlog_path_state(&path),
+            }),
         );
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| GardenerError::Database(e.to_string()))?;
@@ -192,7 +195,10 @@ impl BacklogStore {
                 append_run_log(
                     "error",
                     "backlog_store.open.zero_byte_rejected",
-                    json!({ "path": path.display().to_string() }),
+                    json!({
+                        "path": path.display().to_string(),
+                        "path_state": backlog_path_state(&path),
+                    }),
                 );
                 return Err(GardenerError::Database(format!(
                     "backlog database is 0 bytes (corrupt): {}",
@@ -232,8 +238,20 @@ impl BacklogStore {
         run_migrations(&mut write_conn)?;
 
         let (write_tx, mut write_rx) = mpsc::channel(128);
+        let writer_path = path.clone();
         let writer_join = thread::spawn(move || {
             while let Some(cmd) = write_rx.blocking_recv() {
+                let (operation, command_payload) = write_cmd_details(&cmd);
+                append_run_log(
+                    "debug",
+                    "backlog_store.write_command.received",
+                    json!({
+                        "operation": operation,
+                        "command": command_payload,
+                        "path": writer_path.display().to_string(),
+                        "path_state": backlog_path_state(&writer_path),
+                    }),
+                );
                 match cmd {
                     WriteCmd::Upsert { task, now, reply } => {
                         let result = upsert_task(&write_conn, &task, now).and_then(|_| {
@@ -242,6 +260,19 @@ impl BacklogStore {
                                     GardenerError::Database("row missing after upsert".to_string())
                                 })
                         });
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                json!({
+                                    "task_id": task.task_id,
+                                    "status": task.status.as_str(),
+                                    "priority": task.priority.as_str(),
+                                    "attempt_count": task.attempt_count,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::ClaimNext {
@@ -252,6 +283,24 @@ impl BacklogStore {
                     } => {
                         let result =
                             claim_next(&mut write_conn, &lease_owner, lease_expires_at, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                task.as_ref().map_or_else(
+                                    || json!({ "claimed": false }),
+                                    |claimed| {
+                                        json!({
+                                            "claimed": true,
+                                            "task_id": claimed.task_id,
+                                            "status": claimed.status.as_str(),
+                                            "attempt_count": claimed.attempt_count,
+                                        })
+                                    },
+                                )
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkInProgress {
@@ -261,6 +310,18 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = mark_in_progress(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkComplete {
@@ -270,10 +331,28 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = mark_complete(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::RecoverStale { now, reply } => {
                         let result = recover_stale(&write_conn, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|count| json!({ "recovered_count": count })),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::ReleaseLease {
@@ -283,6 +362,18 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = release_lease(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkUnresolved {
@@ -292,6 +383,18 @@ impl BacklogStore {
                         reply,
                     } => {
                         let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::MarkMergePending {
@@ -302,6 +405,18 @@ impl BacklogStore {
                     } => {
                         let result =
                             mark_merge_pending(&write_conn, &task_id, &lease_owner, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                     WriteCmd::ClaimMergePending {
@@ -309,8 +424,24 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                        let result =
-                            claim_merge_pending(&write_conn, &merge_worker_id, now);
+                        let result = claim_merge_pending(&write_conn, &merge_worker_id, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                task.as_ref().map_or_else(
+                                    || json!({ "claimed": false }),
+                                    |claimed| {
+                                        json!({
+                                            "claimed": true,
+                                            "task_id": claimed.task_id,
+                                            "status": claimed.status.as_str(),
+                                        })
+                                    },
+                                )
+                            }),
+                            result.as_ref().err(),
+                        );
                         let _ = reply.send(result);
                     }
                 }
@@ -800,6 +931,192 @@ impl BacklogStore {
     pub fn get_task(&self, task_id: &str) -> StoreResult<Option<BacklogTask>> {
         self.read_pool.with_conn(|conn| fetch_task(conn, task_id))
     }
+}
+
+fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
+    match cmd {
+        WriteCmd::Upsert { task, now, .. } => (
+            "upsert",
+            json!({
+                "task_id": compute_task_id_from_new_task(task),
+                "scope_key": task.scope_key,
+                "priority": task.priority.as_str(),
+                "source": task.source,
+                "now": now,
+            }),
+        ),
+        WriteCmd::ClaimNext {
+            lease_owner,
+            lease_expires_at,
+            now,
+            ..
+        } => (
+            "claim_next",
+            json!({
+                "lease_owner": lease_owner,
+                "lease_expires_at": lease_expires_at,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkInProgress {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_in_progress",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkComplete {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_complete",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::RecoverStale { now, .. } => (
+            "recover_stale",
+            json!({
+                "now": now,
+            }),
+        ),
+        WriteCmd::ReleaseLease {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "release_lease",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkUnresolved {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_unresolved",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::MarkMergePending {
+            task_id,
+            lease_owner,
+            now,
+            ..
+        } => (
+            "mark_merge_pending",
+            json!({
+                "task_id": task_id,
+                "lease_owner": lease_owner,
+                "now": now,
+            }),
+        ),
+        WriteCmd::ClaimMergePending {
+            merge_worker_id,
+            now,
+            ..
+        } => (
+            "claim_merge_pending",
+            json!({
+                "merge_worker_id": merge_worker_id,
+                "now": now,
+            }),
+        ),
+    }
+}
+
+fn log_write_result(
+    path: &Path,
+    operation: &str,
+    ok_payload: &Result<serde_json::Value, &GardenerError>,
+    maybe_error: Option<&GardenerError>,
+) {
+    match maybe_error {
+        Some(error) => {
+            append_run_log(
+                "error",
+                "backlog_store.write_command.failed",
+                json!({
+                    "operation": operation,
+                    "error": error.to_string(),
+                    "path": path.display().to_string(),
+                    "path_state": backlog_path_state(path),
+                }),
+            );
+        }
+        None => {
+            append_run_log(
+                "info",
+                "backlog_store.write_command.applied",
+                json!({
+                    "operation": operation,
+                    "result": ok_payload.as_ref().ok(),
+                    "path": path.display().to_string(),
+                    "path_state": backlog_path_state(path),
+                }),
+            );
+        }
+    }
+}
+
+fn backlog_path_state(path: &Path) -> serde_json::Value {
+    let file = |p: &Path| match std::fs::metadata(p) {
+        Ok(meta) => {
+            let modified_unix_ms = meta
+                .modified()
+                .ok()
+                .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            json!({
+                "exists": true,
+                "size_bytes": meta.len(),
+                "modified_unix_ms": modified_unix_ms,
+            })
+        }
+        Err(_) => json!({
+            "exists": false,
+        }),
+    };
+
+    let wal_path = path.with_extension("sqlite-wal");
+    let shm_path = path.with_extension("sqlite-shm");
+    let bak_path = path.with_extension("sqlite.bak");
+    json!({
+        "main": {
+            "path": path.display().to_string(),
+            "meta": file(path),
+        },
+        "wal": {
+            "path": wal_path.display().to_string(),
+            "meta": file(&wal_path),
+        },
+        "shm": {
+            "path": shm_path.display().to_string(),
+            "meta": file(&shm_path),
+        },
+        "backup": {
+            "path": bak_path.display().to_string(),
+            "meta": file(&bak_path),
+        },
+    })
 }
 
 #[derive(Clone)]

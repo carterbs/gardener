@@ -150,13 +150,20 @@ pub fn run_worker_pool_fsm(
         if report_visible {
             continue;
         }
-        let mut pre_seeded_merge_requests = Vec::new();
         let repo_root = scope
             .repo_root
             .as_ref()
             .unwrap_or(&scope.working_dir);
         let worktree_client = WorktreeClient::new(runtime.process_runner.as_ref(), repo_root);
-        while let Some(task) = store.claim_merge_pending(MERGE_WORKER_ID)? {
+        let maybe_start_merge = |active_merging: &mut usize,
+                                     merge_tx: &mut Option<mpsc::Sender<MergeRequest>>|
+         -> Result<bool, GardenerError> {
+            if *active_merging >= 1 {
+                return Ok(false);
+            }
+            let Some(task) = store.claim_merge_pending(MERGE_WORKER_ID)? else {
+                return Ok(false);
+            };
             let task_id = task.task_id.clone();
             let pr_number = match task.related_pr.and_then(|n| u64::try_from(n).ok()) {
                 Some(pr) => pr,
@@ -170,7 +177,7 @@ pub fn run_worker_pool_fsm(
                         }),
                     );
                     let _ = store.release_lease(&task.task_id, MERGE_WORKER_ID);
-                    continue;
+                    return Ok(false);
                 }
             };
             let branch = task
@@ -190,22 +197,27 @@ pub fn run_worker_pool_fsm(
                     }),
                 );
                 let _ = store.release_lease(&task.task_id, MERGE_WORKER_ID);
-                continue;
+                return Ok(false);
             }
-            let identity = WorkerIdentity::new(MERGE_WORKER_ID);
-            pre_seeded_merge_requests.push(MergeRequest {
-                slot_idx: 0,
-                task_id: task.task_id,
-                task_summary: task.title,
-                attempt_count: task.attempt_count,
-                worker_id: identity.worker_id,
-                session_id: identity.session.session_id,
-                worktree_path,
-                branch,
-                pr_number,
-                logs: Vec::new(),
-            });
-        }
+            if let Some(mtx) = merge_tx {
+                let identity = WorkerIdentity::new(MERGE_WORKER_ID);
+                let _ = mtx.send(MergeRequest {
+                    slot_idx: 0,
+                    task_id: task.task_id,
+                    task_summary: task.title,
+                    attempt_count: task.attempt_count,
+                    worker_id: identity.worker_id,
+                    session_id: identity.session.session_id,
+                    worktree_path,
+                    branch,
+                    pr_number,
+                    logs: Vec::new(),
+                });
+                *active_merging = active_merging.saturating_add(1);
+                return Ok(true);
+            }
+            Ok(false)
+        };
         let mut claimed = Vec::new();
         let mut claimed_any = false;
         let available_slots = parallelism.min(target.saturating_sub(completed));
@@ -262,14 +274,7 @@ pub fn run_worker_pool_fsm(
             claimed.push((idx, task));
         }
 
-        if !claimed_any && pre_seeded_merge_requests.is_empty() {
-            break;
-        }
-
-        let mut active_doing = claimed.len();
-        let mut active_merging = pre_seeded_merge_requests.len();
-        let mut shutdown_error: Option<(String, String, String)> = None;
-        let mut quit_requested = false;
+        let mut active_merging = 0usize;
         let (tx, rx): (
             mpsc::Sender<PoolResultMessage>,
             mpsc::Receiver<PoolResultMessage>,
@@ -280,6 +285,18 @@ pub fn run_worker_pool_fsm(
             mpsc::Receiver<MergeRequest>,
         ) = mpsc::channel();
         let runtime_scope = scope.clone();
+        let mut merge_tx = Some(merge_tx);
+        if maybe_start_merge(&mut active_merging, &mut merge_tx)? {
+            claimed_any = true;
+        }
+
+        if !claimed_any && active_merging == 0 {
+            break;
+        }
+
+        let mut active_doing = claimed.len();
+        let mut shutdown_error: Option<(String, String, String)> = None;
+        let mut quit_requested = false;
         let mut last_dashboard_refresh = Instant::now();
 
         std::thread::scope(|scope_guard| -> Result<(), GardenerError> {
@@ -340,12 +357,7 @@ pub fn run_worker_pool_fsm(
             // Keep merge_tx alive so the pool can send MergeRequests when
             // doing workers return HandoffToMerge. Drop it when all doing
             // workers finish so the merge worker sees channel-close and exits.
-            let mut merge_tx = Some(merge_tx);
-            for req in pre_seeded_merge_requests {
-                if let Some(ref mtx) = merge_tx {
-                    let _ = mtx.send(req);
-                }
-            }
+            let mut merge_tx = merge_tx;
 
             while active_doing > 0 || active_merging > 0 {
                 if handle_hotkeys(&mut HotkeyState {
@@ -430,10 +442,7 @@ pub fn run_worker_pool_fsm(
                                     workers[merge_row_idx].breadcrumb = "merging".to_string();
                                     workers[merge_row_idx].lease_held = true;
                                     last_activity_pulse[merge_row_idx] = Instant::now();
-                                    if let Some(ref mtx) = merge_tx {
-                                        let _ = mtx.send(req);
-                                    }
-                                    active_merging = active_merging.saturating_add(1);
+                                    let _ = maybe_start_merge(&mut active_merging, &mut merge_tx)?;
                                     append_run_log(
                                         "info",
                                         "worker.task.handoff_to_merge",
@@ -722,6 +731,7 @@ pub fn run_worker_pool_fsm(
                                 }
                             }
                         }
+                        let _ = maybe_start_merge(&mut active_merging, &mut merge_tx)?;
                         // Reset merge row to idle if no more merges pending
                         if active_merging == 0 {
                             workers[merge_row_idx].state = "idle".to_string();

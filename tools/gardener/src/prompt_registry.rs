@@ -272,15 +272,13 @@ The deterministic merge pipeline tried to merge your PR and failed. Information 
 - If CI is failing: identify and fix the test/lint/build failures.
 - If the branch is behind main: rebase onto origin/main and resolve any resulting conflicts.
 
-## Rules
+## Autonomy
 
-- Do NOT run git push, git commit, gh pr merge, or any other git/gh commands that move code.
-- Just fix the source files. Your changes will be committed and pushed automatically by the pipeline.
-- Run the project's validation command to verify your fixes before returning.
+You have full autonomy. Fix the code, commit your changes, and push. The pipeline is the safety net.
+- Run the project's validation command to verify your fixes before pushing.
 - Keep edits minimal and mergeability-focused; avoid unrelated refactors.
 - Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
-Guardrails: do not run git/gh commands; only fix source files.
 Output schema must be JSON envelope with payload fields: summary, files_changed.
 summary must include what was fixed and the validation command/result.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
@@ -302,14 +300,40 @@ Failure details are in [knowledge_context].
 3. Remove all conflict markers — no file should contain <<<<<<< when you are done.
 4. Run the project's validation command to confirm everything passes.
 
-## Rules
-- Do NOT run git push, git commit, git merge, gh pr merge, or any git/gh commands that move code.
-- Just fix the source files. Your changes will be committed and pushed automatically.
+## Autonomy
+You have full autonomy. Fix the conflicts, commit your changes, and push. The pipeline is the safety net.
 - Keep changes minimal — only resolve conflicts, do not refactor.
 - Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
 
-Guardrails: no git/gh commands; only fix source files and validate.
 Output schema must be JSON envelope with payload fields: summary, files_changed.
+Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+    }
+}
+
+pub fn ci_failure_remediation_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-ci-failure-remediation",
+        body: r#"Intent: fix CI failures so this PR can be merged.
+
+## Context
+
+CI checks failed on this PR. The failure logs are provided in [knowledge_context].
+
+## Steps
+
+1. Read the CI failure logs in [knowledge_context] carefully.
+2. Identify the root cause of each failure (test failure, lint error, build error, etc.).
+3. Fix the source code to resolve the failures.
+4. Run the project's validation command locally to confirm your fixes pass.
+
+## Autonomy
+
+You have full autonomy. Fix the code, commit your changes, and push. The pipeline is the safety net.
+- Keep edits minimal and CI-fix-focused; avoid unrelated refactors.
+- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
+
+Output schema must be JSON envelope with payload fields: summary, files_changed.
+summary must include what CI failures were fixed and the validation command/result.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -343,7 +367,7 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 
 #[cfg(test)]
 mod tests {
-    use super::PromptRegistry;
+    use super::{ci_failure_remediation_template, PromptRegistry};
     use crate::types::WorkerState;
 
     #[test]
@@ -383,13 +407,23 @@ mod tests {
     }
 
     #[test]
-    fn merge_remediation_template_prohibits_git_commands() {
+    fn merge_remediation_template_grants_autonomy() {
         let registry = PromptRegistry::v1();
         let tpl = registry
             .template_for(WorkerState::Merging)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-merge-remediation");
-        assert!(tpl.body.contains("do not run git/gh commands"));
+        assert!(tpl.body.contains("full autonomy"));
+        assert!(!tpl.body.contains("Do NOT run git push"));
+    }
+
+    #[test]
+    fn ci_failure_remediation_template_references_knowledge_context() {
+        let tpl = ci_failure_remediation_template();
+        assert_eq!(tpl.version, "v1-ci-failure-remediation");
+        assert!(tpl.body.contains("[knowledge_context]"));
+        assert!(tpl.body.contains("full autonomy"));
+        assert!(tpl.body.contains("<<GARDENER_JSON_START>>"));
     }
 
     #[test]

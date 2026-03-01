@@ -6,7 +6,8 @@ use crate::gh::GhClient;
 use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{merge_main_conflict_resolution_template, PromptRegistry, PromptTemplate};
+use crate::gh::{MergeStateStatus, Mergeable};
+use crate::prompt_registry::{ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry, PromptTemplate};
 use crate::protocol::AgentTerminal;
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerState};
@@ -26,7 +27,7 @@ pub struct MergeLoopContext<'a> {
     pub worktree_path: &'a Path,
     pub factory: &'a AdapterFactory,
     pub registry: &'a PromptRegistry,
-    pub learning_loop: &'a LearningLoop,
+    pub learning_loop: &'a mut LearningLoop,
     pub identity: &'a WorkerIdentity,
     pub task_summary: &'a str,
     pub attempt_count: i64,
@@ -86,7 +87,7 @@ fn agent_turn_from_ctx<'a>(
     }
 }
 
-pub fn run_merge_loop(ctx: &MergeLoopContext<'_>) -> Result<MergeLoopOutcome, GardenerError> {
+pub fn run_merge_loop(ctx: &mut MergeLoopContext<'_>) -> Result<MergeLoopOutcome, GardenerError> {
     let pr = ctx.pr_number;
     let branch = ctx.branch;
 
@@ -94,84 +95,150 @@ pub fn run_merge_loop(ctx: &MergeLoopContext<'_>) -> Result<MergeLoopOutcome, Ga
 
     for attempt in 0..MAX_MERGE_REMEDIATION {
         step(ctx, "POLL", &format!("polling mergeability (attempt {}/{})", attempt + 1, MAX_MERGE_REMEDIATION));
-        let _ = ctx.gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
+        let status = ctx.gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
 
-        step(ctx, "MERGE", &format!("attempting merge of PR #{pr}"));
-        match ctx.gh.merge_pr(pr) {
-            Ok(()) => {
-                let view = ctx.gh.view_pr(pr)?;
-                let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
-                append_run_log("info", "merge_loop.succeeded", json!({
-                    "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1, "merge_sha": sha
-                }));
-                step(ctx, "MERGE", &format!("merge succeeded (sha={sha})"));
-                return Ok(MergeLoopOutcome::Merged { sha });
-            }
-            Err(merge_err) => {
-                step(ctx, "MERGE", &format!("merge failed: {merge_err}"));
-                if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                    let reason = format!("merge failed after {} remediation attempts: {}", MAX_MERGE_REMEDIATION, merge_err);
-                    append_run_log("error", "merge_loop.exhausted", json!({
-                        "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempts": MAX_MERGE_REMEDIATION, "error": merge_err.to_string()
-                    }));
-                    return Ok(MergeLoopOutcome::Failed { reason });
-                }
+        append_run_log("info", "merge_loop.poll_result", json!({
+            "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1,
+            "mergeable": format!("{:?}", status.mergeable),
+            "merge_state_status": format!("{:?}", status.merge_state_status)
+        }));
 
-                // Merge main into branch
-                step(ctx, "REMEDIATE", "merging main into branch");
-                match ctx.git.try_merge_from_main() {
-                    Ok(RebaseResult::Clean) => {
-                        append_run_log("info", "merge_loop.merge_from_main.clean", json!({
-                            "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1
+        // State-driven: react based on the polled state
+        match (&status.mergeable, &status.merge_state_status) {
+            // Clean + Mergeable → attempt merge
+            (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => {
+                step(ctx, "MERGE", &format!("attempting merge of PR #{pr}"));
+                match ctx.gh.merge_pr(pr) {
+                    Ok(()) => {
+                        let view = ctx.gh.view_pr(pr)?;
+                        let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
+                        append_run_log("info", "merge_loop.succeeded", json!({
+                            "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1, "merge_sha": sha
                         }));
-                        step(ctx, "REMEDIATE", "merge-from-main clean, pushing");
-                        ctx.git.push_with_rebase_recovery(branch)?;
-                        continue;
+                        step(ctx, "MERGE", &format!("merge succeeded (sha={sha})"));
+                        return Ok(MergeLoopOutcome::Merged { sha });
                     }
-                    Ok(RebaseResult::Conflict { stderr }) => {
-                        append_run_log("warn", "merge_loop.merge_from_main.conflict", json!({
-                            "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1, "stderr": stderr
-                        }));
-                        step(ctx, "REMEDIATE", "merge-from-main has conflicts, running agent resolution");
-                        let conflict_tpl = merge_main_conflict_resolution_template();
-                        let conflict_result = run_agent_turn(agent_turn_from_ctx(ctx, Some(&conflict_tpl)))?;
-                        if conflict_result.terminal != AgentTerminal::Failure {
-                            step(ctx, "REMEDIATE", "agent resolved conflicts, committing and pushing");
-                            ctx.git.commit_all("fix: merge main into branch")?;
-                            ctx.git.push_with_rebase_recovery(branch)?;
-                            continue;
+                    Err(merge_err) => {
+                        step(ctx, "MERGE", &format!("merge failed despite clean status: {merge_err}"));
+                        if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                            return Ok(MergeLoopOutcome::Failed {
+                                reason: format!("merge failed after {} attempts: {}", MAX_MERGE_REMEDIATION, merge_err),
+                            });
                         }
-                        step(ctx, "REMEDIATE", "agent failed to resolve conflicts");
                     }
-                    Err(e) => {
-                        append_run_log("warn", "merge_loop.merge_from_main.failed", json!({
-                            "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1, "error": e.to_string()
+                }
+            }
+            // Behind → merge main into branch, push, re-poll
+            (_, MergeStateStatus::Behind) => {
+                step(ctx, "REMEDIATE", "branch is behind main, merging main");
+                if let Err(e) = merge_main_and_push(ctx, branch, attempt) {
+                    step(ctx, "REMEDIATE", &format!("merge-from-main failed: {e}"));
+                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                        return Ok(MergeLoopOutcome::Failed {
+                            reason: format!("failed to merge main into branch: {e}"),
+                        });
+                    }
+                }
+                continue;
+            }
+            // Dirty / Conflicting → merge main to resolve, push, re-poll
+            (Mergeable::Conflicting, _) | (_, MergeStateStatus::Dirty) => {
+                step(ctx, "REMEDIATE", "conflicts detected, merging main into branch");
+                if let Err(e) = merge_main_and_push(ctx, branch, attempt) {
+                    step(ctx, "REMEDIATE", &format!("conflict resolution failed: {e}"));
+                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                        return Ok(MergeLoopOutcome::Failed {
+                            reason: format!("conflict resolution failed: {e}"),
+                        });
+                    }
+                }
+                continue;
+            }
+            // Unstable → CI failed, fetch logs and run agent
+            (_, MergeStateStatus::Unstable) => {
+                step(ctx, "REMEDIATE", "CI checks failed (Unstable), fetching failure logs");
+                let failed_checks = ctx.gh.fetch_failed_checks(pr).unwrap_or_default();
+                let evidence: Vec<String> = failed_checks
+                    .iter()
+                    .map(|c| format!("## CI check: {}\nLink: {}\n\n```\n{}\n```", c.name, c.link, c.log_snippet))
+                    .collect();
+                ctx.learning_loop.ingest_failure(
+                    WorkerState::Merging,
+                    "CI checks failed",
+                    evidence,
+                );
+                step(ctx, "REMEDIATE", "running agent CI failure remediation");
+                let ci_tpl = ci_failure_remediation_template();
+                let ci_result = run_agent_turn(agent_turn_from_ctx(ctx, Some(&ci_tpl)))?;
+                if ci_result.terminal == AgentTerminal::Failure {
+                    let reason = ci_result.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("agent CI remediation failed").to_string();
+                    step(ctx, "REMEDIATE", &format!("agent CI remediation failed: {reason}"));
+                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                        return Ok(MergeLoopOutcome::Failed { reason });
+                    }
+                }
+                continue;
+            }
+            // Fallback: still Blocked after timeout or other unexpected state → try merge anyway
+            _ => {
+                step(ctx, "MERGE", &format!("fallback: state {:?}/{:?}, attempting merge", status.mergeable, status.merge_state_status));
+                match ctx.gh.merge_pr(pr) {
+                    Ok(()) => {
+                        let view = ctx.gh.view_pr(pr)?;
+                        let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
+                        append_run_log("info", "merge_loop.succeeded", json!({
+                            "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1, "merge_sha": sha
                         }));
-                        step(ctx, "REMEDIATE", &format!("merge-from-main failed: {e}"));
+                        return Ok(MergeLoopOutcome::Merged { sha });
+                    }
+                    Err(merge_err) => {
+                        step(ctx, "MERGE", &format!("fallback merge failed: {merge_err}"));
+                        if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                            return Ok(MergeLoopOutcome::Failed {
+                                reason: format!("merge failed after {} attempts: {}", MAX_MERGE_REMEDIATION, merge_err),
+                            });
+                        }
                     }
                 }
-
-                // General agent remediation
-                let status = ctx.gh.check_mergeability(pr)?;
-                append_run_log("warn", "merge_loop.remediation", json!({
-                    "worker_id": ctx.identity.worker_id, "pr_number": pr, "attempt": attempt + 1,
-                    "mergeable": format!("{:?}", status.mergeable),
-                    "merge_state_status": format!("{:?}", status.merge_state_status),
-                    "error": merge_err.to_string()
-                }));
-                step(ctx, "REMEDIATE", "running agent remediation turn");
-                let remediation_result = run_agent_turn(agent_turn_from_ctx(ctx, None))?;
-                if remediation_result.terminal == AgentTerminal::Failure {
-                    let reason = remediation_result.payload.get("reason").and_then(|v| v.as_str()).unwrap_or("agent remediation failed").to_string();
-                    step(ctx, "REMEDIATE", &format!("agent remediation failed: {reason}"));
-                    return Ok(MergeLoopOutcome::Failed { reason });
-                }
-                step(ctx, "REMEDIATE", "agent remediation succeeded, committing and pushing");
-                ctx.git.commit_all("fix: merge remediation")?;
-                ctx.git.push_with_rebase_recovery(branch)?;
             }
         }
     }
 
     Ok(MergeLoopOutcome::Failed { reason: "merge loop completed without resolution".to_string() })
+}
+
+fn merge_main_and_push(ctx: &mut MergeLoopContext<'_>, branch: &str, attempt: u32) -> Result<(), GardenerError> {
+    match ctx.git.try_merge_from_main() {
+        Ok(RebaseResult::Clean) => {
+            append_run_log("info", "merge_loop.merge_from_main.clean", json!({
+                "worker_id": ctx.identity.worker_id, "pr_number": ctx.pr_number, "attempt": attempt + 1
+            }));
+            step(ctx, "REMEDIATE", "merge-from-main clean, pushing");
+            ctx.git.push_with_rebase_recovery(branch)?;
+            Ok(())
+        }
+        Ok(RebaseResult::Conflict { stderr }) => {
+            append_run_log("warn", "merge_loop.merge_from_main.conflict", json!({
+                "worker_id": ctx.identity.worker_id, "pr_number": ctx.pr_number, "attempt": attempt + 1, "stderr": stderr
+            }));
+            step(ctx, "REMEDIATE", "merge-from-main has conflicts, running agent resolution");
+            let conflict_tpl = merge_main_conflict_resolution_template();
+            let conflict_result = run_agent_turn(agent_turn_from_ctx(ctx, Some(&conflict_tpl)))?;
+            if conflict_result.terminal != AgentTerminal::Failure {
+                step(ctx, "REMEDIATE", "agent resolved conflicts, committing and pushing");
+                ctx.git.commit_all("fix: merge main into branch")?;
+                ctx.git.push_with_rebase_recovery(branch)?;
+                Ok(())
+            } else {
+                step(ctx, "REMEDIATE", "agent failed to resolve conflicts");
+                Err(GardenerError::Process("agent failed to resolve merge conflicts".to_string()))
+            }
+        }
+        Err(e) => {
+            append_run_log("warn", "merge_loop.merge_from_main.failed", json!({
+                "worker_id": ctx.identity.worker_id, "pr_number": ctx.pr_number, "attempt": attempt + 1, "error": e.to_string()
+            }));
+            Err(e)
+        }
+    }
 }

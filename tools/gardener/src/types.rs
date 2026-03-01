@@ -76,6 +76,7 @@ pub enum WorkerActivityState {
     MergePolling,
     MergeFromMain,
     MergeRemediation,
+    CiFailureRemediation,
     PostMergeValidation,
     Teardown,
     Complete,
@@ -102,6 +103,7 @@ impl WorkerActivityState {
             Self::MergePolling => "merge_polling",
             Self::MergeFromMain => "merge_from_main",
             Self::MergeRemediation => "merge_remediation",
+            Self::CiFailureRemediation => "ci_failure_remediation",
             Self::PostMergeValidation => "post_merge_validation",
             Self::Teardown => "teardown",
             Self::Complete => "complete",
@@ -153,6 +155,7 @@ mod tests {
         assert_eq!(WorkerActivityState::MergePolling.as_str(), "merge_polling");
         assert_eq!(WorkerActivityState::MergeFromMain.as_str(), "merge_from_main");
         assert_eq!(WorkerActivityState::MergeRemediation.as_str(), "merge_remediation");
+        assert_eq!(WorkerActivityState::CiFailureRemediation.as_str(), "ci_failure_remediation");
         assert_eq!(WorkerActivityState::PostMergeValidation.as_str(), "post_merge_validation");
         assert_eq!(WorkerActivityState::Teardown.as_str(), "teardown");
         assert_eq!(WorkerActivityState::Complete.as_str(), "complete");

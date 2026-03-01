@@ -30,9 +30,7 @@ pub struct DoContext<'a> {
 }
 
 pub struct DoOutcome {
-    pub commit_message: String,
     pub summary: String,
-    pub files_changed: Vec<String>,
     pub prompt_version: String,
     pub context_manifest_hash: String,
 }
@@ -55,14 +53,13 @@ pub fn run_do(ctx: &DoContext<'_>) -> Result<DoOutcome, GardenerError> {
     }
 
     let doing_output = parse_doing_output(&result.payload, &ctx.identity.worker_id, ctx.task_summary);
-    let commit_message = select_commit_message(&doing_output.commit_message, &ctx.identity.worker_id, ctx.task_summary);
 
     if let Some(on_step) = ctx.on_step {
-        on_step("DO", &format!("do phase complete: {} files changed", doing_output.files_changed.len()));
+        on_step("DO", "do phase complete");
     }
 
     Ok(DoOutcome {
-        commit_message, summary: doing_output.summary, files_changed: doing_output.files_changed,
+        summary: doing_output.summary,
         prompt_version: result.prompt_version, context_manifest_hash: result.context_manifest_hash,
     })
 }
@@ -72,30 +69,7 @@ pub(crate) fn parse_doing_output(payload: &serde_json::Value, worker_id: &str, t
     append_run_log("warn", "worker.doing.payload_invalid", json!({
         "worker_id": worker_id, "task_summary": task_summary, "payload": payload,
     }));
-    DoingOutput { summary: task_summary.to_string(), files_changed: vec![], commit_message: fallback_commit_message(task_summary) }
-}
-
-pub(crate) fn select_commit_message(raw_message: &str, worker_id: &str, task_summary: &str) -> String {
-    let trimmed = raw_message.trim();
-    if is_valid_commit_message(trimmed) { return trimmed.to_string(); }
-    let fallback = fallback_commit_message(task_summary);
-    append_run_log("warn", "worker.doing.commit_message_invalid", json!({
-        "worker_id": worker_id, "provided": raw_message, "fallback": fallback,
-    }));
-    fallback
-}
-
-fn is_valid_commit_message(message: &str) -> bool {
-    if message.is_empty() { return false; }
-    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
-    let lowered = normalized.to_ascii_lowercase();
-    if matches!(lowered.as_str(),
-        "feat: implement task changes" | "implement task changes" | "wip" | "update code" | "misc changes" | "fix stuff"
-    ) { return false; }
-    match normalized.split_once(':') {
-        Some((kind, desc)) => !kind.trim().is_empty() && !desc.trim().is_empty(),
-        None => false,
-    }
+    DoingOutput { summary: task_summary.to_string() }
 }
 
 pub(crate) fn fallback_commit_message(task_summary: &str) -> String {

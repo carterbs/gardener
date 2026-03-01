@@ -173,29 +173,78 @@ pub fn step(binary_name: &str, label: &str, detail: &str) {
 }
 
 pub fn print_agent_event(binary_name: &str, event: &AgentEvent) {
-    let content = event.payload.get("message").and_then(|m| m.get("content"));
-    let Some(blocks) = content.and_then(|c| c.as_array()) else { return };
-    for block in blocks {
-        match block.get("type").and_then(|t| t.as_str()) {
-            Some("tool_use") => {
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
-                let command = block.get("input").and_then(|i| i.get("command")).and_then(|c| c.as_str());
-                if let Some(cmd) = command {
-                    eprintln!("[{binary_name} {}] AGENT: {name}: {cmd}", ts());
-                } else {
-                    eprintln!("[{binary_name} {}] AGENT: {name}", ts());
-                }
-            }
-            Some("tool_result") => {}
-            Some("text") => {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() && trimmed.len() < 200 {
-                        eprintln!("[{binary_name} {}] AGENT: {trimmed}", ts());
+    let payload = &event.payload;
+    let event_type = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match event_type {
+        // Streaming text delta — agent is writing/thinking
+        "content_block_delta" => {
+            if let Some(text) = payload
+                .get("delta")
+                .and_then(|d| d.get("text"))
+                .and_then(|t| t.as_str())
+            {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    for line in trimmed.lines() {
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            eprintln!("[{binary_name} {}] AGENT: {line}", ts());
+                        }
                     }
                 }
             }
-            _ => {}
         }
+        // Standalone tool_use — agent is calling a tool
+        "tool_use" => {
+            let name = payload.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+            let command = payload
+                .get("input")
+                .and_then(|i| i.get("command"))
+                .and_then(|c| c.as_str());
+            if let Some(cmd) = command {
+                eprintln!("[{binary_name} {}] TOOL: {name}: {cmd}", ts());
+            } else {
+                eprintln!("[{binary_name} {}] TOOL: {name}", ts());
+            }
+        }
+        // Final result — contains message.content blocks with full output
+        "result" => {
+            let content = payload.get("message").and_then(|m| m.get("content"));
+            let Some(blocks) = content.and_then(|c| c.as_array()) else {
+                return;
+            };
+            for block in blocks {
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("tool_use") => {
+                        let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                        let command = block
+                            .get("input")
+                            .and_then(|i| i.get("command"))
+                            .and_then(|c| c.as_str());
+                        if let Some(cmd) = command {
+                            eprintln!("[{binary_name} {}] TOOL: {name}: {cmd}", ts());
+                        } else {
+                            eprintln!("[{binary_name} {}] TOOL: {name}", ts());
+                        }
+                    }
+                    Some("text") => {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                for line in trimmed.lines().take(20) {
+                                    let line = line.trim();
+                                    if !line.is_empty() {
+                                        eprintln!("[{binary_name} {}] AGENT: {line}", ts());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }

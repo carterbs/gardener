@@ -44,11 +44,31 @@ pub enum MergeStateStatus {
     Unknown,
 }
 
+impl MergeStateStatus {
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Self::Unknown | Self::Blocked)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrMergeability {
     pub mergeable: Mergeable,
     #[serde(rename = "mergeStateStatus")]
     pub merge_state_status: MergeStateStatus,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PrCheck {
+    bucket: String,
+    link: String,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FailedCheck {
+    pub name: String,
+    pub link: String,
+    pub log_snippet: String,
 }
 
 pub struct GhClient<'a> {
@@ -114,12 +134,11 @@ impl<'a> GhClient<'a> {
             )));
         }
         let url = out.stdout.trim().to_string();
-        let number = parse_pr_number_from_url(&url)
-            .ok_or_else(|| {
-                GardenerError::Process(format!(
-                    "could not parse PR number from gh pr create output: {url}"
-                ))
-            })?;
+        let number = parse_pr_number_from_url(&url).ok_or_else(|| {
+            GardenerError::Process(format!(
+                "could not parse PR number from gh pr create output: {url}"
+            ))
+        })?;
         append_run_log(
             "info",
             "gh.pr.create.succeeded",
@@ -230,7 +249,7 @@ impl<'a> GhClient<'a> {
     ) -> Result<PrMergeability, GardenerError> {
         for attempt in 0..max_polls {
             let m = self.check_mergeability(pr_number)?;
-            if m.mergeable != Mergeable::Unknown {
+            if m.mergeable != Mergeable::Unknown && !m.merge_state_status.is_pending() {
                 return Ok(m);
             }
             append_run_log(
@@ -318,6 +337,71 @@ impl<'a> GhClient<'a> {
         )))
     }
 
+    pub fn fetch_failed_checks(&self, pr_number: u64) -> Result<Vec<FailedCheck>, GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.checks.fetch_failed",
+            json!({ "cwd": self.cwd.display().to_string(), "pr_number": pr_number }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "checks".to_string(),
+                pr_number.to_string(),
+                "--json".to_string(),
+                "name,state,bucket,link".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        // exit code 8 = checks still pending, not a failure
+        if out.exit_code != 0 && out.exit_code != 8 {
+            return Err(GardenerError::Process(format!(
+                "gh pr checks failed: {}",
+                out.stderr
+            )));
+        }
+        if out.exit_code == 8 || out.stdout.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        let checks: Vec<PrCheck> = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid gh pr checks json: {e}")))?;
+
+        let mut failed = Vec::new();
+        for check in checks.iter().filter(|c| c.bucket == "fail") {
+            let log_snippet = if let Some(run_id) = extract_run_id_from_link(&check.link) {
+                let log_out = self.runner.run(ProcessRequest {
+                    program: "gh".to_string(),
+                    args: vec![
+                        "run".to_string(),
+                        "view".to_string(),
+                        run_id.to_string(),
+                        "--log-failed".to_string(),
+                    ],
+                    cwd: Some(self.cwd.clone()),
+                })?;
+                if log_out.exit_code == 0 {
+                    truncate_log(&log_out.stdout, 150)
+                } else {
+                    format!("(failed to fetch logs: {})", log_out.stderr.trim())
+                }
+            } else {
+                "(could not extract run ID from link)".to_string()
+            };
+            failed.push(FailedCheck {
+                name: check.name.clone(),
+                link: check.link.clone(),
+                log_snippet,
+            });
+        }
+        append_run_log(
+            "info",
+            "gh.pr.checks.fetch_failed.done",
+            json!({ "pr_number": pr_number, "failed_count": failed.len() }),
+        );
+        Ok(failed)
+    }
+
     pub fn verify_merged_and_validated(
         &self,
         git: &GitClient,
@@ -403,6 +487,24 @@ pub fn upgrade_unmerged_collision_priority(existing: Priority) -> Priority {
     }
 }
 
+fn extract_run_id_from_link(link: &str) -> Option<u64> {
+    // link format: https://github.com/owner/repo/actions/runs/{run_id}/job/{job_id}
+    let runs_idx = link.find("/runs/")?;
+    let after_runs = &link[runs_idx + "/runs/".len()..];
+    let id_str = after_runs.split('/').next()?;
+    id_str.parse::<u64>().ok()
+}
+
+fn truncate_log(log: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = log.lines().collect();
+    if lines.len() <= max_lines {
+        log.to_string()
+    } else {
+        let start = lines.len() - max_lines;
+        lines[start..].join("\n")
+    }
+}
+
 fn parse_pr_number_from_url(url: &str) -> Option<u64> {
     url.rsplit('/').next().and_then(|s| s.parse::<u64>().ok())
 }
@@ -450,8 +552,10 @@ pub fn generate_pr_title_body(
 
     let title = commits
         .first()
-        .map(|(subj, _)| subj.to_string())
-        .unwrap_or_else(|| task_summary.to_string());
+        .map(|(subj, _)| *subj)
+        .filter(|subj| is_good_pr_title(subj))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| pr_title_from_summary(task_summary));
 
     let body = if commits.len() == 1 {
         let (_, desc) = commits[0];
@@ -479,11 +583,52 @@ pub fn generate_pr_title_body(
     Ok((title, body))
 }
 
+fn is_good_pr_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = normalized.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "feat: implement task changes"
+            | "implement task changes"
+            | "wip"
+            | "update code"
+            | "misc changes"
+            | "fix stuff"
+    ) {
+        return false;
+    }
+    // Must be conventional-commit format: <type>: <description>
+    match normalized.split_once(':') {
+        Some((kind, desc)) => !kind.trim().is_empty() && !desc.trim().is_empty(),
+        None => false,
+    }
+}
+
+fn pr_title_from_summary(task_summary: &str) -> String {
+    let first_line = task_summary.lines().next().unwrap_or_default().trim();
+    if first_line.is_empty() {
+        return "feat: implement requested changes".to_string();
+    }
+    let normalized = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_desc_len = 72usize.saturating_sub("feat: ".len());
+    let desc: String = normalized.chars().take(max_desc_len).collect();
+    if desc.is_empty() {
+        "feat: implement requested changes".to_string()
+    } else {
+        format!("feat: {desc}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, Mergeable,
-        MergeStateStatus, PrMergeability,
+        extract_run_id_from_link, generate_pr_title_body, is_good_pr_title, pr_title_from_summary,
+        truncate_log, upgrade_unmerged_collision_priority, GhClient, MergeStateStatus, Mergeable,
+        PrMergeability,
     };
     use crate::git::{GitClient, MergeMode};
     use crate::priority::Priority;
@@ -788,5 +933,161 @@ mod tests {
         let m: PrMergeability = serde_json::from_str(json).expect("parse");
         assert_eq!(m.mergeable, Mergeable::Mergeable);
         assert_eq!(m.merge_state_status, MergeStateStatus::Behind);
+    }
+
+    #[test]
+    fn is_good_pr_title_accepts_conventional_commit() {
+        assert!(is_good_pr_title("feat: add widget"));
+        assert!(is_good_pr_title("fix(worker): correct state transition"));
+        assert!(is_good_pr_title("chore: bump dependencies"));
+    }
+
+    #[test]
+    fn is_good_pr_title_rejects_blocklisted_and_invalid() {
+        assert!(!is_good_pr_title(""));
+        assert!(!is_good_pr_title("feat: implement task changes"));
+        assert!(!is_good_pr_title("wip"));
+        assert!(!is_good_pr_title("update code"));
+        assert!(!is_good_pr_title("misc changes"));
+        assert!(!is_good_pr_title("fix stuff"));
+        // Non-conventional-commit format
+        assert!(!is_good_pr_title("just some words"));
+    }
+
+    #[test]
+    fn pr_title_from_summary_truncates_to_72_chars() {
+        let long = "a]".repeat(50);
+        let title = pr_title_from_summary(&long);
+        assert!(title.len() <= 72);
+        assert!(title.starts_with("feat: "));
+    }
+
+    #[test]
+    fn is_pending_returns_true_for_unknown_and_blocked() {
+        assert!(MergeStateStatus::Unknown.is_pending());
+        assert!(MergeStateStatus::Blocked.is_pending());
+    }
+
+    #[test]
+    fn is_pending_returns_false_for_terminal_states() {
+        assert!(!MergeStateStatus::Clean.is_pending());
+        assert!(!MergeStateStatus::Dirty.is_pending());
+        assert!(!MergeStateStatus::Unstable.is_pending());
+        assert!(!MergeStateStatus::Behind.is_pending());
+        assert!(!MergeStateStatus::HasHooks.is_pending());
+    }
+
+    #[test]
+    fn poll_mergeability_waits_through_blocked() {
+        let runner = FakeProcessRunner::default();
+        // First poll: Mergeable but Blocked (CI still running)
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"BLOCKED"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        // Second poll: resolved to Clean
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let m = gh
+            .poll_mergeability(5, 3, Duration::from_millis(1))
+            .expect("ok");
+        assert_eq!(m.merge_state_status, MergeStateStatus::Clean);
+        // Should have made 2 calls (waited through Blocked)
+        assert_eq!(runner.spawned().len(), 2);
+    }
+
+    #[test]
+    fn extract_run_id_from_link_parses_github_actions_url() {
+        let link = "https://github.com/owner/repo/actions/runs/12345/job/67890";
+        assert_eq!(extract_run_id_from_link(link), Some(12345));
+    }
+
+    #[test]
+    fn extract_run_id_from_link_returns_none_for_bad_url() {
+        assert_eq!(extract_run_id_from_link("https://example.com"), None);
+        assert_eq!(extract_run_id_from_link(""), None);
+    }
+
+    #[test]
+    fn truncate_log_keeps_last_n_lines() {
+        let log = (1..=200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let truncated = truncate_log(&log, 150);
+        let lines: Vec<&str> = truncated.lines().collect();
+        assert_eq!(lines.len(), 150);
+        assert_eq!(lines[0], "line 51");
+        assert_eq!(lines[149], "line 200");
+    }
+
+    #[test]
+    fn truncate_log_returns_full_when_under_limit() {
+        let log = "line 1\nline 2\nline 3";
+        assert_eq!(truncate_log(log, 150), log);
+    }
+
+    #[test]
+    fn fetch_failed_checks_handles_no_failures() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"[{"bucket":"pass","link":"https://github.com/o/r/actions/runs/1/job/2","name":"test","state":"SUCCESS"}]"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let failed = gh.fetch_failed_checks(42).expect("ok");
+        assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn fetch_failed_checks_returns_failed_with_logs() {
+        let runner = FakeProcessRunner::default();
+        // gh pr checks response
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"[{"bucket":"fail","link":"https://github.com/o/r/actions/runs/999/job/1","name":"validate","state":"FAILURE"}]"#.to_string(),
+            stderr: String::new(),
+        }));
+        // gh run view --log-failed response
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "error: test failed\nassert_eq failed".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let failed = gh.fetch_failed_checks(42).expect("ok");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "validate");
+        assert!(failed[0].log_snippet.contains("error: test failed"));
+    }
+
+    #[test]
+    fn fetch_failed_checks_handles_pending_exit_code_8() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 8,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let failed = gh.fetch_failed_checks(42).expect("ok");
+        assert!(failed.is_empty());
+    }
+
+    #[test]
+    fn generate_pr_title_body_falls_back_when_first_commit_is_generic() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: implement task changes\n\0".to_string(),
+            stderr: String::new(),
+        }));
+        let (title, _body) =
+            generate_pr_title_body(&runner, std::path::Path::new("/repo"), "enable clippy lint")
+                .expect("ok");
+        assert_eq!(title, "feat: enable clippy lint");
     }
 }

@@ -447,7 +447,7 @@ fn recent_worker_state_events_nolock(
             .get("event_type")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if event_type != "agent.turn.started" {
+        if event_type != "worker.activity.state_changed" {
             continue;
         }
 
@@ -787,15 +787,15 @@ mod tests {
     }
 
     #[test]
-    fn recent_worker_state_events_collects_turn_start_events() {
+    fn recent_worker_state_events_collects_activity_state_events() {
         let _guard = with_test_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("run.jsonl");
         init_run_logger_nolock(&path, dir.path());
         let log_lines = [
-            r#"{"event_type":"agent.turn.started","payload":{"worker_id":"worker-1","state":"understand"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-1","state":"understand"}}"#,
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"ToolCall","command":"ignored"}}"#,
-            r#"{"event_type":"agent.turn.started","payload":{"worker_id":"worker-2","state":"gitting"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-2","state":"merge_lock_waiting"}}"#,
         ];
         std::fs::write(&path, log_lines.join("\n")).expect("seed log");
 
@@ -806,7 +806,7 @@ mod tests {
         assert_eq!(lines[0].2, "understand");
         assert_eq!(lines[1].0, 2);
         assert_eq!(lines[1].1, "worker-2");
-        assert_eq!(lines[1].2, "gitting");
+        assert_eq!(lines[1].2, "merge_lock_waiting");
         clear_run_logger_nolock();
     }
 

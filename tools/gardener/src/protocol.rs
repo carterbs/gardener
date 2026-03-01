@@ -65,6 +65,8 @@ pub fn map_claude_event(raw: &Value) -> AgentEvent {
     let event_type = raw.get("type").and_then(Value::as_str).unwrap_or("unknown");
 
     let kind = match event_type {
+        "system" => AgentEventKind::ThreadStarted,
+        "assistant" => AgentEventKind::Message,
         "message_start" => AgentEventKind::ThreadStarted,
         "content_block_start" => AgentEventKind::TurnStarted,
         "content_block_delta" => AgentEventKind::Message,
@@ -112,7 +114,7 @@ pub fn parse_json_records(input: &str) -> Result<Vec<Value>, GardenerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_codex_event, parse_jsonl, parse_json_records, AgentEventKind};
+    use super::{map_codex_event, parse_json_records, parse_jsonl, AgentEventKind};
     use serde_json::json;
 
     #[test]
@@ -131,8 +133,10 @@ mod tests {
 
     #[test]
     fn parse_json_records_accepts_concatenated_events() {
-        let events = parse_json_records("{\"type\":\"thread.started\"}\n{\"type\":\"turn.completed\"}\n{\"type\":\"tool\"}")
-            .expect("should parse all");
+        let events = parse_json_records(
+            "{\"type\":\"thread.started\"}\n{\"type\":\"turn.completed\"}\n{\"type\":\"tool\"}",
+        )
+        .expect("should parse all");
         assert_eq!(events.len(), 3);
         assert_eq!(events[1]["type"], json!("turn.completed"));
     }

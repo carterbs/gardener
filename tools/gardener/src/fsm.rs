@@ -33,8 +33,6 @@ pub struct UnderstandOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoingOutput {
     pub summary: String,
-    pub files_changed: Vec<String>,
-    pub commit_message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

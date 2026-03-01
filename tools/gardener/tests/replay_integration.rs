@@ -88,12 +88,13 @@ fn write_minimal_recording(
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(path)
-        .unwrap();
+        .expect("open recording file");
     for entry in &entries {
-        let line = serde_json::to_string(entry).unwrap();
-        writeln!(f, "{line}").unwrap();
+        let line = serde_json::to_string(entry).expect("test");
+        writeln!(f, "{line}").expect("test");
     }
 }
 
@@ -101,7 +102,7 @@ fn write_minimal_recording(
 
 #[test]
 fn replay_process_runner_returns_recorded_responses() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = NamedTempFile::new().expect("test");
     write_minimal_recording(
         tmp.path(),
         "worker-1",
@@ -122,7 +123,7 @@ fn replay_process_runner_returns_recorded_responses() {
         vec![],
     );
 
-    let recording = SessionRecording::load(tmp.path()).unwrap();
+    let recording = SessionRecording::load(tmp.path()).expect("test");
     let runner = ReplayProcessRunner::from_recording(&recording, "worker-1");
 
     use gardener::runtime::ProcessRunner;
@@ -132,8 +133,8 @@ fn replay_process_runner_returns_recorded_responses() {
             args: vec!["hello".to_string()],
             cwd: None,
         })
-        .unwrap();
-    let out = runner.wait(handle).unwrap();
+        .expect("test");
+    let out = runner.wait(handle).expect("test");
     assert_eq!(out.stdout, "hello");
     assert_eq!(out.exit_code, 0);
 
@@ -144,13 +145,13 @@ fn replay_process_runner_returns_recorded_responses() {
             args: vec!["bye".to_string()],
             cwd: None,
         })
-        .unwrap();
+        .expect("test");
     assert!(runner.wait(handle2).is_err(), "expected empty queue error");
 }
 
 #[test]
 fn replay_agent_adapter_returns_recorded_step_results() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = NamedTempFile::new().expect("test");
     let turn = AgentTurnRecord {
         seq: 1,
         timestamp_ns: 0,
@@ -162,7 +163,7 @@ fn replay_agent_adapter_returns_recorded_step_results() {
     };
     write_minimal_recording(tmp.path(), "worker-1", "task-1", vec![], vec![turn]);
 
-    let recording = SessionRecording::load(tmp.path()).unwrap();
+    let recording = SessionRecording::load(tmp.path()).expect("test");
     let adapter = ReplayAgentAdapter::from_recording(&recording, "worker-1", AgentKind::Claude);
 
     use gardener::agent::AgentAdapter;
@@ -187,7 +188,7 @@ fn replay_agent_adapter_returns_recorded_step_results() {
             "prompt",
             None,
         )
-        .unwrap();
+        .expect("test");
 
     assert_eq!(step.terminal, AgentTerminal::Success);
     assert_eq!(step.payload["task_type"], "task");
@@ -227,8 +228,8 @@ fn large_agent_output_hash_compressed() {
 #[test]
 fn recording_round_trip_process_calls() {
     // Record a few subprocess calls with RecordingProcessRunner
-    let tmp = NamedTempFile::new().unwrap();
-    init_session_recorder(tmp.path()).unwrap();
+    let tmp = NamedTempFile::new().expect("test");
+    init_session_recorder(tmp.path()).expect("test");
 
     emit_record(RecordEntry::SessionStart(SessionStartRecord {
         run_id: "rt-run".to_string(),
@@ -270,23 +271,23 @@ fn recording_round_trip_process_calls() {
             args: vec![],
             cwd: None,
         })
-        .unwrap();
+        .expect("test");
     let h2 = recording_runner
         .spawn(ProcessRequest {
             program: "cmd2".to_string(),
             args: vec!["--flag".to_string()],
             cwd: None,
         })
-        .unwrap();
-    let out1 = recording_runner.wait(h1).unwrap();
-    let out2 = recording_runner.wait(h2).unwrap();
+        .expect("test");
+    let out1 = recording_runner.wait(h1).expect("test");
+    let out2 = recording_runner.wait(h2).expect("test");
     assert_eq!(out1.stdout, "alpha");
     assert_eq!(out2.exit_code, 42);
 
     clear_session_recorder();
 
     // Load recording and verify structure
-    let recording = SessionRecording::load(tmp.path()).unwrap();
+    let recording = SessionRecording::load(tmp.path()).expect("test");
     assert_eq!(recording.header.run_id, "rt-run");
     assert_eq!(recording.backlog.len(), 1);
     assert_eq!(recording.backlog[0].task_id, "task-rt");
@@ -306,16 +307,16 @@ fn recording_round_trip_process_calls() {
             args: vec![],
             cwd: None,
         })
-        .unwrap();
+        .expect("test");
     let rh2 = replayer
         .spawn(ProcessRequest {
             program: "cmd2".to_string(),
             args: vec!["--flag".to_string()],
             cwd: None,
         })
-        .unwrap();
-    let rout1 = replayer.wait(rh1).unwrap();
-    let rout2 = replayer.wait(rh2).unwrap();
+        .expect("test");
+    let rout1 = replayer.wait(rh1).expect("test");
+    let rout2 = replayer.wait(rh2).expect("test");
     assert_eq!(rout1.stdout, "alpha");
     assert_eq!(rout2.exit_code, 42);
 
@@ -326,7 +327,7 @@ fn recording_round_trip_process_calls() {
 
 #[test]
 fn replay_catches_request_mismatch() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = NamedTempFile::new().expect("test");
     // Write recording with "cmd-original"
     write_minimal_recording(
         tmp.path(),
@@ -348,7 +349,7 @@ fn replay_catches_request_mismatch() {
         vec![],
     );
 
-    let recording = SessionRecording::load(tmp.path()).unwrap();
+    let recording = SessionRecording::load(tmp.path()).expect("test");
     let runner = ReplayProcessRunner::from_recording(&recording, "worker-x");
 
     use gardener::runtime::ProcessRunner;
@@ -359,8 +360,8 @@ fn replay_catches_request_mismatch() {
             args: vec![],
             cwd: None,
         })
-        .unwrap();
-    let _ = runner.wait(handle).unwrap();
+        .expect("test");
+    let _ = runner.wait(handle).expect("test");
 
     let mismatches = runner.verify_request_alignment();
     assert_eq!(mismatches.len(), 1, "should detect one mismatch");
@@ -370,7 +371,7 @@ fn replay_catches_request_mismatch() {
 
 #[test]
 fn session_recording_worker_ids() {
-    let tmp = NamedTempFile::new().unwrap();
+    let tmp = NamedTempFile::new().expect("test");
     // Write recording with entries from two workers
     use std::io::Write;
     let entries = vec![
@@ -408,12 +409,12 @@ fn session_recording_worker_ids() {
             diagnostic_count: 0,
         }),
     ];
-    let mut f = std::fs::File::create(tmp.path()).unwrap();
+    let mut f = std::fs::File::create(tmp.path()).expect("test");
     for e in &entries {
-        writeln!(f, "{}", serde_json::to_string(e).unwrap()).unwrap();
+        writeln!(f, "{}", serde_json::to_string(e).expect("test")).expect("test");
     }
 
-    let recording = SessionRecording::load(tmp.path()).unwrap();
+    let recording = SessionRecording::load(tmp.path()).expect("test");
     let ids = recording.worker_ids();
     assert_eq!(ids.len(), 2, "should find 2 unique worker IDs");
     assert!(ids.contains(&"w1".to_string()));
@@ -456,8 +457,8 @@ fn recording_overhead_acceptable() {
                 args: vec![],
                 cwd: None,
             })
-            .unwrap();
-        let _ = recording_runner.wait(h).unwrap();
+            .expect("test");
+        let _ = recording_runner.wait(h).expect("test");
     }
     // If we get here without panicking, the overhead is acceptable.
     // The real benchmark would compare timing, but that's env-dependent.

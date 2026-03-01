@@ -434,7 +434,7 @@ fn workspace_clippy_lint_configuration_enables_needless_borrowed_reference_warn(
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_needless_option_as_deref_warn() {
+fn workspace_clippy_lint_configuration_enables_needless_option_as_deref_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -453,7 +453,7 @@ fn workspace_clippy_lint_configuration_enables_needless_option_as_deref_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.needless_option_as_deref is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]

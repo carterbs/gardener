@@ -416,7 +416,7 @@ pub fn run_worker_pool_fsm(
                     "Error: worker {worker_id} task {task_id}: {reason}"
                 ))?;
             }
-            wait_for_quit(terminal, Some(&shutdown_message))?;
+            wait_for_quit(terminal, Some(&reason))?;
             return Ok(completed);
         }
         if quit_requested {
@@ -906,6 +906,7 @@ mod tests {
     use super::{hotkey_action, run_worker_pool_fsm, wait_for_quit, INTERRUPT_SENTINEL_KEY};
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
+    use crate::errors::GardenerError;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
     use crate::priority::Priority;
     use crate::runtime::{
@@ -956,6 +957,50 @@ mod tests {
             process_cwd: dir.path().to_path_buf(),
             repo_root: Some(dir.path().to_path_buf()),
             working_dir: dir.path().to_path_buf(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct DelayedCopyTerminal {
+        terminal: FakeTerminal,
+    }
+
+    impl DelayedCopyTerminal {
+        fn new(terminal: FakeTerminal) -> Self {
+            Self { terminal }
+        }
+
+        fn enqueue_keys<I: IntoIterator<Item = char>>(&self, keys: I) {
+            self.terminal.enqueue_keys(keys);
+        }
+
+        fn clipboard_copies(&self) -> Vec<String> {
+            self.terminal.clipboard_copies()
+        }
+    }
+
+    impl crate::runtime::Terminal for DelayedCopyTerminal {
+        fn stdin_is_tty(&self) -> bool {
+            self.terminal.stdin_is_tty()
+        }
+
+        fn write_line(&self, line: &str) -> Result<(), GardenerError> {
+            self.terminal.write_line(line)
+        }
+
+        fn draw(&self, frame: &str) -> Result<(), GardenerError> {
+            self.terminal.draw(frame)
+        }
+
+        fn copy_to_clipboard(&self, text: &str) -> Result<(), GardenerError> {
+            self.terminal.copy_to_clipboard(text)
+        }
+
+        fn poll_key(&self, timeout_ms: u64) -> Result<Option<char>, GardenerError> {
+            if timeout_ms < 100 {
+                return Ok(None);
+            }
+            self.terminal.poll_key(timeout_ms)
         }
     }
 
@@ -1179,6 +1224,45 @@ mod tests {
 
         let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
             .expect("run fsm");
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_copies_failure_reason_not_full_prompt() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "failure task");
+
+        let mut cfg = AppConfig::default();
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let process_runner = FakeProcessRunner::default();
+        process_runner.push_response(Err(GardenerError::Process(
+            "simulated command failure".to_string(),
+        )));
+
+        let terminal = DelayedCopyTerminal::new(FakeTerminal::new(true));
+        terminal.enqueue_keys(['c']);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(process_runner),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+
+        assert_eq!(
+            terminal.clipboard_copies(),
+            vec!["process error: simulated command failure".to_string()]
+        );
     }
 
     #[test]

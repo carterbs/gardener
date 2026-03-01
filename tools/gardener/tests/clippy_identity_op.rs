@@ -49,6 +49,29 @@ fn workspace_clippy_lint_configuration_enforces_manual_clamp_warn() {
 }
 
 #[test]
+fn workspace_clippy_lint_configuration_enables_manual_find_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("manual_find"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.manual_find is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
 fn workspace_clippy_lint_configuration_enables_manual_memcpy_warn() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
@@ -141,6 +164,52 @@ fn workspace_clippy_lint_configuration_enables_manual_map_warn() {
 }
 
 #[test]
+fn workspace_clippy_lint_configuration_enables_redundant_static_lifetimes_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("redundant_static_lifetimes"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.redundant_static_lifetimes is not configured");
+
+    assert_eq!(level, "deny");
+}
+
+#[test]
+fn workspace_clippy_lint_configuration_enables_manual_try_fold_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("manual_try_fold"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.manual_try_fold is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
 fn workspace_clippy_lint_configuration_enables_manual_range_contains_warn() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
@@ -205,6 +274,98 @@ fn workspace_clippy_lint_configuration_enables_manual_ok_or_warn() {
         .and_then(|clippy| clippy.get("manual_ok_or"))
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_ok_or is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
+fn workspace_clippy_lint_configuration_enables_manual_retain_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("manual_retain"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.manual_retain is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
+fn workspace_clippy_lint_configuration_enables_manual_strip_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("manual_strip"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.manual_strip is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
+fn workspace_clippy_lint_configuration_enables_needless_borrowed_reference_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("needless_borrowed_reference"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.needless_borrowed_reference is not configured");
+
+    assert_eq!(level, "warn");
+}
+
+#[test]
+fn workspace_clippy_lint_configuration_enables_needless_late_init_warn() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("needless_late_init"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.needless_late_init is not configured");
 
     assert_eq!(level, "warn");
 }

@@ -1,4 +1,3 @@
-use crate::config::GitOutputMode;
 use crate::errors::GardenerError;
 use crate::types::WorkerState;
 use std::collections::BTreeMap;
@@ -21,30 +20,10 @@ impl PromptRegistry {
         templates.insert(WorkerState::Understand, understand_template());
         templates.insert(WorkerState::Planning, planning_template());
         templates.insert(WorkerState::Doing, doing_template());
-        templates.insert(WorkerState::Gitting, gitting_template_pr());
         templates.insert(WorkerState::Reviewing, reviewing_template());
-        templates.insert(WorkerState::Merging, merging_template_local());
+        templates.insert(WorkerState::Merging, merge_remediation_template());
 
         Self { templates }
-    }
-
-    pub fn with_gitting_mode(mut self, mode: &GitOutputMode) -> Self {
-        let template = match mode {
-            GitOutputMode::CommitOnly => gitting_template_commit_only(),
-            GitOutputMode::Push => gitting_template_push(),
-            GitOutputMode::PullRequest => gitting_template_pr(),
-        };
-        self.templates.insert(WorkerState::Gitting, template);
-        self
-    }
-
-    pub fn with_merging_mode(mut self, mode: &GitOutputMode) -> Self {
-        let template = match mode {
-            GitOutputMode::PullRequest => merging_template_pr(),
-            GitOutputMode::CommitOnly | GitOutputMode::Push => merging_template_local(),
-        };
-        self.templates.insert(WorkerState::Merging, template);
-        self
     }
 
     pub fn with_retry_rebase(mut self, attempt_count: i64) -> Self {
@@ -52,12 +31,6 @@ impl PromptRegistry {
             self.templates
                 .insert(WorkerState::Doing, doing_template_retry_rebase());
         }
-        self
-    }
-
-    pub fn with_conflict_resolution(mut self) -> Self {
-        self.templates
-            .insert(WorkerState::Merging, conflict_resolution_template());
         self
     }
 
@@ -196,52 +169,6 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
-fn gitting_template_commit_only() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-gitting-commit-only",
-        body: r#"Intent: stage and commit all changes on the current branch.
-Run: git add -A then git commit with a clear, conventional-commit style message describing what was implemented.
-After commit, run git status --porcelain and ensure the output is clean before returning.
-
-If commit fails, assume the failure may be from pre-commit hooks:
-1) inspect the hook error output in detail,
-2) fix the reported files,
-3) run git add -A again,
-4) rerun git commit.
-Do not use --no-verify.
-
-If the tree is still dirty after one recovery attempt, stop and report a failure reason in the envelope metadata so downstream can surface it.
-Guardrails: do not push to remote; do not modify source files.
-Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
-pr_number must be a non-zero positive integer; pr_url must be an empty string.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
-fn gitting_template_push() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-gitting-push",
-        body: r#"Intent: stage and commit all changes, then push the branch to origin.
-Run: git add -A, then git commit with a clear conventional-commit style message, then git push origin <branch>.
-Guardrails: do not open a pull request; do not modify source files.
-Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
-pr_number must be 0 and pr_url must be an empty string.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
-fn gitting_template_pr() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-gitting-pr",
-        body: r#"Intent: stage and commit all changes, push the branch, then open a GitHub pull request.
-Run: git add -A, then git commit with a clear conventional-commit style message, then git push origin <branch>, then gh pr create.
-The PR title and body must be written thoughtfully: summarize what was built and why, call out any non-obvious decisions, and make it easy for a reviewer to understand the scope of the change. Do not use the task ID as the title. Write like a human engineer who cares about the reviewer's time.
-Guardrails: do not modify source files; only git and gh operations are permitted.
-Output schema must be JSON envelope with payload fields: branch, pr_number, pr_url.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
 fn reviewing_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-reviewing",
@@ -276,109 +203,57 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
     }
 }
 
-fn merging_template_local() -> PromptTemplate {
+fn merge_remediation_template() -> PromptTemplate {
     PromptTemplate {
-        version: "v2-merging-local",
-        body: r#"Intent: merge the current worktree branch into main on the local repo and report the resulting merge commit SHA.
+        version: "v1-merge-remediation",
+        body: r#"Intent: fix this PR so it can be merged. The automated merge attempt failed.
 
-## Steps
+## Context
 
-1. Confirm the current branch and worktree state with git status.
-2. From the repo root (not the worktree), run: git merge --no-ff <current-branch>
-3. If merge conflicts occur, resolve them carefully:
-   - Read workspace lint configuration in the root Cargo.toml ([workspace.lints.clippy]) for canonical lint rules.
-   - Keep behavior from both sides where appropriate — do not silently drop changes.
-   - After resolving, run: ./scripts/run-validate.sh to verify the resolution is correct.
-   - If validation fails, fix the conflict resolution and re-run validation before continuing.
-4. Capture the resulting commit SHA with: git rev-parse HEAD
-5. Verify the merge completed cleanly with git status.
+The deterministic merge pipeline tried to merge your PR and failed. Information about the failure is provided in [knowledge_context].
 
-## On failure
+## Possible fixes
 
-If the merge cannot complete (unresolvable conflicts, dirty worktree, validation fails after resolution, etc.), set merged=false, merge_sha="" and explain the failure in the summary.
+- If there are merge conflicts: resolve the conflicting files so the code is correct.
+- If CI is failing: identify and fix the test/lint/build failures.
+- If the branch is behind main: rebase onto origin/main and resolve any resulting conflicts.
 
-Guardrails: do not push; do not open a pull request; do not modify source files beyond conflict resolution; include the deterministic merge_sha when merged=true.
-Output schema must be JSON envelope with payload fields: merged, merge_sha.
+## Rules
+
+- Do NOT run git push, git commit, gh pr merge, or any other git/gh commands that move code.
+- Just fix the source files. Your changes will be committed and pushed automatically by the pipeline.
+- Run the project's validation command to verify your fixes before returning.
+
+Guardrails: do not run git/gh commands; only fix source files.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
 
-fn merging_template_pr() -> PromptTemplate {
+#[allow(dead_code)] // wired up when post-merge validation creates a fix PR
+fn post_merge_fix_template() -> PromptTemplate {
     PromptTemplate {
-        version: "v2-merging-pr",
-        body: r#"Intent: merge the open GitHub pull request for the current branch into main and report the resulting merge commit SHA.
+        version: "v1-post-merge-fix",
+        body: r#"Intent: fix a post-merge validation failure on main.
+
+The PR was merged successfully but validation on the combined main state fails.
+The validation error is provided in [knowledge_context].
 
 ## Steps
 
-1. Confirm the current branch and PR state:
-   git status && gh pr view --json state,mergeable,mergeStateStatus
+1. Investigate the validation failure output to understand what broke.
+2. Identify whether the failure is from your merged changes interacting with other recent changes on main.
+3. Fix the code so validation passes.
+4. Run the project's validation command to confirm the fix.
 
-2. If the PR has merge conflicts (mergeable == "CONFLICTING" or mergeStateStatus == "DIRTY"):
-   a. Fetch and rebase onto the latest main:
-      git fetch origin main && git rebase origin/main
-   b. If the rebase has conflicts, resolve them:
-      - Identify conflicts: git diff --name-only --diff-filter=U
-      - Resolve each file carefully — keep the intent of both sides
-      - Stage resolved files: git add <file>
-      - Continue: git rebase --continue
-      - Repeat until rebase completes cleanly
-   c. Validate the resolution: ./scripts/run-validate.sh
-      If validation fails, fix the code and re-run before proceeding.
-   d. Push the updated branch: git push --force-with-lease
+## Rules
 
-3. Check CI status: gh pr view --json statusCheckRollup
-   If any checks are failing:
-   a. Identify what is failing and why (fetch logs, read error output)
-   b. Fix the code causing the failure — lint errors, test failures, build errors, etc.
-   c. Commit the fix: git add <files> && git commit -m "<fix description>"
-   d. Push: git push
-   e. Wait for CI to re-run and pass before proceeding
-   Repeat until all required checks are green.
+- Do NOT run git push, git commit, or any other git/gh commands that move code.
+- Just fix the source files. Your changes will be committed and pushed automatically.
 
-4. Merge the PR. This repository requires squash merges:
-   gh pr merge --squash
-   If that fails with a strategy error, try: gh pr merge --merge
-
-5. Capture the merge commit SHA from the output or via:
-   gh pr view --json state,mergedAt,mergeCommit
-
-## On failure
-
-Only set merged=false if the merge truly cannot complete — for example, a semantic conflict that makes the change incorrect or a CI failure that cannot be resolved with code changes (e.g., infrastructure outage). Do not give up due to merge conflicts or fixable CI failures; resolve them above.
-
-Guardrails: resolve conflicts only through rebase (do not perform a local git merge); include the deterministic merge_sha when merged=true.
-Output schema must be JSON envelope with payload fields: merged, merge_sha.
+Guardrails: do not run git/gh commands; only fix source files.
+Output schema must be JSON envelope with payload fields: summary, files_changed.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
-    }
-}
-
-fn conflict_resolution_template() -> PromptTemplate {
-    PromptTemplate {
-        version: "v1-conflict-resolution",
-        body: r#"Intent: resolve rebase conflicts from pre-merge and choose the correct outcome.
-
-## Steps
-
-1. Identify all conflicted files:
-   - `git diff --name-only --diff-filter=U`
-2. For each conflicted file:
-   - Review upstream context: `git log main --oneline -5 -- <file>`
-   - Reconcile with `[task_packet]` and decide the task-appropriate resolution.
-3. Choose exactly one outcome:
-   - **resolved**: fix conflicts, `git add -A`, and `git rebase --continue`
-   - **skipped**: `git rebase --skip` if this branch is now redundant
-   - **unresolvable**: `git rebase --abort`
-4. If resolved, run `./scripts/run-validate.sh` and ensure it passes.
-5. Return JSON with:
-   - `resolution`: `"resolved"` | `"skipped"` | `"unresolvable"`
-   - `reason`: short rationale
-   - `merge_sha`: commit SHA when `resolution == resolved`
-
-Guardrails:
-- Keep output strictly to one JSON envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>.
-- Do not modify source files beyond conflict resolution.
-
-Output schema must be JSON envelope with payload fields: resolution, reason, merge_sha."#,
     }
 }
 
@@ -407,28 +282,27 @@ mod tests {
     }
 
     #[test]
-    fn with_conflict_resolution_swaps_merging_template() {
-        let registry = PromptRegistry::v1().with_conflict_resolution();
-        let tpl = registry
-            .template_for(WorkerState::Merging)
-            .expect("template exists");
-        assert_eq!(tpl.version, "v1-conflict-resolution");
-        assert!(tpl.body.contains("resolution"));
-    }
-
-    #[test]
     fn registry_contains_v1_worker_templates() {
         let registry = PromptRegistry::v1();
         for state in [
             WorkerState::Understand,
             WorkerState::Planning,
             WorkerState::Doing,
-            WorkerState::Gitting,
             WorkerState::Reviewing,
             WorkerState::Merging,
         ] {
             let tpl = registry.template_for(state).expect("template exists");
             assert!(tpl.body.contains("<<GARDENER_JSON_START>>"));
         }
+    }
+
+    #[test]
+    fn merge_remediation_template_prohibits_git_commands() {
+        let registry = PromptRegistry::v1();
+        let tpl = registry
+            .template_for(WorkerState::Merging)
+            .expect("template exists");
+        assert_eq!(tpl.version, "v1-merge-remediation");
+        assert!(tpl.body.contains("do not run git/gh commands"));
     }
 }

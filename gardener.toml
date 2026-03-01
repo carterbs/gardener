@@ -47,7 +47,6 @@ max_turns = 12
 permissions_mode = "permissive_v1"
 worker_mode = "normal"
 test_mode = false
-git_output_mode = "pull_request"
 
 [triage]
 output_path = ".gardener/repo-intelligence.toml"

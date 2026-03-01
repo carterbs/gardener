@@ -109,31 +109,11 @@ pub struct SeedingConfig {
     pub max_turns: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum GitOutputMode {
-    CommitOnly,
-    Push,
-    #[default]
-    PullRequest,
-}
-
-impl GitOutputMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::CommitOnly => "commit_only",
-            Self::Push => "push",
-            Self::PullRequest => "pull_request",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionConfig {
     pub permissions_mode: String,
     pub worker_mode: String,
     pub test_mode: bool,
-    pub git_output_mode: GitOutputMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,7 +173,6 @@ impl Default for AppConfig {
                 permissions_mode: "permissive_v1".to_string(),
                 worker_mode: "normal".to_string(),
                 test_mode: false,
-                git_output_mode: GitOutputMode::PullRequest,
             },
             triage: TriageConfig {
                 output_path: ".gardener/repo-intelligence.toml".to_string(),
@@ -286,7 +265,6 @@ struct PartialExecutionConfig {
     permissions_mode: Option<String>,
     worker_mode: Option<String>,
     test_mode: Option<bool>,
-    git_output_mode: Option<GitOutputMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -509,9 +487,6 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = execution.test_mode {
             cfg.execution.test_mode = value;
-        }
-        if let Some(value) = execution.git_output_mode {
-            cfg.execution.git_output_mode = value;
         }
     }
 

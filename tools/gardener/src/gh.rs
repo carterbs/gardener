@@ -6,6 +6,7 @@ use crate::runtime::{ProcessRequest, ProcessRunner};
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrView {
@@ -21,6 +22,33 @@ pub struct PrView {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MergeCommit {
     pub oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Mergeable {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum MergeStateStatus {
+    Clean,
+    Dirty,
+    Unstable,
+    Blocked,
+    Behind,
+    HasHooks,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrMergeability {
+    pub mergeable: Mergeable,
+    #[serde(rename = "mergeStateStatus")]
+    pub merge_state_status: MergeStateStatus,
 }
 
 pub struct GhClient<'a> {
@@ -144,6 +172,139 @@ impl<'a> GhClient<'a> {
         Ok(pr)
     }
 
+    pub fn check_mergeability(&self, pr_number: u64) -> Result<PrMergeability, GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.mergeability.check",
+            json!({ "cwd": self.cwd.display().to_string(), "pr_number": pr_number }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "view".to_string(),
+                pr_number.to_string(),
+                "--json".to_string(),
+                "mergeable,mergeStateStatus".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            return Err(GardenerError::Process(format!(
+                "gh pr view (mergeability) failed: {}",
+                out.stderr
+            )));
+        }
+        let m: PrMergeability = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid mergeability json: {e}")))?;
+        append_run_log(
+            "info",
+            "gh.pr.mergeability.result",
+            json!({
+                "pr_number": pr_number,
+                "mergeable": format!("{:?}", m.mergeable),
+                "merge_state_status": format!("{:?}", m.merge_state_status)
+            }),
+        );
+        Ok(m)
+    }
+
+    pub fn poll_mergeability(
+        &self,
+        pr_number: u64,
+        max_polls: u32,
+        interval: Duration,
+    ) -> Result<PrMergeability, GardenerError> {
+        for attempt in 0..max_polls {
+            let m = self.check_mergeability(pr_number)?;
+            if m.mergeable != Mergeable::Unknown {
+                return Ok(m);
+            }
+            append_run_log(
+                "debug",
+                "gh.pr.mergeability.poll_retry",
+                json!({
+                    "pr_number": pr_number,
+                    "attempt": attempt + 1,
+                    "max_polls": max_polls
+                }),
+            );
+            if attempt + 1 < max_polls {
+                std::thread::sleep(interval);
+            }
+        }
+        // Return the last Unknown result rather than erroring
+        self.check_mergeability(pr_number)
+    }
+
+    pub fn merge_pr(&self, pr_number: u64) -> Result<(), GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.merge.started",
+            json!({ "cwd": self.cwd.display().to_string(), "pr_number": pr_number }),
+        );
+        // Try squash first
+        let squash = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "merge".to_string(),
+                pr_number.to_string(),
+                "--squash".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if squash.exit_code == 0 {
+            append_run_log(
+                "info",
+                "gh.pr.merge.succeeded",
+                json!({ "pr_number": pr_number, "strategy": "squash" }),
+            );
+            return Ok(());
+        }
+        append_run_log(
+            "warn",
+            "gh.pr.merge.squash_failed",
+            json!({
+                "pr_number": pr_number,
+                "exit_code": squash.exit_code,
+                "stderr": squash.stderr
+            }),
+        );
+        // Fallback to regular merge
+        let merge = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "merge".to_string(),
+                pr_number.to_string(),
+                "--merge".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if merge.exit_code == 0 {
+            append_run_log(
+                "info",
+                "gh.pr.merge.succeeded",
+                json!({ "pr_number": pr_number, "strategy": "merge" }),
+            );
+            return Ok(());
+        }
+        append_run_log(
+            "error",
+            "gh.pr.merge.failed",
+            json!({
+                "pr_number": pr_number,
+                "exit_code": merge.exit_code,
+                "stderr": merge.stderr
+            }),
+        );
+        Err(GardenerError::Process(format!(
+            "gh pr merge failed (squash then merge): {}",
+            merge.stderr
+        )))
+    }
+
     pub fn verify_merged_and_validated(
         &self,
         git: &GitClient,
@@ -229,12 +390,60 @@ pub fn upgrade_unmerged_collision_priority(existing: Priority) -> Priority {
     }
 }
 
+pub fn generate_pr_title_body(
+    runner: &dyn ProcessRunner,
+    cwd: &Path,
+    task_summary: &str,
+) -> Result<(String, String), GardenerError> {
+    let log_out = runner.run(ProcessRequest {
+        program: "git".to_string(),
+        args: vec![
+            "log".to_string(),
+            "main..HEAD".to_string(),
+            "--format=%s".to_string(),
+        ],
+        cwd: Some(cwd.to_path_buf()),
+    })?;
+    let subjects: Vec<&str> = log_out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    let title = if subjects.len() == 1 {
+        subjects[0].to_string()
+    } else {
+        task_summary.to_string()
+    };
+
+    let commit_log = if subjects.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n## Commits\n\n{}",
+            subjects
+                .iter()
+                .map(|s| format!("- {s}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
+
+    let body = format!("{task_summary}{commit_log}");
+    Ok((title, body))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{upgrade_unmerged_collision_priority, GhClient};
+    use super::{
+        generate_pr_title_body, upgrade_unmerged_collision_priority, GhClient, Mergeable,
+        MergeStateStatus, PrMergeability,
+    };
     use crate::git::{GitClient, MergeMode};
     use crate::priority::Priority;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
+    use std::time::Duration;
 
     #[test]
     fn merged_verification_requires_merged_state_and_validation() {
@@ -347,5 +556,147 @@ mod tests {
             .verify_merged_and_validated(&git, 123, MergeMode::MergeToMain, "npm run validate")
             .expect_err("must fail");
         assert!(format!("{err}").contains("merged pr missing merge commit"));
+    }
+
+    #[test]
+    fn check_mergeability_parses_clean_status() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let m = gh.check_mergeability(42).expect("ok");
+        assert_eq!(m.mergeable, Mergeable::Mergeable);
+        assert_eq!(m.merge_state_status, MergeStateStatus::Clean);
+    }
+
+    #[test]
+    fn check_mergeability_parses_conflicting_status() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"CONFLICTING","mergeStateStatus":"DIRTY"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let m = gh.check_mergeability(10).expect("ok");
+        assert_eq!(m.mergeable, Mergeable::Conflicting);
+        assert_eq!(m.merge_state_status, MergeStateStatus::Dirty);
+    }
+
+    #[test]
+    fn poll_mergeability_resolves_after_unknown() {
+        let runner = FakeProcessRunner::default();
+        // First poll: unknown
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"UNKNOWN","mergeStateStatus":"UNKNOWN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        // Second poll: resolved
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let m = gh
+            .poll_mergeability(5, 3, Duration::from_millis(1))
+            .expect("ok");
+        assert_eq!(m.mergeable, Mergeable::Mergeable);
+    }
+
+    #[test]
+    fn merge_pr_squash_succeeds() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        gh.merge_pr(42).expect("ok");
+        let spawned = runner.spawned();
+        assert!(spawned[0].args.contains(&"--squash".to_string()));
+    }
+
+    #[test]
+    fn merge_pr_falls_back_to_merge_on_squash_failure() {
+        let runner = FakeProcessRunner::default();
+        // Squash fails
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "squash not allowed".to_string(),
+        }));
+        // Merge succeeds
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        gh.merge_pr(42).expect("ok");
+        let spawned = runner.spawned();
+        assert!(spawned[1].args.contains(&"--merge".to_string()));
+    }
+
+    #[test]
+    fn merge_pr_fails_when_both_strategies_fail() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "squash fail".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "merge fail".to_string(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh.merge_pr(42).expect_err("must fail");
+        assert!(format!("{err}").contains("gh pr merge failed"));
+    }
+
+    #[test]
+    fn generate_pr_title_body_single_commit() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: add widget\n".to_string(),
+            stderr: String::new(),
+        }));
+        let (title, body) =
+            generate_pr_title_body(&runner, std::path::Path::new("/repo"), "add a widget")
+                .expect("ok");
+        assert_eq!(title, "feat: add widget");
+        assert!(body.contains("add a widget"));
+    }
+
+    #[test]
+    fn generate_pr_title_body_multiple_commits() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: first\nfix: second\n".to_string(),
+            stderr: String::new(),
+        }));
+        let (title, body) =
+            generate_pr_title_body(&runner, std::path::Path::new("/repo"), "my task summary")
+                .expect("ok");
+        assert_eq!(title, "my task summary");
+        assert!(body.contains("- feat: first"));
+        assert!(body.contains("- fix: second"));
+    }
+
+    #[test]
+    fn mergeability_enum_deserializes_from_gh_json() {
+        let json = r#"{"mergeable":"MERGEABLE","mergeStateStatus":"BEHIND"}"#;
+        let m: PrMergeability = serde_json::from_str(json).expect("parse");
+        assert_eq!(m.mergeable, Mergeable::Mergeable);
+        assert_eq!(m.merge_state_status, MergeStateStatus::Behind);
     }
 }

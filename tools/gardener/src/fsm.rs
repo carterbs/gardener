@@ -37,13 +37,6 @@ pub struct DoingOutput {
     pub commit_message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GittingOutput {
-    pub branch: String,
-    pub pr_number: u64,
-    pub pr_url: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReviewVerdict {

@@ -5,6 +5,7 @@ pub mod backlog_snapshot;
 pub mod backlog_store;
 pub mod config;
 pub mod errors;
+pub mod friction_analysis;
 pub mod fsm;
 pub mod gh;
 pub mod git;
@@ -593,6 +594,7 @@ fn draw_boot_stage(
         active: 0,
         failed: 0,
         unresolved: 0,
+        merge_pending: 0,
         p0: 0,
         p1: 0,
         p2: 0,

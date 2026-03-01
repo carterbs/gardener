@@ -24,7 +24,6 @@ use serde::Serialize;
 use serde_json::json;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +53,28 @@ pub struct WorkerRunSummary {
     pub failure_reason: Option<String>,
 }
 
+/// All the state needed by the merge worker to run the merge-and-teardown
+/// phase independently of the doing worker that produced it.
+pub struct MergeRequest {
+    pub slot_idx: usize,
+    pub task_id: String,
+    pub task_summary: String,
+    pub attempt_count: i64,
+    pub worker_id: String,
+    pub session_id: String,
+    pub worktree_path: PathBuf,
+    pub branch: String,
+    pub pr_number: u64,
+    pub logs: Vec<WorkerLogEvent>,
+}
+
+/// Discriminates between a task that completed in-worker and one that needs
+/// to be handed off to the merge worker.
+pub enum WorkerOutcome {
+    Completed(WorkerRunSummary),
+    HandoffToMerge(MergeRequest),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct ReviewArtifact {
     task_id: String,
@@ -61,12 +82,6 @@ struct ReviewArtifact {
     verdict: String,
     suggestions: Vec<String>,
     recorded_at_unix_ms: i64,
-}
-
-static MERGE_PHASE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn merge_phase_lock() -> &'static Mutex<()> {
-    MERGE_PHASE_LOCK.get_or_init(|| Mutex::new(()))
 }
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
@@ -111,44 +126,18 @@ fn emit_worker_activity_state_with(
     append_run_log("info", "worker.activity.state_changed", payload);
 }
 
-struct MergePhaseLockGuard<'a> {
-    _guard: MutexGuard<'a, ()>,
-    worker_id: String,
-    task_id: String,
-}
 
-impl<'a> MergePhaseLockGuard<'a> {
-    fn new(guard: MutexGuard<'a, ()>, worker_id: &str, task_id: &str) -> Self {
-        Self {
-            _guard: guard,
-            worker_id: worker_id.to_string(),
-            task_id: task_id.to_string(),
-        }
-    }
-}
-
-impl Drop for MergePhaseLockGuard<'_> {
-    fn drop(&mut self) {
-        append_run_log(
-            "info",
-            "worker.merging.lock.released",
-            json!({
-                "worker_id": self.worker_id,
-                "task_id": self.task_id
-            }),
-        );
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 pub fn execute_task(
     cfg: &AppConfig,
     process_runner: &dyn ProcessRunner,
     scope: &RuntimeScope,
+    slot_idx: usize,
     worker_id: &str,
     task_id: &str,
     task_summary: &str,
     attempt_count: i64,
-) -> Result<WorkerRunSummary, GardenerError> {
+) -> Result<WorkerOutcome, GardenerError> {
     append_run_log(
         "debug",
         "worker.execute.dispatch",
@@ -160,12 +149,14 @@ pub fn execute_task(
         }),
     );
     if cfg.execution.test_mode {
-        return execute_task_simulated(cfg, worker_id, task_id, task_summary);
+        return execute_task_simulated(cfg, worker_id, task_id, task_summary)
+            .map(WorkerOutcome::Completed);
     }
     execute_task_live(
         cfg,
         process_runner,
         scope,
+        slot_idx,
         worker_id,
         task_id,
         task_summary,
@@ -173,15 +164,17 @@ pub fn execute_task(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_task_live(
     cfg: &AppConfig,
     process_runner: &dyn ProcessRunner,
     scope: &RuntimeScope,
+    slot_idx: usize,
     worker_id: &str,
     task_id: &str,
     task_summary: &str,
     attempt_count: i64,
-) -> Result<WorkerRunSummary, GardenerError> {
+) -> Result<WorkerOutcome, GardenerError> {
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Claimed);
     append_run_log(
         "info",
@@ -248,14 +241,14 @@ fn execute_task_live(
                 "state": "understand"
             }),
         );
-        return Ok(WorkerRunSummary {
+        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
             worker_id: identity.worker_id,
             session_id: identity.session.session_id,
             final_state: WorkerState::Failed,
             logs,
             teardown: None,
             failure_reason,
-        });
+        }));
     }
     let understand = parse_understand_output(&understand_result.payload, worker_id, task_summary);
     append_run_log(
@@ -301,14 +294,14 @@ fn execute_task_live(
                     "state": "planning"
                 }),
             );
-            return Ok(WorkerRunSummary {
+            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
                 worker_id: identity.worker_id,
                 session_id: identity.session.session_id,
                 final_state: WorkerState::Failed,
                 logs,
                 teardown: None,
                 failure_reason,
-            });
+            }));
         }
         fsm.transition(WorkerState::Doing)?;
     }
@@ -341,14 +334,14 @@ fn execute_task_live(
                 "state": "doing"
             }),
         );
-        return Ok(WorkerRunSummary {
+        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
             worker_id: identity.worker_id,
             session_id: identity.session.session_id,
             final_state: WorkerState::Failed,
             logs,
             teardown: None,
             failure_reason,
-        });
+        }));
     }
     let doing_output = parse_doing_output(&doing_result.payload, worker_id, task_summary);
     let commit_message =
@@ -364,14 +357,14 @@ fn execute_task_live(
                 "task_id": task_id
             }),
         );
-        return Ok(WorkerRunSummary {
+        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
             worker_id: identity.worker_id,
             session_id: identity.session.session_id,
             final_state: WorkerState::Parked,
             logs,
             teardown: None,
             failure_reason: None,
-        });
+        }));
     }
 
     // --- Deterministic Commit ---
@@ -422,7 +415,7 @@ fn execute_task_live(
                             "error": push_err.to_string()
                         }),
                     );
-                    return Ok(WorkerRunSummary {
+                    return Ok(WorkerOutcome::Completed(WorkerRunSummary {
                         worker_id: identity.worker_id,
                         session_id: identity.session.session_id,
                         final_state: WorkerState::Failed,
@@ -432,7 +425,7 @@ fn execute_task_live(
                             "gitting failed after {} remediation attempts: {}",
                             MAX_GITTING_REMEDIATION, push_err
                         )),
-                    });
+                    }));
                 }
 
                 append_run_log(
@@ -479,14 +472,14 @@ fn execute_task_live(
                 if remediation_result.terminal == AgentTerminal::Failure {
                     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
                     let failure_reason = extract_failure_reason(&remediation_result.payload);
-                    return Ok(WorkerRunSummary {
+                    return Ok(WorkerOutcome::Completed(WorkerRunSummary {
                         worker_id: identity.worker_id,
                         session_id: identity.session.session_id,
                         final_state: WorkerState::Failed,
                         logs,
                         teardown: None,
                         failure_reason,
-                    });
+                    }));
                 }
 
                 git.commit_all("fix: gitting remediation")?;
@@ -539,14 +532,14 @@ fn execute_task_live(
                 "state": "reviewing"
             }),
         );
-        return Ok(WorkerRunSummary {
+        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
             worker_id: identity.worker_id,
             session_id: identity.session.session_id,
             final_state: WorkerState::Failed,
             logs,
             teardown: None,
             failure_reason,
-        });
+        }));
     }
 
     let reviewing_output = parse_reviewing_output(&reviewing_result.payload);
@@ -576,14 +569,14 @@ fn execute_task_live(
                 }),
             );
             fsm.on_review_loop_back()?;
-            return Ok(WorkerRunSummary {
+            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
                 worker_id: identity.worker_id,
                 session_id: identity.session.session_id,
                 final_state: fsm.state,
                 logs,
                 teardown: None,
                 failure_reason: None,
-            });
+            }));
         }
         fsm.on_review_loop_back()?;
         fsm.transition(WorkerState::Doing)?;
@@ -604,54 +597,63 @@ fn execute_task_live(
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging);
     }
 
-    // --- Deterministic Merging ---
+    // --- Hand off to merge worker ---
     append_run_log(
         "info",
-        "worker.merging.lock.waiting",
+        "worker.handoff_to_merge",
         json!({
             "worker_id": identity.worker_id,
             "task_id": task_id,
-            "branch": branch
+            "branch": branch,
+            "pr_number": pr_number
         }),
     );
-    emit_worker_activity_state_with(
-        worker_id,
-        task_id,
-        WorkerActivityState::MergeLockWaiting,
-        json!({
-            "branch": branch
-        }),
-    );
-    let merge_guard = merge_phase_lock()
-        .lock()
-        .map_err(|_| GardenerError::Process("worker merging lock poisoned".to_string()))?;
-    let _merge_guard = MergePhaseLockGuard::new(merge_guard, worker_id, task_id);
-    append_run_log(
-        "info",
-        "worker.merging.lock.acquired",
-        json!({
-            "worker_id": identity.worker_id,
-            "task_id": task_id,
-            "branch": branch
-        }),
-    );
-    emit_worker_activity_state_with(
-        worker_id,
-        task_id,
-        WorkerActivityState::MergeLockHeld,
-        json!({
-            "branch": branch
-        }),
-    );
+    Ok(WorkerOutcome::HandoffToMerge(MergeRequest {
+        slot_idx,
+        task_id: task_id.to_string(),
+        task_summary: task_summary.to_string(),
+        attempt_count,
+        worker_id: identity.worker_id,
+        session_id: identity.session.session_id,
+        worktree_path,
+        branch,
+        pr_number,
+        logs,
+    }))
+}
 
-    let pr = pr_number;
+/// Execute the merge-and-teardown phase for a task that passed review.
+/// Called by the merge worker thread — no mutex needed since the merge worker
+/// is single-threaded by construction.
+pub fn execute_merge_phase(
+    req: &MergeRequest,
+    cfg: &AppConfig,
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+) -> Result<WorkerRunSummary, GardenerError> {
+    let worker_id = &req.worker_id;
+    let task_id = &req.task_id;
+
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging);
+
+    let factory = AdapterFactory::with_defaults();
+    let registry = PromptRegistry::v1();
+    let mut learning_loop = LearningLoop::default();
+    let identity = WorkerIdentity::new(worker_id);
+    let gh = GhClient::new(process_runner, &req.worktree_path);
+    let git = GitClient::new(process_runner, &req.worktree_path);
+    let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
+    let worktree_client = WorktreeClient::new(process_runner, repo_root);
+
+    let pr = req.pr_number;
+    let branch = &req.branch;
+    let mut logs = req.logs.clone();
     let mut merge_output = MergingOutput {
         merged: false,
         merge_sha: None,
     };
 
     for attempt in 0..MAX_MERGE_REMEDIATION {
-        // Wait for GitHub to compute mergeability
         emit_worker_activity_state_with(
             worker_id,
             task_id,
@@ -675,7 +677,7 @@ fn execute_task_live(
                     "info",
                     "worker.merging.deterministic.succeeded",
                     json!({
-                        "worker_id": identity.worker_id,
+                        "worker_id": worker_id,
                         "pr_number": pr,
                         "attempt": attempt + 1
                     }),
@@ -689,15 +691,15 @@ fn execute_task_live(
                         "error",
                         "worker.merging.deterministic.exhausted",
                         json!({
-                            "worker_id": identity.worker_id,
+                            "worker_id": worker_id,
                             "pr_number": pr,
                             "attempts": MAX_MERGE_REMEDIATION,
                             "error": merge_err.to_string()
                         }),
                     );
                     return Ok(WorkerRunSummary {
-                        worker_id: identity.worker_id,
-                        session_id: identity.session.session_id,
+                        worker_id: req.worker_id.clone(),
+                        session_id: req.session_id.clone(),
                         final_state: WorkerState::Failed,
                         logs,
                         teardown: None,
@@ -724,12 +726,12 @@ fn execute_task_live(
                             "info",
                             "worker.merging.merge_from_main.clean",
                             json!({
-                                "worker_id": identity.worker_id,
+                                "worker_id": worker_id,
                                 "pr_number": pr,
                                 "attempt": attempt + 1
                             }),
                         );
-                        git.push_with_rebase_recovery(&branch)?;
+                        git.push_with_rebase_recovery(branch)?;
                         continue;
                     }
                     Ok(RebaseResult::Conflict { stderr }) => {
@@ -737,7 +739,7 @@ fn execute_task_live(
                             "warn",
                             "worker.merging.merge_from_main.conflict",
                             json!({
-                                "worker_id": identity.worker_id,
+                                "worker_id": worker_id,
                                 "pr_number": pr,
                                 "attempt": attempt + 1,
                                 "stderr": stderr
@@ -753,48 +755,45 @@ fn execute_task_live(
                             cfg,
                             process_runner,
                             scope,
-                            worktree_path: &worktree_path,
+                            worktree_path: &req.worktree_path,
                             factory: &factory,
                             registry: &registry,
                             learning_loop: &learning_loop,
                             identity: &identity,
                             state: WorkerState::Merging,
-                            task_summary,
-                            attempt_count,
+                            task_summary: &req.task_summary,
+                            attempt_count: req.attempt_count,
                             prompt_override: Some(&conflict_tpl),
                             on_event: None,
                         })?;
                         logs.push(log_event_from(&conflict_result, WorkerState::Merging));
                         if conflict_result.terminal != AgentTerminal::Failure {
-                            // Agent resolved — commit completes the merge, push, retry
                             git.commit_all("fix: merge main into branch")?;
-                            git.push_with_rebase_recovery(&branch)?;
+                            git.push_with_rebase_recovery(branch)?;
                             continue;
                         }
-                        // Agent couldn't resolve — fall through to existing remediation
                     }
                     Err(e) => {
                         append_run_log(
                             "warn",
                             "worker.merging.merge_from_main.failed",
                             json!({
-                                "worker_id": identity.worker_id,
+                                "worker_id": worker_id,
                                 "pr_number": pr,
                                 "attempt": attempt + 1,
                                 "error": e.to_string()
                             }),
                         );
-                        // Fall through to existing remediation
                     }
                 }
 
-                // --- Existing merge remediation (fallback for CI/other issues) ---
+                // --- Existing merge remediation ---
                 let status = gh.check_mergeability(pr)?;
                 append_run_log(
                     "warn",
                     "worker.merging.deterministic.remediation",
                     json!({
-                        "worker_id": identity.worker_id,
+                        "worker_id": worker_id,
                         "pr_number": pr,
                         "attempt": attempt + 1,
                         "mergeable": format!("{:?}", status.mergeable),
@@ -826,14 +825,14 @@ fn execute_task_live(
                     cfg,
                     process_runner,
                     scope,
-                    worktree_path: &worktree_path,
+                    worktree_path: &req.worktree_path,
                     factory: &factory,
                     registry: &registry,
                     learning_loop: &learning_loop,
                     identity: &identity,
                     state: WorkerState::Merging,
-                    task_summary,
-                    attempt_count,
+                    task_summary: &req.task_summary,
+                    attempt_count: req.attempt_count,
                     prompt_override: None,
                     on_event: None,
                 })?;
@@ -842,8 +841,8 @@ fn execute_task_live(
                     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
                     let failure_reason = extract_failure_reason(&remediation_result.payload);
                     return Ok(WorkerRunSummary {
-                        worker_id: identity.worker_id,
-                        session_id: identity.session.session_id,
+                        worker_id: req.worker_id.clone(),
+                        session_id: req.session_id.clone(),
                         final_state: WorkerState::Failed,
                         logs,
                         teardown: None,
@@ -851,9 +850,8 @@ fn execute_task_live(
                     });
                 }
 
-                // We commit + push for the agent
                 git.commit_all("fix: merge remediation")?;
-                git.push_with_rebase_recovery(&branch)?;
+                git.push_with_rebase_recovery(branch)?;
             }
         }
     }
@@ -861,21 +859,21 @@ fn execute_task_live(
     // --- Post-merge validation ---
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation);
     let repo_root_git = GitClient::new(process_runner, &scope.working_dir);
-    repo_root_git.pull_main().ok(); // best-effort sync
+    repo_root_git.pull_main().ok();
     if let Err(err) = repo_root_git.run_validation_command(&cfg.validation.command) {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
         append_run_log(
             "error",
             "worker.merging.post_validation_failed",
             json!({
-                "worker_id": identity.worker_id,
+                "worker_id": worker_id,
                 "task_id": task_id,
                 "error": err.to_string()
             }),
         );
         return Ok(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
+            worker_id: req.worker_id.clone(),
+            session_id: req.session_id.clone(),
             final_state: WorkerState::Failed,
             logs,
             teardown: None,
@@ -883,21 +881,88 @@ fn execute_task_live(
         });
     }
 
-    fsm.transition(WorkerState::Complete)?;
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Teardown);
+    // --- Friction analysis (best-effort, non-fatal) ---
+    {
+        let fa_run_id = crate::logging::current_run_id().unwrap_or_default();
+        let fa_log_path = crate::logging::current_run_log_path()
+            .unwrap_or_else(|| scope.working_dir.join(".gardener/otel-logs.jsonl"));
+        let fa_input = crate::friction_analysis::FrictionAnalysisInput {
+            worker_id,
+            task_id,
+            task_summary: &req.task_summary,
+            merge_sha: merge_output.merge_sha.as_deref(),
+            run_id: &fa_run_id,
+            log_path: &fa_log_path,
+        };
+        match crate::friction_analysis::run_friction_analysis(&fa_input, cfg, process_runner, scope)
+        {
+            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed { findings })
+                if !findings.is_empty() =>
+            {
+                let db_path = crate::startup::backlog_db_path(cfg, scope);
+                if let Ok(store) = crate::backlog_store::BacklogStore::open(db_path) {
+                    for task in crate::friction_analysis::findings_to_tasks(&findings) {
+                        if let Err(e) = store.upsert_task(task) {
+                            append_run_log(
+                                "warn",
+                                "friction_analysis.backlog_upsert_error",
+                                json!({
+                                    "worker_id": worker_id,
+                                    "error": e.to_string()
+                                }),
+                            );
+                        }
+                    }
+                    append_run_log(
+                        "info",
+                        "friction_analysis.tasks_created",
+                        json!({
+                            "worker_id": worker_id,
+                            "count": findings.len()
+                        }),
+                    );
+                }
+            }
+            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Skipped { reason }) => {
+                append_run_log(
+                    "debug",
+                    "friction_analysis.skipped",
+                    json!({ "worker_id": worker_id, "reason": reason }),
+                );
+            }
+            Ok(_) => {
+                append_run_log(
+                    "debug",
+                    "friction_analysis.smooth_run",
+                    json!({ "worker_id": worker_id }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "warn",
+                    "friction_analysis.error",
+                    json!({
+                        "worker_id": worker_id,
+                        "error": e.to_string()
+                    }),
+                );
+            }
+        }
+    }
 
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Teardown);
     let teardown = teardown_after_completion(
         &worktree_client,
-        &worktree_path,
+        &req.worktree_path,
         &merge_output,
         &repo_root_git,
-        &identity.worker_id,
+        worker_id,
     );
     append_run_log(
         "info",
-        "worker.task.complete",
+        "worker.merge_phase.complete",
         json!({
-            "worker_id": identity.worker_id,
+            "worker_id": worker_id,
             "task_id": task_id,
             "merge_verified": teardown.merge_verified,
             "worktree_cleaned": teardown.worktree_cleaned,
@@ -907,8 +972,8 @@ fn execute_task_live(
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Complete);
 
     Ok(WorkerRunSummary {
-        worker_id: identity.worker_id,
-        session_id: identity.session.session_id,
+        worker_id: req.worker_id.clone(),
+        session_id: req.session_id.clone(),
         final_state: WorkerState::Complete,
         logs,
         teardown: Some(teardown),
@@ -1248,7 +1313,7 @@ mod tests {
     use super::{
         execute_task, extract_failure_reason, review_artifact_path, sanitize_for_branch,
         worktree_branch_for, worktree_path_for, worktree_slug_for_task,
-        worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
+        worktree_slug_suffix, WorkerOutcome, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::do_phase::{fallback_commit_message, parse_doing_output, select_commit_message};
@@ -1268,16 +1333,21 @@ mod tests {
             repo_root: Some(PathBuf::from("/repo")),
             working_dir: PathBuf::from("/repo"),
         };
-        let summary = execute_task(
+        let outcome = execute_task(
             &cfg,
             &runner,
             &scope,
+            0,
             "worker-1",
             "task-1",
             "feature: add prompt packet",
             1,
         )
         .expect("ok");
+        let summary = match outcome {
+            WorkerOutcome::Completed(s) => s,
+            WorkerOutcome::HandoffToMerge(_) => panic!("expected Completed in test mode"),
+        };
 
         assert_eq!(summary.final_state, WorkerState::Complete);
         assert!(summary

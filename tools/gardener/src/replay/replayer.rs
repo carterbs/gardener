@@ -374,21 +374,27 @@ pub fn replay_worker_task(
         })?;
 
     let runner = ReplayProcessRunner::from_recording(recording, worker_id);
-    let summary = execute_task(
+    let outcome = execute_task(
         cfg,
         &runner,
         scope,
+        0, // slot_idx not meaningful in replay
         worker_id,
         &task.task_id,
         &task.title,
         task.attempt_count,
     )?;
 
+    let final_state = match &outcome {
+        crate::worker::WorkerOutcome::Completed(s) => s.final_state,
+        crate::worker::WorkerOutcome::HandoffToMerge(_) => crate::types::WorkerState::Merging,
+    };
+
     let mismatches = runner.verify_request_alignment();
     let passed = mismatches.is_empty();
     Ok(ReplayOutcome {
         worker_id: worker_id.to_string(),
-        final_state: summary.final_state,
+        final_state,
         request_mismatches: mismatches,
         passed,
     })

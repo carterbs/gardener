@@ -300,7 +300,10 @@ mod tests {
 
         let evidence = collect_evidence(&[domain("backlog")], dir.path());
         assert_eq!(evidence.len(), 1);
-        assert!(!evidence[0].source_files.is_empty(), "backlog_store.rs should be found");
+        assert!(
+            !evidence[0].source_files.is_empty(),
+            "backlog_store.rs should be found"
+        );
         // inline_test_files and instrumentation_files are derived via file_contains_tests /
         // file_contains_instrumentation using relative paths; they may be empty in test
         // environments where the CWD differs from the repo root, but the code paths are exercised.
@@ -316,7 +319,10 @@ mod tests {
 
         let evidence = collect_evidence(&[domain("backlog")], dir.path());
         assert_eq!(evidence.len(), 1);
-        assert!(!evidence[0].integration_tests.is_empty(), "backlog_contracts.rs should be found");
+        assert!(
+            !evidence[0].integration_tests.is_empty(),
+            "backlog_contracts.rs should be found"
+        );
     }
 
     #[test]
@@ -325,7 +331,8 @@ mod tests {
         let src = dir.path().join("src");
         fs::create_dir_all(&src).expect("create src");
         fs::write(src.join("triage.rs"), "fn f() {}").expect("write triage.rs");
-        fs::write(src.join("repo_intelligence.rs"), "fn f() {}").expect("write repo_intelligence.rs");
+        fs::write(src.join("repo_intelligence.rs"), "fn f() {}")
+            .expect("write repo_intelligence.rs");
 
         let evidence = collect_evidence(&[domain("infrastructure")], dir.path());
         assert_eq!(evidence.len(), 1);
@@ -368,6 +375,9 @@ mod tests {
 
         let evidence = collect_evidence(&[domain("agent-adapters")], dir.path());
         assert_eq!(evidence.len(), 1);
-        assert!(!evidence[0].source_files.is_empty(), "nested agent/claude.rs should be found");
+        assert!(
+            !evidence[0].source_files.is_empty(),
+            "nested agent/claude.rs should be found"
+        );
     }
 }

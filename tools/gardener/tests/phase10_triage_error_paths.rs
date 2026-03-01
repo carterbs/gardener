@@ -12,17 +12,15 @@ use gardener::types::{AgentKind, RuntimeScope};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-struct WriteFailingTerminal {
-    is_tty: bool,
-}
+struct WriteFailingTerminal;
 
 impl Terminal for WriteFailingTerminal {
     fn stdin_is_tty(&self) -> bool {
-        self.is_tty
+        true
     }
 
     fn draw(&self, _frame: &str) -> Result<(), GardenerError> {
-        Ok(())
+        Err(GardenerError::Io("terminal write failed".to_string()))
     }
 
     fn write_line(&self, _line: &str) -> Result<(), GardenerError> {
@@ -243,7 +241,7 @@ fn discovery_lost_when_interview_write_line_fails() {
         clock: Arc::new(FakeClock::default()),
         file_system: Arc::new(FakeFileSystem::default()),
         process_runner: Arc::new(process),
-        terminal: Arc::new(WriteFailingTerminal { is_tty: true }),
+        terminal: Arc::new(WriteFailingTerminal),
     };
     let cfg = default_config();
     let env = EnvMap::new();

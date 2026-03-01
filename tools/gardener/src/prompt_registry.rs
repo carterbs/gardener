@@ -225,8 +225,7 @@ The deterministic gitting pipeline failed to publish this branch. Failure detail
 - Keep changes scoped to making publication deterministic and safe.
 
 Guardrails: do not move git state; only fix source files and validate.
-Output schema must be JSON envelope with payload fields: summary, files_changed.
-Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
+When your turn is complete, stop after a concise plain-text summary of what you changed and validated."#,
     }
 }
 
@@ -315,7 +314,6 @@ mod tests {
             WorkerState::Understand,
             WorkerState::Planning,
             WorkerState::Doing,
-            WorkerState::Gitting,
             WorkerState::Reviewing,
             WorkerState::Merging,
         ] {
@@ -343,5 +341,7 @@ mod tests {
         assert_eq!(tpl.version, "v1-gitting-remediation");
         assert!(tpl.body.contains("Do NOT run git push, git commit"));
         assert!(tpl.body.contains("git status"));
+        assert!(!tpl.body.contains("<<GARDENER_JSON_START>>"));
+        assert!(!tpl.body.contains("Output schema must be JSON envelope"));
     }
 }

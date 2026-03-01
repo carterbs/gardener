@@ -74,6 +74,7 @@ fn planning_template() -> PromptTemplate {
         body: r#"Intent: produce a detailed execution plan before implementation.
 
 Your job is ONLY to plan — do NOT edit source files, create files, or implement anything.
+The task has already been selected. Do NOT re-evaluate scope or pick alternative work.
 
 ## Steps
 
@@ -87,9 +88,15 @@ Your job is ONLY to plan — do NOT edit source files, create files, or implemen
 
 The plan must be detailed enough that the implementation step can execute it without needing to re-research the codebase. Include:
 - **summary**: a one-line conventional-commit style title (e.g. "feat: add backlog pruning command", "fix: correct state transition on timeout"). Use one of: feat, fix, chore, refactor, test, docs, ci, perf.
-- **milestones**: an ordered list of concrete implementation steps. Each milestone should name the files involved, describe what to build, and call out any non-obvious decisions. Keep milestones small and verifiable — a reviewer should be able to check each one independently.
+- **milestones**: an ordered list of concrete implementation steps. Each milestone must include:
+  - what to build (specific behavior, not generic verbs)
+  - exact files to create/modify
+  - tests to add/update and what they verify
+  - QA checks to run beyond "tests passed"
+  - relevant conventions/constraints that apply
 
 Do not hand-wave. "Update the handler" is not a milestone. "Add a `prune` match arm to `BacklogCommand::execute` in `src/backlog/commands.rs` that removes entries older than the configured retention window" is.
+Do not use placeholders like "update code", "fix stuff", or "improve tests". Be concrete.
 
 Guardrails: do not edit files in this state; plan only.
 Output schema must be JSON envelope with payload fields: summary, milestones.
@@ -101,6 +108,9 @@ fn doing_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-doing",
         body: r#"Intent: implement changes and verify behavior within current task scope.
+
+Execution contract: [knowledge_context] is the implementation plan context.
+Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate tasks unless a concrete contradiction blocks implementation.
 
 ## Steps
 
@@ -117,6 +127,7 @@ fn doing_template() -> PromptTemplate {
 - Do not refactor surrounding code unless the task explicitly calls for it.
 - Do not add speculative features, extra configuration, or "nice to have" improvements beyond scope.
 - Keep changes focused. Three similar lines of code are better than a premature abstraction.
+- Do not edit unrelated shared coordination/state files unless the task explicitly requires it.
 
 ## Verification (mandatory)
 
@@ -124,6 +135,8 @@ After implementation, you MUST verify your work actually works:
 - Run tests and confirm they pass.
 - If you built a new command or handler, exercise it and verify the output.
 - If you modified existing behavior, confirm the change is observable.
+- If you built tooling/linting/automation, run it and verify it catches or produces the expected result.
+- Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
@@ -147,6 +160,9 @@ If the rebase succeeds cleanly, proceed to step 2.
 
 ## Step 2 — Implement
 
+Execution contract: [knowledge_context] is the implementation plan context.
+Execute that plan faithfully. Do NOT re-plan, re-scope, or choose alternate tasks unless a concrete contradiction blocks implementation.
+
 1. Read the task description from [task_packet] and the plan context from [knowledge_context].
 2. Read relevant project conventions and existing source files before writing any code.
 3. Implement changes following the plan. Keep the patch minimal — only touch files that are necessary.
@@ -161,6 +177,8 @@ Follow existing patterns in the codebase. Do not refactor surrounding code unles
 After implementation, verify your work actually works:
 - Run tests and confirm they pass.
 - If you built a new command or handler, exercise it and verify the output.
+- If you built tooling/linting/automation, run it and verify it catches or produces the expected result.
+- Do not stop at static validation when runtime behavior can be exercised; run the thing end-to-end in scope.
 - Do not just trust that your code is correct — run it and check.
 
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
@@ -197,6 +215,7 @@ You are an independent reviewer. Your job is to ensure the implementation is cor
 
 - If the implementation meets all criteria: verdict = "approve", suggestions = [].
 - If there are issues: verdict = "needs_changes", suggestions = a list of specific, actionable findings. Each suggestion should name the file and describe what needs to change and why. Do not give vague feedback like "improve tests" — say exactly which cases are missing.
+- Fail closed: if required evidence is missing, validation was not run, or output is ambiguous, verdict must be "needs_changes" with specific missing evidence/actions.
 
 Guardrails: do not modify any files. Suggestions must be actionable and scoped to the current change.
 Output schema must be JSON envelope with payload fields: verdict, suggestions.
@@ -210,6 +229,7 @@ fn gitting_remediation_template() -> PromptTemplate {
         body: r#"Intent: remediate git publication failures after deterministic push handling failed.
 
 The deterministic gitting pipeline failed to publish this branch. Failure details are provided in [knowledge_context].
+This is remediation-only work. Keep changes minimal and strictly tied to the reported failure.
 
 ## Steps
 
@@ -225,7 +245,9 @@ The deterministic gitting pipeline failed to publish this branch. Failure detail
 - Keep changes scoped to making publication deterministic and safe.
 
 Guardrails: do not move git state; only fix source files and validate.
-When your turn is complete, stop after a concise plain-text summary of what you changed and validated."#,
+When your turn is complete, stop after two plain-text lines:
+DONE: <what you changed>
+VALIDATION: <command(s) run and pass/fail outcome>"#,
     }
 }
 
@@ -249,9 +271,11 @@ The deterministic merge pipeline tried to merge your PR and failed. Information 
 - Do NOT run git push, git commit, gh pr merge, or any other git/gh commands that move code.
 - Just fix the source files. Your changes will be committed and pushed automatically by the pipeline.
 - Run the project's validation command to verify your fixes before returning.
+- Keep edits minimal and mergeability-focused; avoid unrelated refactors.
 
 Guardrails: do not run git/gh commands; only fix source files.
 Output schema must be JSON envelope with payload fields: summary, files_changed.
+summary must include what was fixed and the validation command/result.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }

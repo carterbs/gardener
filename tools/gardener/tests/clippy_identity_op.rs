@@ -49,7 +49,7 @@ fn workspace_clippy_lint_configuration_enforces_expect_used_deny() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enforces_manual_clamp_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_clamp_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -68,7 +68,7 @@ fn workspace_clippy_lint_configuration_enforces_manual_clamp_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_clamp is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]

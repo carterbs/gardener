@@ -8,6 +8,7 @@ fi
 CUSTOM_LINTERS=(
   "scripts/check-skills-sync.sh"
   "scripts/check-no-warnings.sh"
+  "scripts/check-migrations-wired.sh"
 )
 
 for linter in "${CUSTOM_LINTERS[@]}"; do

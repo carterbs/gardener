@@ -20,6 +20,7 @@ import select
 import subprocess
 import sys
 import time
+from typing import Dict, List, Optional, Tuple
 
 
 def default_path(name: str) -> str:
@@ -27,7 +28,7 @@ def default_path(name: str) -> str:
     return os.path.join(home, ".gardener", name)
 
 
-def resolve_args() -> tuple[str, str]:
+def resolve_args() -> Tuple[str, str]:
     args = sys.argv[1:]
     db = default_path("backlog.sqlite")
     log = default_path("audit.log")
@@ -48,14 +49,14 @@ def ts() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def write_log(log_path: str, lines: list[str]) -> None:
+def write_log(log_path: str, lines: List[str]) -> None:
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     with open(log_path, "a") as f:
         for line in lines:
             f.write(f"{ts()} {line}\n")
 
 
-def stat_db(db_path: str) -> dict:
+def stat_db(db_path: str) -> Dict:
     try:
         st = os.stat(db_path)
         return {"exists": True, "size_bytes": st.st_size, "mtime": st.st_mtime}
@@ -76,7 +77,7 @@ def lsof_snapshot(dir_path: str) -> str:
         return f"(lsof failed: {e})"
 
 
-def open_db_fd(db_path: str) -> int | None:
+def open_db_fd(db_path: str) -> Optional[int]:
     try:
         return os.open(db_path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError:
@@ -116,7 +117,7 @@ def run(db_path: str, log_path: str) -> None:
     dir_fd = os.open(dir_path, os.O_RDONLY)
     file_fd = open_db_fd(db_path)
 
-    events: list[select.kevent] = [build_kevent(dir_fd, DIR_FFLAGS)]
+    events: List[select.kevent] = [build_kevent(dir_fd, DIR_FFLAGS)]
     if file_fd is not None:
         events.append(build_kevent(file_fd, FILE_FFLAGS))
 
@@ -139,7 +140,7 @@ def run(db_path: str, log_path: str) -> None:
         if triggered:
             curr = stat_db(db_path)
             if curr["size_bytes"] != prev["size_bytes"] or curr["exists"] != prev["exists"]:
-                entry: list[str] = [
+                entry: List[str] = [
                     f"[CHANGE] size={curr['size_bytes']} (was {prev['size_bytes']}) "
                     f"exists={curr['exists']} mtime={curr['mtime']}",
                 ]

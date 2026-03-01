@@ -22,20 +22,30 @@ use crate::tui::{
     WorkerRow,
 };
 use crate::types::RuntimeScope;
-use crate::worker::execute_task;
+use crate::worker::{execute_merge_phase, execute_task, MergeRequest, WorkerOutcome};
 use serde_json::json;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const WORKER_POOL_ID: &str = "worker_pool";
+const MERGE_WORKER_ID: &str = "merge-worker";
 const WORKER_COMMAND_HISTORY_LIMIT: usize = 32;
 const COPY_SHORTCUT_KEY: char = 'c';
 
-type WorkerResultMessage = (
-    usize,
-    String,
-    Result<crate::worker::WorkerRunSummary, GardenerError>,
-);
+/// Messages on the result channel. Doing workers send `DoingResult`, the merge
+/// worker sends `MergeResult`.
+enum PoolResultMessage {
+    DoingResult {
+        slot_idx: usize,
+        task_id: String,
+        result: Result<WorkerOutcome, GardenerError>,
+    },
+    MergeResult {
+        task_id: String,
+        worker_id: String,
+        result: Result<crate::worker::WorkerRunSummary, GardenerError>,
+    },
+}
 
 struct HotkeyState<'a> {
     runtime: &'a ProductionRuntime,
@@ -93,6 +103,24 @@ pub fn run_worker_pool_fsm(
             worker
         })
         .collect::<Vec<_>>();
+    // The merge worker TUI row is always the last row.
+    let merge_row_idx = workers.len();
+    workers.push({
+        let mut row = WorkerRow {
+            worker_id: MERGE_WORKER_ID.to_string(),
+            state: "idle".to_string(),
+            task_title: "idle".to_string(),
+            tool_line: "waiting for merge".to_string(),
+            breadcrumb: "idle".to_string(),
+            last_heartbeat_secs: 0,
+            session_age_secs: 0,
+            lease_held: false,
+            session_missing: false,
+            command_details: Vec::new(),
+        };
+        append_worker_command(&mut row, "waiting for merge");
+        row
+    });
     let mut last_worker_command_line = current_log_line_count();
     let mut last_worker_state_line = last_worker_command_line;
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
@@ -177,17 +205,24 @@ pub fn run_worker_pool_fsm(
             break;
         }
 
-        let mut active = claimed.len();
+        let mut active_doing = claimed.len();
+        let mut active_merging = 0usize;
         let mut shutdown_error: Option<(String, String, String)> = None;
         let mut quit_requested = false;
         let (tx, rx): (
-            mpsc::Sender<WorkerResultMessage>,
-            mpsc::Receiver<WorkerResultMessage>,
+            mpsc::Sender<PoolResultMessage>,
+            mpsc::Receiver<PoolResultMessage>,
+        ) = mpsc::channel();
+        // Merge queue: doing workers send MergeRequests here.
+        let (merge_tx, merge_rx): (
+            mpsc::Sender<MergeRequest>,
+            mpsc::Receiver<MergeRequest>,
         ) = mpsc::channel();
         let runtime_scope = scope.clone();
         let mut last_dashboard_refresh = Instant::now();
 
         std::thread::scope(|scope_guard| -> Result<(), GardenerError> {
+            // Spawn doing workers.
             for (idx, task) in claimed {
                 let tx = tx.clone();
                 let worker_id = workers[idx].worker_id.clone();
@@ -203,15 +238,50 @@ pub fn run_worker_pool_fsm(
                         &cfg,
                         process_runner.as_ref(),
                         &worker_scope,
+                        idx,
                         &worker_id,
                         &task_id,
                         &task_summary,
                         attempt_count,
                     );
-                    let _ = tx.send((idx, task_id, result));
+                    let _ = tx.send(PoolResultMessage::DoingResult {
+                        slot_idx: idx,
+                        task_id,
+                        result,
+                    });
                 });
             }
-            while active > 0 {
+
+            // Spawn the merge worker thread.
+            {
+                let merge_result_tx = tx.clone();
+                let merge_cfg = cfg.clone();
+                let merge_runner = runtime.process_runner.clone();
+                let merge_scope = runtime_scope.clone();
+                scope_guard.spawn(move || {
+                    while let Ok(req) = merge_rx.recv() {
+                        let task_id = req.task_id.clone();
+                        let worker_id = req.worker_id.clone();
+                        let result = execute_merge_phase(
+                            &req,
+                            &merge_cfg,
+                            merge_runner.as_ref(),
+                            &merge_scope,
+                        );
+                        let _ = merge_result_tx.send(PoolResultMessage::MergeResult {
+                            task_id,
+                            worker_id,
+                            result,
+                        });
+                    }
+                });
+            }
+            // Keep merge_tx alive so the pool can send MergeRequests when
+            // doing workers return HandoffToMerge. Drop it when all doing
+            // workers finish so the merge worker sees channel-close and exits.
+            let mut merge_tx = Some(merge_tx);
+
+            while active_doing > 0 || active_merging > 0 {
                 if handle_hotkeys(&mut HotkeyState {
                     runtime,
                     scope: &runtime_scope,
@@ -227,17 +297,17 @@ pub fn run_worker_pool_fsm(
                 }
 
                 match rx.recv_timeout(Duration::from_millis(25)) {
-                    Ok((idx, task_id, turn_result)) => {
-                        active = active.saturating_sub(1);
+                    Ok(PoolResultMessage::DoingResult { slot_idx: idx, task_id, result }) => {
+                        active_doing = active_doing.saturating_sub(1);
                         let worker_id = workers[idx].worker_id.clone();
-                        if shutdown_error.is_none() {
-                            let summary = match turn_result {
-                                Ok(summary) => summary,
+                        if shutdown_error.is_some() {
+                            request_interrupt();
+                        } else {
+                            match result {
                                 Err(GardenerError::Process(message))
                                     if message.contains("user interrupt requested") =>
                                 {
                                     quit_requested = true;
-                                    continue;
                                 }
                                 Err(err) => {
                                     let msg = err.to_string();
@@ -250,134 +320,185 @@ pub fn run_worker_pool_fsm(
                                             "error": msg
                                         }),
                                     );
-                                    shutdown_error = Some((worker_id, task_id, msg));
+                                    shutdown_error = Some((worker_id.clone(), task_id.clone(), msg));
                                     request_interrupt();
-                                    continue;
                                 }
-                            };
-                            for event in summary.logs {
-                                workers[idx].state = event.state.as_str().to_string();
-                                let prompt = format!("prompt {}", event.prompt_version);
-                                workers[idx].tool_line = prompt.clone();
-                                append_worker_command(&mut workers[idx], &prompt);
-                                workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
-                                let now = Instant::now();
-                                last_activity_pulse[idx] = now;
-                                workers[idx].last_heartbeat_secs = 0;
-                                workers[idx].session_age_secs = 0;
-                                append_run_log(
-                                    "debug",
-                                    "worker.turn.state",
-                                    json!({
-                                        "worker_id": worker_id,
-                                        "state": event.state.as_str(),
-                                        "prompt_version": event.prompt_version,
-                                        "context_manifest_hash": event.context_manifest_hash
-                                    }),
-                                );
-                                refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
-                                render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
-                            }
-
-                            if summary.final_state == crate::types::WorkerState::Complete {
-                                let _ = store.mark_complete(&task_id, &worker_id)?;
-                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                    seq: next_seq(),
-                                    timestamp_ns: timestamp_ns(),
-                                    worker_id: worker_id.clone(),
-                                    operation: "mark_complete".to_string(),
-                                    task_id: task_id.clone(),
-                                    result_ok: true,
-                                }));
-                                completed = completed.saturating_add(1);
-                                workers[idx].state = "complete".to_string();
-                                let completed_message = format!("completed {}", task_id);
-                                workers[idx].tool_line = completed_message.clone();
-                                append_worker_command(&mut workers[idx], &completed_message);
-                                workers[idx].breadcrumb = "complete".to_string();
-                                workers[idx].lease_held = false;
-                                append_run_log(
-                                    "info",
-                                    "worker.task.completed",
-                                    json!({
-                                        "worker_id": worker_id,
-                                        "task_id": task_id,
-                                        "completed": completed
-                                    }),
-                                );
-                            } else {
-                                workers[idx].state = "failed".to_string();
-                                let failed_message =
-                                    if let Some(reason) = summary.failure_reason.clone() {
-                                        if reason.is_empty() {
-                                            format!("failed {}", task_id)
-                                        } else {
-                                            let truncated =
-                                                reason.chars().take(150).collect::<String>();
-                                            if reason.chars().count() > 150 {
-                                                format!("failed: {}…", truncated)
-                                            } else {
-                                                format!("failed: {}", reason)
-                                            }
-                                        }
-                                    } else {
-                                        format!("failed {}", task_id)
-                                    };
-                                workers[idx].tool_line = failed_message.clone();
-                                append_worker_command(&mut workers[idx], &failed_message);
-                                workers[idx].breadcrumb = "failed".to_string();
-                                workers[idx].lease_held = false;
-                                append_run_log(
-                                    "error",
-                                    "worker.task.failed",
-                                    json!({
-                                        "worker_id": worker_id,
-                                        "task_id": task_id,
-                                        "final_state": summary.final_state.as_str()
-                                    }),
-                                );
-                                if summary.final_state == crate::types::WorkerState::Failed {
-                                    let unresolved = store.mark_unresolved(&task_id, &worker_id)?;
+                                Ok(WorkerOutcome::HandoffToMerge(req)) => {
+                                    // Transition backlog: in_progress → merge_pending
+                                    let _ = store.mark_merge_pending(&task_id, &worker_id);
+                                    emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                                        seq: next_seq(),
+                                        timestamp_ns: timestamp_ns(),
+                                        worker_id: worker_id.clone(),
+                                        operation: "mark_merge_pending".to_string(),
+                                        task_id: task_id.clone(),
+                                        result_ok: true,
+                                    }));
+                                    // Process doing worker logs for TUI
+                                    for event in &req.logs {
+                                        workers[idx].state = event.state.as_str().to_string();
+                                        let prompt = format!("prompt {}", event.prompt_version);
+                                        workers[idx].tool_line = prompt.clone();
+                                        append_worker_command(&mut workers[idx], &prompt);
+                                        workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                                        last_activity_pulse[idx] = Instant::now();
+                                    }
+                                    // Update doing worker TUI to show handoff
+                                    workers[idx].state = "handoff".to_string();
+                                    let handoff_msg = format!("handed off PR #{} to merge worker", req.pr_number);
+                                    workers[idx].tool_line = handoff_msg.clone();
+                                    append_worker_command(&mut workers[idx], &handoff_msg);
+                                    workers[idx].breadcrumb = "handoff>merge".to_string();
+                                    workers[idx].lease_held = false;
+                                    // Update merge worker TUI row
+                                    workers[merge_row_idx].state = "merging".to_string();
+                                    workers[merge_row_idx].task_title = format!("PR #{}", req.pr_number);
+                                    let merge_msg = format!("merging PR #{}", req.pr_number);
+                                    workers[merge_row_idx].tool_line = merge_msg.clone();
+                                    append_worker_command(&mut workers[merge_row_idx], &merge_msg);
+                                    workers[merge_row_idx].breadcrumb = "merging".to_string();
+                                    workers[merge_row_idx].lease_held = true;
+                                    last_activity_pulse[merge_row_idx] = Instant::now();
+                                    // Claim from backlog and send to merge worker
+                                    let _ = store.claim_merge_pending(MERGE_WORKER_ID);
+                                    if let Some(ref mtx) = merge_tx {
+                                        let _ = mtx.send(req);
+                                    }
+                                    active_merging = active_merging.saturating_add(1);
                                     append_run_log(
-                                        "warn",
-                                        "worker.task.unresolved",
+                                        "info",
+                                        "worker.task.handoff_to_merge",
                                         json!({
                                             "worker_id": worker_id,
                                             "task_id": task_id,
-                                            "marked_unresolved": unresolved,
-                                            "failure_reason": summary.failure_reason,
+                                            "active_merging": active_merging
                                         }),
                                     );
-                                    let unresolved_message = if unresolved {
-                                        format!("unresolved {}", task_id)
-                                    } else {
-                                        failed_message.clone()
-                                    };
-                                    workers[idx].state = "unresolved".to_string();
-                                    workers[idx].tool_line = unresolved_message.clone();
-                                    workers[idx].breadcrumb = "unresolved".to_string();
-                                    append_worker_command(&mut workers[idx], &unresolved_message);
-                                } else {
-                                    let _ = store.release_lease(&task_id, &worker_id)?;
-                                    emit_record(RecordEntry::BacklogMutation(
-                                        BacklogMutationRecord {
+                                }
+                                Ok(WorkerOutcome::Completed(summary)) => {
+                                    for event in &summary.logs {
+                                        workers[idx].state = event.state.as_str().to_string();
+                                        let prompt = format!("prompt {}", event.prompt_version);
+                                        workers[idx].tool_line = prompt.clone();
+                                        append_worker_command(&mut workers[idx], &prompt);
+                                        workers[idx].breadcrumb = format!("state>{}", event.state.as_str());
+                                        let now = Instant::now();
+                                        last_activity_pulse[idx] = now;
+                                        workers[idx].last_heartbeat_secs = 0;
+                                        workers[idx].session_age_secs = 0;
+                                        append_run_log(
+                                            "debug",
+                                            "worker.turn.state",
+                                            json!({
+                                                "worker_id": worker_id,
+                                                "state": event.state.as_str(),
+                                                "prompt_version": event.prompt_version,
+                                                "context_manifest_hash": event.context_manifest_hash
+                                            }),
+                                        );
+                                        refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
+                                        render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                                    }
+                                    if summary.final_state == crate::types::WorkerState::Complete {
+                                        let _ = store.mark_complete(&task_id, &worker_id)?;
+                                        emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
                                             seq: next_seq(),
                                             timestamp_ns: timestamp_ns(),
                                             worker_id: worker_id.clone(),
-                                            operation: "release_lease".to_string(),
+                                            operation: "mark_complete".to_string(),
                                             task_id: task_id.clone(),
                                             result_ok: true,
-                                        },
-                                    ));
+                                        }));
+                                        completed = completed.saturating_add(1);
+                                        workers[idx].state = "complete".to_string();
+                                        let completed_message = format!("completed {}", task_id);
+                                        workers[idx].tool_line = completed_message.clone();
+                                        append_worker_command(&mut workers[idx], &completed_message);
+                                        workers[idx].breadcrumb = "complete".to_string();
+                                        workers[idx].lease_held = false;
+                                        append_run_log(
+                                            "info",
+                                            "worker.task.completed",
+                                            json!({
+                                                "worker_id": worker_id,
+                                                "task_id": task_id,
+                                                "completed": completed
+                                            }),
+                                        );
+                                    } else {
+                                        workers[idx].state = "failed".to_string();
+                                        let failed_message =
+                                            if let Some(reason) = summary.failure_reason.clone() {
+                                                if reason.is_empty() {
+                                                    format!("failed {}", task_id)
+                                                } else {
+                                                    let truncated =
+                                                        reason.chars().take(150).collect::<String>();
+                                                    if reason.chars().count() > 150 {
+                                                        format!("failed: {}…", truncated)
+                                                    } else {
+                                                        format!("failed: {}", reason)
+                                                    }
+                                                }
+                                            } else {
+                                                format!("failed {}", task_id)
+                                            };
+                                        workers[idx].tool_line = failed_message.clone();
+                                        append_worker_command(&mut workers[idx], &failed_message);
+                                        workers[idx].breadcrumb = "failed".to_string();
+                                        workers[idx].lease_held = false;
+                                        append_run_log(
+                                            "error",
+                                            "worker.task.failed",
+                                            json!({
+                                                "worker_id": worker_id,
+                                                "task_id": task_id,
+                                                "final_state": summary.final_state.as_str()
+                                            }),
+                                        );
+                                        if summary.final_state == crate::types::WorkerState::Failed {
+                                            let unresolved = store.mark_unresolved(&task_id, &worker_id)?;
+                                            append_run_log(
+                                                "warn",
+                                                "worker.task.unresolved",
+                                                json!({
+                                                    "worker_id": worker_id,
+                                                    "task_id": task_id,
+                                                    "marked_unresolved": unresolved,
+                                                    "failure_reason": summary.failure_reason,
+                                                }),
+                                            );
+                                            let unresolved_message = if unresolved {
+                                                format!("unresolved {}", task_id)
+                                            } else {
+                                                failed_message.clone()
+                                            };
+                                            workers[idx].state = "unresolved".to_string();
+                                            workers[idx].tool_line = unresolved_message.clone();
+                                            workers[idx].breadcrumb = "unresolved".to_string();
+                                            append_worker_command(&mut workers[idx], &unresolved_message);
+                                        } else {
+                                            let _ = store.release_lease(&task_id, &worker_id)?;
+                                            emit_record(RecordEntry::BacklogMutation(
+                                                BacklogMutationRecord {
+                                                    seq: next_seq(),
+                                                    timestamp_ns: timestamp_ns(),
+                                                    worker_id: worker_id.clone(),
+                                                    operation: "release_lease".to_string(),
+                                                    task_id: task_id.clone(),
+                                                    result_ok: true,
+                                                },
+                                            ));
+                                        }
+                                    }
                                 }
                             }
-                        } else {
-                            request_interrupt();
                         }
 
+                        // Re-claim for doing worker slot
                         if shutdown_error.is_none()
                             && !quit_requested
-                            && completed.saturating_add(active) < target
+                            && completed.saturating_add(active_doing).saturating_add(active_merging) < target
                         {
                             let worker_id = workers[idx].worker_id.clone();
                             let claimed_task = store.claim_next(
@@ -439,14 +560,19 @@ pub fn run_worker_pool_fsm(
                                         &cfg,
                                         process_runner.as_ref(),
                                         &worker_scope,
+                                        idx,
                                         &worker_id,
                                         &task_id,
                                         &task_summary,
                                         attempt_count,
                                     );
-                                    let _ = tx.send((idx, task_id, result));
+                                    let _ = tx.send(PoolResultMessage::DoingResult {
+                                        slot_idx: idx,
+                                        task_id,
+                                        result,
+                                    });
                                 });
-                                active = active.saturating_add(1);
+                                active_doing = active_doing.saturating_add(1);
                             } else {
                                 workers[idx].state = "idle".to_string();
                                 workers[idx].task_title = "idle".to_string();
@@ -456,6 +582,81 @@ pub fn run_worker_pool_fsm(
                                 }
                                 workers[idx].tool_line = "waiting for claim".to_string();
                             }
+                        }
+                        // Signal merge worker to exit when all doing workers are done
+                        if active_doing == 0 {
+                            merge_tx.take();
+                        }
+                        refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
+                        render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                    }
+                    Ok(PoolResultMessage::MergeResult { task_id, worker_id, result }) => {
+                        active_merging = active_merging.saturating_sub(1);
+                        if shutdown_error.is_some() {
+                            request_interrupt();
+                        } else {
+                            match result {
+                                Err(err) => {
+                                    let msg = err.to_string();
+                                    append_run_log(
+                                        "error",
+                                        "merge_worker.task.process_error",
+                                        json!({
+                                            "worker_id": MERGE_WORKER_ID,
+                                            "task_id": task_id,
+                                            "error": msg
+                                        }),
+                                    );
+                                    let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID);
+                                    workers[merge_row_idx].state = "failed".to_string();
+                                    let fail_msg = format!("merge failed: {}", msg.chars().take(100).collect::<String>());
+                                    workers[merge_row_idx].tool_line = fail_msg.clone();
+                                    append_worker_command(&mut workers[merge_row_idx], &fail_msg);
+                                }
+                                Ok(summary) => {
+                                    if summary.final_state == crate::types::WorkerState::Complete {
+                                        let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
+                                        emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
+                                            seq: next_seq(),
+                                            timestamp_ns: timestamp_ns(),
+                                            worker_id: worker_id.clone(),
+                                            operation: "mark_complete".to_string(),
+                                            task_id: task_id.clone(),
+                                            result_ok: true,
+                                        }));
+                                        completed = completed.saturating_add(1);
+                                        workers[merge_row_idx].state = "complete".to_string();
+                                        let done_msg = format!("merged {}", task_id);
+                                        workers[merge_row_idx].tool_line = done_msg.clone();
+                                        append_worker_command(&mut workers[merge_row_idx], &done_msg);
+                                        workers[merge_row_idx].breadcrumb = "complete".to_string();
+                                        workers[merge_row_idx].lease_held = false;
+                                        append_run_log(
+                                            "info",
+                                            "merge_worker.task.completed",
+                                            json!({
+                                                "worker_id": MERGE_WORKER_ID,
+                                                "task_id": task_id,
+                                                "completed": completed
+                                            }),
+                                        );
+                                    } else {
+                                        let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID)?;
+                                        workers[merge_row_idx].state = "failed".to_string();
+                                        let fail_msg = summary.failure_reason.as_deref().unwrap_or("merge failed");
+                                        let truncated = fail_msg.chars().take(100).collect::<String>();
+                                        workers[merge_row_idx].tool_line = truncated.clone();
+                                        append_worker_command(&mut workers[merge_row_idx], &truncated);
+                                        workers[merge_row_idx].breadcrumb = "failed".to_string();
+                                        workers[merge_row_idx].lease_held = false;
+                                    }
+                                }
+                            }
+                        }
+                        // Reset merge row to idle if no more merges pending
+                        if active_merging == 0 {
+                            workers[merge_row_idx].state = "idle".to_string();
+                            workers[merge_row_idx].task_title = "idle".to_string();
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
@@ -481,7 +682,8 @@ pub fn run_worker_pool_fsm(
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        active = 0;
+                        active_doing = 0;
+                        active_merging = 0;
                     }
                 }
             }
@@ -871,6 +1073,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
         active: 0,
         failed: 0,
         unresolved: 0,
+        merge_pending: 0,
         p0: 0,
         p1: 0,
         p2: 0,
@@ -884,6 +1087,15 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
                 stats.active += 1;
                 backlog.in_progress.push(format!(
                     "INP {} {} {}",
+                    task.priority.as_str(),
+                    short_task_id(&task.task_id),
+                    task.title
+                ));
+            }
+            crate::backlog_store::TaskStatus::MergePending => {
+                stats.merge_pending += 1;
+                backlog.in_progress.push(format!(
+                    "MRG {} {} {}",
                     task.priority.as_str(),
                     short_task_id(&task.task_id),
                     task.title

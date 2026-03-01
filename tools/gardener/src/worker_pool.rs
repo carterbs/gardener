@@ -1211,7 +1211,7 @@ fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, Gardene
                 stats.merge_pending += 1;
                 let task_title = task.title.clone();
                 let merge_title = match task.related_pr.and_then(|pr| u64::try_from(pr).ok()) {
-                    Some(pr_number) => format!("{task_title} (PR #{pr_number})"),
+                    Some(pr_number) => format!("PR #{pr_number} {task_title}"),
                     None => task_title,
                 };
                 backlog.in_progress.push(format!(

@@ -5,8 +5,8 @@ use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::protocol::{AgentTerminal, StepResult};
 use crate::replay::recording::{
-    AgentTurnRecord, BacklogMutationRecord, BacklogTaskRecord, ProcessCallRecord,
-    RecordEntry, SessionStartRecord,
+    AgentTurnRecord, BacklogMutationRecord, BacklogTaskRecord, ProcessCallRecord, RecordEntry,
+    SessionStartRecord,
 };
 use crate::runtime::{ProcessOutput, ProcessRequest, ProcessRunner};
 use crate::types::{AgentKind, RuntimeScope};
@@ -27,8 +27,7 @@ pub struct SessionRecording {
 impl SessionRecording {
     /// Load and parse a JSONL recording file.
     pub fn load(path: &Path) -> Result<Self, GardenerError> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| GardenerError::Io(e.to_string()))?;
+        let raw = std::fs::read_to_string(path).map_err(|e| GardenerError::Io(e.to_string()))?;
         let mut header: Option<SessionStartRecord> = None;
         let mut backlog: Vec<BacklogTaskRecord> = Vec::new();
         let mut entries: Vec<RecordEntry> = Vec::new();
@@ -37,9 +36,8 @@ impl SessionRecording {
             if line.is_empty() {
                 continue;
             }
-            let entry: RecordEntry = serde_json::from_str(line).map_err(|e| {
-                GardenerError::Process(format!("recording line {}: {e}", idx + 1))
-            })?;
+            let entry: RecordEntry = serde_json::from_str(line)
+                .map_err(|e| GardenerError::Process(format!("recording line {}: {e}", idx + 1)))?;
             match &entry {
                 RecordEntry::SessionStart(s) => {
                     header = Some(s.clone());
@@ -163,7 +161,10 @@ impl ReplayProcessRunner {
     /// After replay, verify that the actual process requests match the recorded ones.
     pub fn verify_request_alignment(&self) -> Vec<RequestMismatch> {
         let actual = self.actual_requests.lock().expect("actual requests lock");
-        let expected = self.expected_requests.lock().expect("expected requests lock");
+        let expected = self
+            .expected_requests
+            .lock()
+            .expect("expected requests lock");
         actual
             .iter()
             .zip(expected.iter())
@@ -200,9 +201,7 @@ impl ProcessRunner for ReplayProcessRunner {
             .lock()
             .expect("responses lock")
             .pop_front()
-            .ok_or_else(|| {
-                GardenerError::Process("replay: no more recorded responses".to_string())
-            })
+            .ok_or_else(|| GardenerError::Process("replay: no more recorded responses".to_string()))
     }
 
     fn kill(&self, _handle: u64) -> Result<(), GardenerError> {
@@ -422,11 +421,11 @@ pub fn replay_session(
 #[cfg(test)]
 mod tests {
     use super::{ReplayProcessRunner, SessionRecording};
-    use crate::runtime::ProcessRunner;
     use crate::replay::recording::{
         AgentTurnRecord, BacklogMutationRecord, BacklogSnapshotRecord, ProcessCallRecord,
         ProcessRequestRecord, RecordEntry, SessionStartRecord,
     };
+    use crate::runtime::ProcessRunner;
     use std::path::Path;
 
     fn write_recording(path: &Path, entries: Vec<RecordEntry>) {
@@ -452,7 +451,10 @@ mod tests {
             Ok(_) => panic!("expected missing session start to fail"),
             Err(err) => err,
         };
-        assert_eq!(err.to_string(), "process error: recording has no SessionStart entry");
+        assert_eq!(
+            err.to_string(),
+            "process error: recording has no SessionStart entry"
+        );
     }
 
     #[test]
@@ -466,9 +468,7 @@ mod tests {
                 gardener_version: "0.0.0".to_string(),
                 config_snapshot: serde_json::json!({}),
             }),
-            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
-                tasks: Vec::new(),
-            }),
+            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord { tasks: Vec::new() }),
             RecordEntry::ProcessCall(ProcessCallRecord {
                 seq: 1,
                 timestamp_ns: 1,
@@ -532,7 +532,10 @@ mod tests {
         write_recording(&path, entries);
 
         let recording = SessionRecording::load(&path).expect("load recording");
-        assert_eq!(recording.worker_ids(), vec!["worker-a".to_string(), "worker-b".to_string()]);
+        assert_eq!(
+            recording.worker_ids(),
+            vec!["worker-a".to_string(), "worker-b".to_string()]
+        );
         assert_eq!(recording.process_calls_for("worker-a").len(), 1);
         assert_eq!(recording.backlog_mutations().len(), 2);
         assert_eq!(recording.agent_turns_for("worker-a").len(), 1);
@@ -549,9 +552,7 @@ mod tests {
                 gardener_version: "0.0.0".to_string(),
                 config_snapshot: serde_json::json!({}),
             }),
-            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
-                tasks: Vec::new(),
-            }),
+            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord { tasks: Vec::new() }),
             RecordEntry::ProcessCall(ProcessCallRecord {
                 seq: 1,
                 timestamp_ns: 1,
@@ -610,7 +611,7 @@ mod tests {
         let runner = ReplayProcessRunner::from_recording(&recording, "worker-a");
         let mut lines = Vec::new();
         let handle = runner
-                .spawn(crate::runtime::ProcessRequest {
+            .spawn(crate::runtime::ProcessRequest {
                 program: "echo".to_string(),
                 args: vec!["first".to_string()],
                 cwd: Some("/tmp".into()),
@@ -642,9 +643,7 @@ mod tests {
                 gardener_version: "0.0.0".to_string(),
                 config_snapshot: serde_json::json!({}),
             }),
-            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
-                tasks: Vec::new(),
-            }),
+            RecordEntry::BacklogSnapshot(BacklogSnapshotRecord { tasks: Vec::new() }),
             RecordEntry::ProcessCall(ProcessCallRecord {
                 seq: 1,
                 timestamp_ns: 1,
@@ -667,18 +666,14 @@ mod tests {
         let recording = SessionRecording::load(&path).expect("load recording");
 
         let runner = ReplayProcessRunner::from_recording(&recording, "worker-a");
-        assert!(
-            runner
-                .spawn(crate::runtime::ProcessRequest {
-                    program: "printf".to_string(),
-                    args: vec!["oops".to_string()],
-                    cwd: None,
-                })
-                .is_ok()
-        );
-        runner
-            .wait(0)
-            .expect("consume expected output");
+        assert!(runner
+            .spawn(crate::runtime::ProcessRequest {
+                program: "printf".to_string(),
+                args: vec!["oops".to_string()],
+                cwd: None,
+            })
+            .is_ok());
+        runner.wait(0).expect("consume expected output");
         let mismatches = runner.verify_request_alignment();
         assert_eq!(mismatches.len(), 1);
         assert_eq!(mismatches[0].position, 0);

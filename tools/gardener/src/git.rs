@@ -692,11 +692,9 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
-        assert!(
-            GitClient::new(&runner, "/repo")
-                .verify_ancestor("abc", "main")
-                .expect("ancestor"),
-        );
+        assert!(GitClient::new(&runner, "/repo")
+            .verify_ancestor("abc", "main")
+            .expect("ancestor"),);
 
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
@@ -704,11 +702,9 @@ mod tests {
             stdout: String::new(),
             stderr: "not ancestor".to_string(),
         }));
-        assert!(
-            !GitClient::new(&runner, "/repo")
-                .verify_ancestor("abc", "main")
-                .expect("ancestor"),
-        );
+        assert!(!GitClient::new(&runner, "/repo")
+            .verify_ancestor("abc", "main")
+            .expect("ancestor"),);
     }
 
     #[test]
@@ -760,7 +756,9 @@ mod tests {
         let err = GitClient::new(&runner, "/repo")
             .run_validation_command("npm run validate")
             .expect_err("validation failed");
-        assert!(err.to_string().contains("post-merge validation command failed"));
+        assert!(err
+            .to_string()
+            .contains("post-merge validation command failed"));
     }
 
     #[test]

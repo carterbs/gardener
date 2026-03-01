@@ -1,6 +1,6 @@
 use crate::logging::append_run_log;
-use std::path::Path;
 use serde_json::json;
+use std::path::Path;
 
 use crate::backlog_store::{BacklogStore, BacklogTask};
 use crate::errors::GardenerError;

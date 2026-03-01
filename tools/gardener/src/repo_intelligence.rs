@@ -202,9 +202,7 @@ pub struct BuildProfileInput<'a> {
     pub agents_md_present: bool,
 }
 
-pub fn build_profile(
-    input: BuildProfileInput<'_>,
-) -> RepoIntelligenceProfile {
+pub fn build_profile(input: BuildProfileInput<'_>) -> RepoIntelligenceProfile {
     let BuildProfileInput {
         clock,
         working_dir,

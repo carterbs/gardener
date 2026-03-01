@@ -45,7 +45,9 @@ fn worker_log_payloads_include_worker_id() {
 
     if !violations.is_empty() {
         let mut message = String::new();
-        message.push_str("worker log linter failed: worker logging must include \"worker_id\" in json payload\n");
+        message.push_str(
+            "worker log linter failed: worker logging must include \"worker_id\" in json payload\n",
+        );
         message.push_str("Missing worker_id:\n");
         for v in violations {
             message.push_str(&format!(
@@ -317,9 +319,5 @@ fn payload_has_worker_id(payload_arg: &str) -> bool {
 }
 
 fn snippet(call: String) -> String {
-    call.lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+    call.lines().next().unwrap_or_default().trim().to_string()
 }

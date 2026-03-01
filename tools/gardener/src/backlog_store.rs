@@ -172,8 +172,8 @@ impl BacklogStore {
 
         // Reject zero-byte files — they indicate prior corruption.
         if existed_before_open {
-            let meta = std::fs::metadata(&path)
-                .map_err(|e| GardenerError::Database(e.to_string()))?;
+            let meta =
+                std::fs::metadata(&path).map_err(|e| GardenerError::Database(e.to_string()))?;
             if meta.len() == 0 {
                 append_run_log(
                     "error",
@@ -225,9 +225,7 @@ impl BacklogStore {
                         let result = upsert_task(&write_conn, &task, now).and_then(|_| {
                             fetch_task(&write_conn, &compute_task_id_from_new_task(&task))?
                                 .ok_or_else(|| {
-                                    GardenerError::Database(
-                                        "row missing after upsert".to_string(),
-                                    )
+                                    GardenerError::Database("row missing after upsert".to_string())
                                 })
                         });
                         let _ = reply.send(result);
@@ -270,19 +268,19 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                let result = release_lease(&write_conn, &task_id, &lease_owner, now);
-                let _ = reply.send(result);
-            }
-            WriteCmd::MarkUnresolved {
-                task_id,
-                lease_owner,
-                now,
-                reply,
-            } => {
-                let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
-                let _ = reply.send(result);
-            }
-        }
+                        let result = release_lease(&write_conn, &task_id, &lease_owner, now);
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::MarkUnresolved {
+                        task_id,
+                        lease_owner,
+                        now,
+                        reply,
+                    } => {
+                        let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
+                        let _ = reply.send(result);
+                    }
+                }
             }
         });
 
@@ -660,7 +658,7 @@ impl BacklogStore {
                         COALESCE(SUM(CASE WHEN priority = 'P1' THEN 1 ELSE 0 END), 0) AS p1,
                         COALESCE(SUM(CASE WHEN priority = 'P2' THEN 1 ELSE 0 END), 0) AS p2
                      FROM backlog_tasks
-                    WHERE status <> 'complete'"
+                    WHERE status <> 'complete'",
                 )
                 .map_err(db_err)?;
             statement
@@ -675,14 +673,12 @@ impl BacklogStore {
     }
 
     pub fn count_active_tasks(&self) -> StoreResult<usize> {
-        append_run_log(
-            "debug",
-            "backlog.tasks.count_active.started",
-            json!({}),
-        );
+        append_run_log("debug", "backlog.tasks.count_active.started", json!({}));
         self.read_pool.with_conn(|conn| {
             let mut statement = conn
-                .prepare("SELECT COUNT(*) FROM backlog_tasks WHERE status NOT IN ('complete', 'failed')")
+                .prepare(
+                    "SELECT COUNT(*) FROM backlog_tasks WHERE status NOT IN ('complete', 'failed')",
+                )
                 .map_err(db_err)?;
             statement
                 .query_row([], |row| {
@@ -1392,10 +1388,7 @@ mod tests {
             .expect("owner match");
         assert!(allowed);
 
-        let task = store
-            .get_task(&row.task_id)
-            .expect("fetch")
-            .expect("row");
+        let task = store.get_task(&row.task_id).expect("fetch").expect("row");
         assert_eq!(task.status, TaskStatus::Unresolved);
         assert_eq!(task.lease_owner, None);
         assert_eq!(task.lease_expires_at, None);
@@ -1426,7 +1419,10 @@ mod tests {
         assert_eq!(TaskStatus::Failed.as_str(), "failed");
         assert_eq!(TaskStatus::Unresolved.as_str(), "unresolved");
         assert_eq!(TaskStatus::from_db("failed"), Some(TaskStatus::Failed));
-        assert_eq!(TaskStatus::from_db("unresolved"), Some(TaskStatus::Unresolved));
+        assert_eq!(
+            TaskStatus::from_db("unresolved"),
+            Some(TaskStatus::Unresolved)
+        );
         assert_eq!(TaskStatus::from_db("unknown"), None);
 
         let (store, _dir) = temp_store();

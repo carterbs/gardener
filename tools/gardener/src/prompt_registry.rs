@@ -269,7 +269,9 @@ mod tests {
             .template_for(WorkerState::Doing)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-doing-retry-rebase");
-        assert!(tpl.body.contains("git fetch origin main && git rebase origin/main"));
+        assert!(tpl
+            .body
+            .contains("git fetch origin main && git rebase origin/main"));
     }
 
     #[test]

@@ -187,5 +187,4 @@ mod tests {
         assert!(!p1.execution_context.is_empty());
         assert!(!p1.knowledge_context.is_empty());
     }
-
 }

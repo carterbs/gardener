@@ -65,7 +65,10 @@ fn claude_happy_path_returns_success() {
         .expect("should succeed");
     assert_eq!(result.terminal, AgentTerminal::Success);
     assert!(
-        result.events.iter().any(|e| e.kind == AgentEventKind::ToolCall),
+        result
+            .events
+            .iter()
+            .any(|e| e.kind == AgentEventKind::ToolCall),
         "should contain a ToolCall event"
     );
     assert_eq!(runner.spawned()[0].program, "claude");
@@ -101,7 +104,10 @@ fn claude_malformed_lines_are_skipped_not_fatal() {
         .expect("should succeed despite malformed lines");
     assert_eq!(result.terminal, AgentTerminal::Success);
     assert!(
-        result.diagnostics.iter().any(|d| d.contains("non-json") || d.contains("ignored")),
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("non-json") || d.contains("ignored")),
         "diagnostics should mention skipped lines: {:?}",
         result.diagnostics
     );
@@ -123,7 +129,10 @@ fn codex_happy_path_returns_success() {
         .expect("should succeed");
     assert_eq!(result.terminal, AgentTerminal::Success);
     assert!(
-        result.events.iter().any(|e| e.kind == AgentEventKind::ToolCall),
+        result
+            .events
+            .iter()
+            .any(|e| e.kind == AgentEventKind::ToolCall),
         "should contain ToolCall events from item.started/item.updated"
     );
     assert_eq!(runner.spawned()[0].program, "codex");

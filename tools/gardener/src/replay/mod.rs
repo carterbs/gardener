@@ -11,6 +11,6 @@
 //! substitutes fake implementations pre-seeded from the recording, so the
 //! full FSM runs deterministically in tests without any real I/O.
 
-pub mod recording;
 pub mod recorder;
+pub mod recording;
 pub mod replayer;

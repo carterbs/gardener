@@ -1,18 +1,16 @@
+use gardener::agent::codex::CodexAdapter;
+use gardener::agent::{AdapterContext, AgentAdapter};
+use gardener::protocol::AgentTerminal;
 use gardener::replay::recorder::{
     clear_session_recorder, emit_record, get_recording_worker_id, init_session_recorder,
     set_recording_worker_id, RecordingProcessRunner,
 };
 use gardener::replay::recording::{
     AgentTurnRecord, BacklogMutationRecord, BacklogSnapshotRecord, BacklogTaskRecord,
-    ProcessCallRecord, ProcessOutputRecord, ProcessRequestRecord, RecordEntry,
-    SessionEndRecord, SessionStartRecord,
+    ProcessCallRecord, ProcessOutputRecord, ProcessRequestRecord, RecordEntry, SessionEndRecord,
+    SessionStartRecord,
 };
-use gardener::replay::replayer::{
-    ReplayAgentAdapter, ReplayProcessRunner, SessionRecording,
-};
-use gardener::agent::codex::CodexAdapter;
-use gardener::agent::{AdapterContext, AgentAdapter};
-use gardener::protocol::AgentTerminal;
+use gardener::replay::replayer::{ReplayAgentAdapter, ReplayProcessRunner, SessionRecording};
 use gardener::runtime::{FakeProcessRunner, ProcessOutput, ProcessRequest};
 use gardener::types::AgentKind;
 use std::sync::Arc;
@@ -194,21 +192,26 @@ fn replay_agent_adapter_returns_recorded_step_results() {
     assert_eq!(step.payload["task_type"], "task");
 
     // Second call should fail (queue empty)
-    assert!(
-        adapter.execute(&runner, &gardener::agent::AdapterContext {
-            worker_id: "worker-1".to_string(),
-            session_id: "s1".to_string(),
-            sandbox_id: String::new(),
-            model: String::new(),
-            cwd: std::path::PathBuf::from("/tmp"),
-            prompt_version: "v1".to_string(),
-            context_manifest_hash: "abc".to_string(),
-            output_schema: None,
-            output_file: None,
-            permissive_mode: false,
-            max_turns: None,
-        }, "prompt", None).is_err()
-    );
+    assert!(adapter
+        .execute(
+            &runner,
+            &gardener::agent::AdapterContext {
+                worker_id: "worker-1".to_string(),
+                session_id: "s1".to_string(),
+                sandbox_id: String::new(),
+                model: String::new(),
+                cwd: std::path::PathBuf::from("/tmp"),
+                prompt_version: "v1".to_string(),
+                context_manifest_hash: "abc".to_string(),
+                output_schema: None,
+                output_file: None,
+                permissive_mode: false,
+                max_turns: None,
+            },
+            "prompt",
+            None
+        )
+        .is_err());
 }
 
 #[test]
@@ -481,8 +484,8 @@ fn recording_overhead_acceptable() {
 fn session_replay_reproduces_missing_terminal_event_bug() {
     let recording_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/recording_55c2c192701db506764301c5bf93acc1.jsonl");
-    let recording = SessionRecording::load(&recording_path)
-        .expect("load production failure recording");
+    let recording =
+        SessionRecording::load(&recording_path).expect("load production failure recording");
 
     assert_eq!(recording.header.run_id, "55c2c192701db506764301c5bf93acc1");
 

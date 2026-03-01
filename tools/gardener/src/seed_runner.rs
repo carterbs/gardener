@@ -183,9 +183,8 @@ fn seed_output_schema_path(scope: &RuntimeScope) -> Result<PathBuf, GardenerErro
     let desired = seed_output_schema();
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     if existing != desired {
-        std::fs::write(&path, desired).map_err(|e| {
-            GardenerError::Io(format!("write schema {}: {e}", path.display()))
-        })?;
+        std::fs::write(&path, desired)
+            .map_err(|e| GardenerError::Io(format!("write schema {}: {e}", path.display())))?;
     }
     Ok(path)
 }
@@ -228,7 +227,7 @@ fn seed_output_schema() -> String {
   },
   "required": ["schema_version", "state", "payload"]
 }"#
-        .to_string()
+    .to_string()
 }
 
 #[cfg(test)]
@@ -236,8 +235,8 @@ mod tests {
     use super::run_legacy_seed_runner_v1;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use crate::types::{AgentKind, RuntimeScope};
-    use tempfile::tempdir;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     #[test]
     fn seed_runner_uses_codex_adapter_output_contract() {

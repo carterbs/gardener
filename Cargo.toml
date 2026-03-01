@@ -4,9 +4,9 @@ resolver = "2"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
-unnecessary_sort_by = "warn"
+unnecessary_sort_by = "deny"
 expect_used = "deny"
-needless_late_init = "warn"
+needless_late_init = "deny"
 identity_op = "deny"
 needless_update = "warn"
 unnecessary_lazy_evaluations = "warn"

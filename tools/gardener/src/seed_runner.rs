@@ -318,11 +318,118 @@ fn seed_output_schema() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::run_legacy_seed_runner_v1;
+    use super::{
+        parse_seed_payload, run_legacy_seed_runner_v1, run_legacy_seed_runner_v1_with_events,
+        run_seed_agent_direct_v2_with_events, SeedTask,
+    };
+    use crate::errors::GardenerError;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use crate::types::{AgentKind, RuntimeScope};
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    fn codex_scope(working_dir: &std::path::Path) -> RuntimeScope {
+        RuntimeScope {
+            process_cwd: PathBuf::from("/cwd"),
+            repo_root: None,
+            working_dir: working_dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn direct_v2_returns_ok_on_codex_success() {
+        let runner = FakeProcessRunner::default();
+        let dir = tempdir().expect("tempdir");
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":{\"summary\":\"seeded 10 tasks\"}}\n"
+                .to_string(),
+            stderr: String::new(),
+        }));
+        let result = run_seed_agent_direct_v2_with_events(
+            &runner,
+            &codex_scope(dir.path()),
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "seed the backlog",
+            None,
+        );
+        assert!(result.is_ok(), "expected Ok but got {result:?}");
+    }
+
+    #[test]
+    fn direct_v2_returns_err_on_codex_failure() {
+        let runner = FakeProcessRunner::default();
+        let dir = tempdir().expect("tempdir");
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.failed\",\"reason\":\"agent could not seed\"}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let result = run_seed_agent_direct_v2_with_events(
+            &runner,
+            &codex_scope(dir.path()),
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "seed the backlog",
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.expect_err("expected Err").to_string();
+        assert!(msg.contains("direct seed runner failed"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn direct_v2_failure_with_null_payload_uses_fallback_message() {
+        let runner = FakeProcessRunner::default();
+        let dir = tempdir().expect("tempdir");
+        // turn.failed with no result field → payload is null
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.failed\"}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let result = run_seed_agent_direct_v2_with_events(
+            &runner,
+            &codex_scope(dir.path()),
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "seed the backlog",
+            None,
+        );
+        assert!(result.is_err());
+        let msg = result.expect_err("expected Err").to_string();
+        assert!(
+            msg.contains("agent reported failure") || msg.contains("direct seed runner failed"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn direct_v2_calls_on_event_callback() {
+        use crate::protocol::AgentEvent;
+        let runner = FakeProcessRunner::default();
+        let dir = tempdir().expect("tempdir");
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":{\"summary\":\"done\"}}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let mut event_count = 0usize;
+        let mut on_event = |_event: &AgentEvent| {
+            event_count += 1;
+        };
+        let result = run_seed_agent_direct_v2_with_events(
+            &runner,
+            &codex_scope(dir.path()),
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "seed the backlog",
+            Some(&mut on_event),
+        );
+        assert!(result.is_ok());
+        assert!(event_count > 0, "expected on_event to be called at least once");
+    }
 
     #[test]
     fn seed_runner_uses_codex_adapter_output_contract() {
@@ -349,5 +456,112 @@ mod tests {
         assert_eq!(tasks[0].title, "t");
         assert_eq!(tasks[0].domain, "backlog");
         assert_eq!(tasks[0].priority, "P1");
+    }
+
+    #[test]
+    fn legacy_v1_on_event_callback_is_invoked() {
+        use crate::protocol::AgentEvent;
+        let runner = FakeProcessRunner::default();
+        let working_dir = tempdir().expect("tempdir");
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":{\"schema_version\":1,\"state\":\"seeding\",\"payload\":{\"tasks\":[{\"title\":\"t\",\"details\":\"d\",\"rationale\":\"r\",\"domain\":\"backlog\",\"priority\":\"P1\"}]}}}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let mut event_count = 0usize;
+        let mut on_event = |_event: &AgentEvent| {
+            event_count += 1;
+        };
+        let tasks = run_legacy_seed_runner_v1_with_events(
+            &runner,
+            &RuntimeScope {
+                process_cwd: PathBuf::from("/cwd"),
+                repo_root: None,
+                working_dir: working_dir.path().to_path_buf(),
+            },
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "prompt",
+            Some(&mut on_event),
+        )
+        .expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert!(event_count > 0, "on_event should have been called at least once");
+    }
+
+    #[test]
+    fn legacy_v1_returns_err_on_exec_failure() {
+        let runner = FakeProcessRunner::default();
+        let working_dir = tempdir().expect("tempdir");
+        runner.push_response(Err(GardenerError::Process(
+            "agent process died".to_string(),
+        )));
+        let result = run_legacy_seed_runner_v1(
+            &runner,
+            &RuntimeScope {
+                process_cwd: PathBuf::from("/cwd"),
+                repo_root: None,
+                working_dir: working_dir.path().to_path_buf(),
+            },
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "prompt",
+        );
+        assert!(result.is_err(), "expected Err on exec failure");
+    }
+
+    #[test]
+    fn legacy_v1_returns_err_on_bad_payload() {
+        let runner = FakeProcessRunner::default();
+        let working_dir = tempdir().expect("tempdir");
+        // result is a string, not a SeedPayload or SeedEnvelope
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":\"not-an-object\"}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let result = run_legacy_seed_runner_v1(
+            &runner,
+            &RuntimeScope {
+                process_cwd: PathBuf::from("/cwd"),
+                repo_root: None,
+                working_dir: working_dir.path().to_path_buf(),
+            },
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "prompt",
+        );
+        assert!(result.is_err(), "expected Err on unparseable payload");
+    }
+
+    #[test]
+    fn seed_task_serde_defaults_apply_when_fields_absent() {
+        let json = r#"{"title":"test task","details":"some details","rationale":"some rationale here"}"#;
+        let task: SeedTask = serde_json::from_str(json).expect("parse SeedTask");
+        assert_eq!(task.domain, "infrastructure");
+        assert_eq!(task.priority, "P1");
+    }
+
+    #[test]
+    fn parse_seed_payload_accepts_direct_payload_format() {
+        let payload = serde_json::json!({
+            "tasks": [{
+                "title": "t",
+                "details": "d",
+                "rationale": "r",
+                "domain": "backlog",
+                "priority": "P1"
+            }]
+        });
+        let result = parse_seed_payload(payload);
+        assert!(result.is_ok());
+        assert_eq!(result.expect("parse_seed_payload succeeded").tasks.len(), 1);
+    }
+
+    #[test]
+    fn parse_seed_payload_returns_err_on_invalid_value() {
+        let payload = serde_json::json!("not-an-object");
+        let result = parse_seed_payload(payload);
+        assert!(result.is_err());
     }
 }

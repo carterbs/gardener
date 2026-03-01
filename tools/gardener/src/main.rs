@@ -1,4 +1,4 @@
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::needless_update, clippy::redundant_clone)]
+#![deny(clippy::manual_strip, clippy::unwrap_used, clippy::expect_used, clippy::needless_update, clippy::redundant_clone)]
 
 fn main() {
     match gardener::run() {

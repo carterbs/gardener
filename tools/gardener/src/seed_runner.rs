@@ -376,7 +376,10 @@ mod tests {
         );
         assert!(result.is_err());
         let msg = result.expect_err("expected Err").to_string();
-        assert!(msg.contains("direct seed runner failed"), "unexpected message: {msg}");
+        assert!(
+            msg.contains("direct seed runner failed"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]
@@ -428,7 +431,10 @@ mod tests {
             Some(&mut on_event),
         );
         assert!(result.is_ok());
-        assert!(event_count > 0, "expected on_event to be called at least once");
+        assert!(
+            event_count > 0,
+            "expected on_event to be called at least once"
+        );
     }
 
     #[test]
@@ -486,7 +492,10 @@ mod tests {
         )
         .expect("tasks");
         assert_eq!(tasks.len(), 1);
-        assert!(event_count > 0, "on_event should have been called at least once");
+        assert!(
+            event_count > 0,
+            "on_event should have been called at least once"
+        );
     }
 
     #[test]
@@ -536,7 +545,8 @@ mod tests {
 
     #[test]
     fn seed_task_serde_defaults_apply_when_fields_absent() {
-        let json = r#"{"title":"test task","details":"some details","rationale":"some rationale here"}"#;
+        let json =
+            r#"{"title":"test task","details":"some details","rationale":"some rationale here"}"#;
         let task: SeedTask = serde_json::from_str(json).expect("parse SeedTask");
         assert_eq!(task.domain, "infrastructure");
         assert_eq!(task.priority, "P1");

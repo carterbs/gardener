@@ -210,19 +210,52 @@ pub fn prepare_prompt(
     .join("\n");
 
     let items = vec![
-        ctx_item("task_packet", "task", "task-hash", "task input", 100, task_summary),
-        ctx_item("repo_context", "repo", "repo-hash", "repo snapshot", 90, "repo context"),
-        ctx_item("evidence_context", "evidence", "ev-hash", "evidence-ranked", 80, "evidence context"),
         ctx_item(
-            "execution_context", "execution", "exec-hash", "state+identity", 70,
+            "task_packet",
+            "task",
+            "task-hash",
+            "task input",
+            100,
+            task_summary,
+        ),
+        ctx_item(
+            "repo_context",
+            "repo",
+            "repo-hash",
+            "repo snapshot",
+            90,
+            "repo context",
+        ),
+        ctx_item(
+            "evidence_context",
+            "evidence",
+            "ev-hash",
+            "evidence-ranked",
+            80,
+            "evidence context",
+        ),
+        ctx_item(
+            "execution_context",
+            "execution",
+            "exec-hash",
+            "state+identity",
+            70,
             &format!(
                 "state={state:?};backend={:?};attempt_count={attempt_count}",
                 effective_agent_for_state(cfg, state)
             ),
         ),
         ctx_item(
-            "knowledge_context", "knowledge", "know-hash", "learning loop", 60,
-            if knowledge.trim().is_empty() { "no prior knowledge" } else { &knowledge },
+            "knowledge_context",
+            "knowledge",
+            "know-hash",
+            "learning loop",
+            60,
+            if knowledge.trim().is_empty() {
+                "no prior knowledge"
+            } else {
+                &knowledge
+            },
         ),
     ];
 
@@ -235,7 +268,9 @@ pub fn prepare_prompt(
     let _parsed = parse_typed_payload::<serde_json::Value>(
         &format!(
             "{}{{\"schema_version\":1,\"state\":\"{}\",\"payload\":{{\"ok\":true}}}}{}",
-            START_MARKER, state.as_str(), END_MARKER
+            START_MARKER,
+            state.as_str(),
+            END_MARKER
         ),
         state,
     )?;
@@ -260,7 +295,12 @@ pub fn prepare_prompt(
 }
 
 fn ctx_item(
-    section: &str, source_id: &str, source_hash: &str, rationale: &str, rank: u32, content: &str,
+    section: &str,
+    source_id: &str,
+    source_hash: &str,
+    rationale: &str,
+    rank: u32,
+    content: &str,
 ) -> PromptContextItem {
     PromptContextItem {
         section: section.to_string(),
@@ -280,8 +320,9 @@ pub fn max_turns_for_state(cfg: &AppConfig, state: WorkerState) -> u32 {
         WorkerState::Gitting => cfg.prompts.turn_budget.gitting,
         WorkerState::Reviewing => cfg.prompts.turn_budget.reviewing,
         WorkerState::Merging => cfg.prompts.turn_budget.merging,
-        WorkerState::Seeding | WorkerState::Complete | WorkerState::Failed | WorkerState::Parked => {
-            cfg.prompts.turn_budget.doing
-        }
+        WorkerState::Seeding
+        | WorkerState::Complete
+        | WorkerState::Failed
+        | WorkerState::Parked => cfg.prompts.turn_budget.doing,
     }
 }

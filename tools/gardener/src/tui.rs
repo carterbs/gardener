@@ -442,9 +442,12 @@ struct ParsedBacklogItem {
 }
 
 impl WorkerMetrics {
-    fn from_app_state(workers: &[WorkerCard]) -> Self {
+    fn from_app_state<'a, I>(workers: I) -> Self
+    where
+        I: IntoIterator<Item = &'a WorkerCard>,
+    {
         let mut metrics = Self {
-            total: workers.len(),
+            total: 0,
             doing: 0,
             reviewing: 0,
             idle: 0,
@@ -452,6 +455,7 @@ impl WorkerMetrics {
             failed: 0,
         };
         for worker in workers {
+            metrics.total += 1;
             match worker.state_bucket {
                 WorkerState::Doing => metrics.doing += 1,
                 WorkerState::Reviewing => metrics.reviewing += 1,
@@ -523,6 +527,31 @@ fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
     }
 }
 
+fn parse_merge_queue_item(raw: &str) -> Option<ParsedBacklogItem> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    if tokens.is_empty() || tokens[0] != "MRG" {
+        return None;
+    }
+    let mut idx = 1;
+    if idx >= tokens.len() {
+        return None;
+    }
+    let priority = parse_backlog_priority(tokens[idx])?;
+    idx += 1;
+    if idx >= tokens.len() {
+        return None;
+    }
+    if tokens.len() >= idx + 2 && is_short_task_id(tokens[idx]) {
+        idx += 1;
+    }
+    let title = tokens[idx..].join(" ");
+    if title.is_empty() {
+        None
+    } else {
+        Some(ParsedBacklogItem { priority, title })
+    }
+}
+
 fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<ParsedBacklogItem> {
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
@@ -543,6 +572,133 @@ fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<Parse
     ordered.extend(p1);
     ordered.extend(p2);
     ordered
+}
+
+fn ordered_merge_queue_items(in_progress: &[String]) -> Vec<ParsedBacklogItem> {
+    let mut p0 = Vec::new();
+    let mut p1 = Vec::new();
+    let mut p2 = Vec::new();
+
+    for raw in in_progress {
+        if let Some(item) = parse_merge_queue_item(raw) {
+            match item.priority {
+                ParsedBacklogPriority::P0 => p0.push(item),
+                ParsedBacklogPriority::P1 => p1.push(item),
+                ParsedBacklogPriority::P2 => p2.push(item),
+            }
+        }
+    }
+
+    let mut ordered = Vec::new();
+    ordered.extend(p0);
+    ordered.extend(p1);
+    ordered.extend(p2);
+    ordered
+}
+
+fn backlog_items_with_capacity(
+    items: &[BacklogItem],
+    content_capacity: usize,
+    empty_label: &'static str,
+) -> Vec<ListItem<'static>> {
+    let mut rendered_items = Vec::new();
+    let max_visible = if content_capacity == 0 {
+        0
+    } else if items.len() > content_capacity {
+        content_capacity.saturating_sub(1)
+    } else {
+        items.len()
+    };
+
+    for item in items.iter().take(max_visible) {
+        let badge = match item.priority {
+            BacklogPriority::P0 => "P0",
+            BacklogPriority::P1 => "P1",
+            BacklogPriority::P2 => "P2",
+        };
+        rendered_items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("{badge: <2}"), item.priority.span_style()),
+            Span::raw(" "),
+            Span::raw(item.title.clone()),
+        ])));
+    }
+    if items.len() > max_visible && content_capacity > 0 {
+        let hidden = items.len().saturating_sub(max_visible);
+        rendered_items.push(ListItem::new(format!("... and {hidden} more")));
+    }
+    if rendered_items.is_empty() {
+        rendered_items.push(ListItem::new(empty_label));
+    }
+    rendered_items
+}
+
+fn merge_worker_card_item(
+    row: Option<&WorkerRow>,
+    compact: bool,
+    command_stream_max_width: usize,
+    command_scroll_offset: usize,
+) -> ListItem<'static> {
+    let (state, task, command_details) = row
+        .map(|row| {
+            (
+                row.state.clone(),
+                row.task_title.clone(),
+                row.command_details
+                    .iter()
+                    .map(|(timestamp, command)| CommandEntry {
+                        timestamp: timestamp.clone(),
+                        command: command.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or(("idle".to_string(), "idle".to_string(), Vec::new()));
+    let flow_line = worker_flow_chain_spans(&state);
+    let mut flow_spans = Vec::new();
+    flow_spans.push(Span::raw("    "));
+    flow_spans.push(Span::styled("Flow: ", Style::default().fg(Color::Blue)));
+    flow_spans.extend(flow_line);
+
+    let command_stream = worker_command_stream(&command_details);
+    let command_stream = command_stream_window(
+        &command_stream,
+        command_stream_max_width,
+        command_scroll_offset,
+    );
+
+    let worker_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let lines = if compact {
+        vec![
+            Line::from(vec![
+                Span::styled("Merge Worker", worker_style),
+                Span::raw(": "),
+                Span::raw(task),
+            ]),
+            Line::from(flow_spans),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::styled("Merge Worker", worker_style),
+                Span::raw(": "),
+                Span::raw(task),
+            ]),
+            Line::from(flow_spans),
+            Line::from(vec![
+                Span::raw("    "),
+                Span::styled("Commands: ", Style::default().fg(Color::Blue)),
+                Span::styled(
+                    command_stream,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ]),
+        ]
+    };
+    ListItem::new(lines)
 }
 
 fn parse_triage_artifact(line: &str) -> TriageArtifact {
@@ -584,15 +740,19 @@ fn run_context_summary() -> (String, String) {
     (truncate_right(&run_id, 28), run_log_path)
 }
 
-fn worker_ids_summary(workers: &[WorkerRow]) -> String {
-    if workers.is_empty() {
-        return "none".to_string();
-    }
-    workers
-        .iter()
+fn worker_ids_summary<'a, I>(workers: I) -> String
+where
+    I: IntoIterator<Item = &'a WorkerRow>,
+{
+    let ids = workers
+        .into_iter()
         .map(|worker| worker.worker_id.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        "none".to_string()
+    } else {
+        ids.into_iter().collect::<Vec<_>>().join(", ")
+    }
 }
 
 fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
@@ -767,6 +927,26 @@ fn draw_dashboard_frame(
     } else {
         WORKER_LIST_ROW_HEIGHT
     };
+    let visible_worker_indices = workers
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, row)| {
+            if row.worker_id == "merge-worker" {
+                None
+            } else {
+                Some(idx)
+            }
+        })
+        .collect::<Vec<_>>();
+    let visible_worker_rows = visible_worker_indices
+        .iter()
+        .filter_map(|&idx| workers.get(idx))
+        .collect::<Vec<_>>();
+    let visible_worker_cards = visible_worker_indices
+        .iter()
+        .filter_map(|&idx| app_state.workers.get(idx))
+        .collect::<Vec<_>>();
+    let visible_worker_count = visible_worker_rows.len();
     let layout_constraints = vec![
         Constraint::Length(3),
         Constraint::Min(16),
@@ -792,9 +972,9 @@ fn draw_dashboard_frame(
         1
     };
     let mut backlog_rows = requested_backlog_rows;
-    if app_state.workers.len() >= 3 {
+    if visible_worker_count >= 3 {
         let minimum_worker_rows =
-            (app_state.workers.len().min(3) * worker_row_height_for_layout + 1) as u16;
+            (visible_worker_count.min(3) * worker_row_height_for_layout + 1) as u16;
         let max_backlog_rows = remaining.saturating_sub(minimum_worker_rows);
         let minimum_backlog_rows = if app_state.backlog.is_empty() {
             0
@@ -806,7 +986,7 @@ fn draw_dashboard_frame(
         backlog_rows = requested_backlog_rows
             .min(max_backlog_rows)
             .max(minimum_backlog_rows);
-    } else if app_state.workers.is_empty() {
+    } else if visible_worker_count == 0 {
         let max_backlog_rows = remaining.saturating_sub(1);
         backlog_rows = requested_backlog_rows.min(max_backlog_rows);
     }
@@ -873,9 +1053,9 @@ fn draw_dashboard_frame(
     );
     frame.render_widget(summary, chunks[0]);
 
-    let metrics = WorkerMetrics::from_app_state(&app_state.workers);
+    let metrics = WorkerMetrics::from_app_state(visible_worker_cards.iter().copied());
     let (run_id, run_log_path) = run_context_summary();
-    let worker_ids = worker_ids_summary(workers);
+    let worker_ids = worker_ids_summary(visible_worker_rows.iter().copied());
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
@@ -968,19 +1148,19 @@ fn draw_dashboard_frame(
     let viewport_height = workers_panel[1].height.min(viewport_cap.max(1));
     let worker_row_height = worker_row_height_for_layout;
     let worker_row_capacity = (viewport_height as usize / worker_row_height).max(1);
-    let max_worker_offset = app_state.workers.len().saturating_sub(worker_row_capacity);
+    let max_worker_offset = visible_worker_count.saturating_sub(worker_row_capacity);
     WORKERS_VIEWPORT_CAPACITY.with(|cell| {
         *cell.borrow_mut() = worker_row_capacity;
     });
     WORKERS_TOTAL_COUNT.with(|cell| {
-        *cell.borrow_mut() = app_state.workers.len();
+        *cell.borrow_mut() = visible_worker_count;
     });
     let selected_worker = WORKERS_VIEWPORT_SELECTED.with(|cell| {
         let mut selected = cell.borrow_mut();
-        if app_state.workers.is_empty() {
+        if visible_worker_count == 0 {
             *selected = 0;
         } else {
-            *selected = (*selected).min(app_state.workers.len() - 1);
+            *selected = (*selected).min(visible_worker_count - 1);
         }
         *selected
     });
@@ -996,14 +1176,13 @@ fn draw_dashboard_frame(
         }
         *offset
     });
-    let worker_end = (worker_offset + worker_row_capacity).min(app_state.workers.len());
+    let worker_end = (worker_offset + worker_row_capacity).min(visible_worker_count);
 
     let command_stream_max_width = workers_panel[1]
         .width
         .saturating_sub(8 + "Commands: ".len() as u16) as usize;
     let command_scroll_offset = current_command_scroll_offset();
-    let worker_items = app_state
-        .workers
+    let worker_items = visible_worker_cards
         .iter()
         .enumerate()
         .skip(worker_offset)
@@ -1066,12 +1245,12 @@ fn draw_dashboard_frame(
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            if app_state.workers.len() > worker_row_capacity {
+            if visible_worker_count > worker_row_capacity {
                 format!(
                     "Workers ({:02}-{:02}/{:02})",
                     worker_offset + 1,
                     worker_end,
-                    app_state.workers.len()
+                    visible_worker_count
                 )
             } else {
                 "Workers".to_string()
@@ -1085,35 +1264,30 @@ fn draw_dashboard_frame(
     frame.render_widget(List::new(worker_items), workers_panel[1]);
 
     let ordered_backlog = app_state.backlog;
-    let content_capacity = body[2].height.saturating_sub(2) as usize;
-    let max_visible = if content_capacity == 0 {
-        0
-    } else if ordered_backlog.len() > content_capacity {
-        content_capacity.saturating_sub(1)
-    } else {
-        ordered_backlog.len()
-    };
-    let mut list_items = Vec::new();
-    for item in ordered_backlog.iter().take(max_visible) {
-        let badge = match item.priority {
-            BacklogPriority::P0 => "P0",
-            BacklogPriority::P1 => "P1",
-            BacklogPriority::P2 => "P2",
-        };
-        list_items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("{badge: <2}"), item.priority.span_style()),
-            Span::raw(" "),
-            Span::raw(item.title.clone()),
-        ])));
-    }
-    if ordered_backlog.len() > max_visible && content_capacity > 0 {
-        let hidden = ordered_backlog.len().saturating_sub(max_visible);
-        list_items.push(ListItem::new(format!("... and {hidden} more")));
-    }
-    if list_items.is_empty() {
-        list_items.push(ListItem::new("No backlog items"));
-    }
+    let ordered_merge_queue = ordered_merge_queue_items(&backlog.in_progress)
+        .into_iter()
+        .map(|item| BacklogItem {
+            priority: match item.priority {
+                ParsedBacklogPriority::P0 => BacklogPriority::P0,
+                ParsedBacklogPriority::P1 => BacklogPriority::P1,
+                ParsedBacklogPriority::P2 => BacklogPriority::P2,
+            },
+            title: item.title,
+        })
+        .collect::<Vec<_>>();
+    let merge_queue_panel = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body[2]);
+    let backlog_list_capacity = merge_queue_panel[0].height.saturating_sub(2) as usize;
+    let merge_row = workers.iter().find(|row| row.worker_id == "merge-worker");
+    let merge_command_stream_max_width = merge_queue_panel[1]
+        .width
+        .saturating_sub(8 + "Commands: ".len() as u16)
+        as usize;
 
+    let backlog_items =
+        backlog_items_with_capacity(&ordered_backlog, backlog_list_capacity, "No backlog items");
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             "BACKLOG (PRIORITY ORDER)",
@@ -1121,13 +1295,64 @@ fn draw_dashboard_frame(
                 .fg(Color::Rgb(245, 196, 95))
                 .add_modifier(Modifier::BOLD),
         )])),
-        body[2],
+        merge_queue_panel[0],
     );
     let backlog_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body[2]);
-    frame.render_widget(List::new(list_items), backlog_panel[1]);
+        .split(merge_queue_panel[0]);
+    frame.render_widget(List::new(backlog_items), backlog_panel[1]);
+
+    let merge_right_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(merge_queue_panel[1]);
+    let merge_queue_list_capacity = merge_right_panel[3].height.saturating_sub(2) as usize;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "MERGE WORKER",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        )])),
+        merge_right_panel[0],
+    );
+    let merge_worker_items = vec![merge_worker_card_item(
+        merge_row,
+        compact_view || compact_worker_row,
+        merge_command_stream_max_width,
+        command_scroll_offset,
+    )];
+    let merge_worker_card = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(merge_right_panel[1]);
+    frame.render_widget(List::new(merge_worker_items), merge_worker_card[1]);
+
+    let merge_queue_items = backlog_items_with_capacity(
+        &ordered_merge_queue,
+        merge_queue_list_capacity,
+        "No merge queue items",
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![Span::styled(
+            "MERGE QUEUE",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        )])),
+        merge_right_panel[2],
+    );
+    let merge_queue_panel_content = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(merge_right_panel[3]);
+    frame.render_widget(List::new(merge_queue_items), merge_queue_panel_content[1]);
 
     let controls_legend =
         if workers.len() == 1 && workers[0].worker_id == "boot" && workers[0].state == "init" {
@@ -2420,7 +2645,7 @@ mod tests {
             active: workers.len(),
             failed: 0,
             unresolved: 0,
-                merge_pending: 0,
+            merge_pending: 0,
             p0: 0,
             p1: workers.len(),
             p2: 0,

@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(result.preferred_parallelism, Some(4));
         assert_eq!(result.validation_command, "cargo test --all-targets");
         assert_eq!(result.additional_context, String::new());
-        assert_eq!(result.external_docs_accessible, true);
+        assert!(result.external_docs_accessible);
         assert_eq!(result.agent_steering_correction, "B: agent");
     }
 }

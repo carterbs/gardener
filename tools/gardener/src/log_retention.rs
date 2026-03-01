@@ -6,7 +6,7 @@ pub fn enforce_total_budget(dir: &Path, budget_bytes: u64) -> Result<Vec<PathBuf
     // append_run_log("debug", "log_retention.enforce_total_budget.started", ...);
     let mut files = fs::read_dir(dir)
         .map_err(|e| GardenerError::Io(e.to_string()))?
-        .filter_map(|entry| entry.ok())
+        .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .collect::<Vec<_>>();

@@ -226,7 +226,7 @@ pub fn build_profile(
             "repo_root": repo_root.display().to_string(),
             "head_sha": head_sha,
             "discovery_used": discovery_used,
-            "primary_agent": primary_agent.map(|a| a.as_str()),
+            "primary_agent": primary_agent.map(AgentKind::as_str),
             "agents_md_present": agents_md_present,
             "validation_command": validation_command,
             "claude_signals_count": claude_signals.len(),

@@ -882,7 +882,7 @@ fn fallback_from_quality_doc(quality_doc: &str, target: usize) -> Vec<(String, S
         }
         let columns: Vec<_> = line
             .split('|')
-            .map(|column| column.trim())
+            .map(str::trim)
             .filter(|column| !column.is_empty())
             .collect();
         if columns.len() == 3 {

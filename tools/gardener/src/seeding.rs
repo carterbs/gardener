@@ -295,7 +295,7 @@ fn extract_quality_risks(quality_doc: &str) -> String {
         }
         let columns: Vec<_> = line
             .split('|')
-            .map(|col| col.trim())
+            .map(str::trim)
             .filter(|col| !col.is_empty())
             .collect();
         if columns.len() != 3 {

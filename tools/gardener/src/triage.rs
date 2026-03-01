@@ -161,7 +161,7 @@ pub fn run_triage(
         "triage.started",
         json!({
             "working_dir": scope.working_dir.display().to_string(),
-            "agent_override": agent_override.map(|a| a.as_str()),
+            "agent_override": agent_override.map(AgentKind::as_str),
             "output_path": resolved_profile_path.display().to_string(),
         }),
     );
@@ -206,7 +206,7 @@ pub fn run_triage(
         json!({
             "detected": format!("{:?}", detected.detected),
             "chosen_agent": chosen_agent.as_str(),
-            "agent_override": agent_override.map(|a| a.as_str()),
+            "agent_override": agent_override.map(AgentKind::as_str),
             "claude_signals": detected.claude_signals,
             "codex_signals": detected.codex_signals,
             "agents_md_present": detected.agents_md_present
@@ -384,7 +384,7 @@ pub fn ensure_profile_for_run(
         "triage.ensure_profile.started",
         json!({
             "force_retriage": force_retriage,
-            "agent_override": agent_override.map(|a| a.as_str())
+            "agent_override": agent_override.map(AgentKind::as_str)
         }),
     );
     match triage_needed(scope, cfg, runtime, force_retriage)? {

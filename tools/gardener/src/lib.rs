@@ -484,15 +484,15 @@ pub fn run_with_runtime(
             let mut startup_backlog = store.list_tasks()?;
             if !cfg_for_startup.execution.test_mode {
                 if let Ok(open_prs) = GhClient::new(
-                runtime.process_runner.as_ref(),
-                startup.scope.repo_root.as_ref().unwrap_or(&startup.scope.working_dir),
-            )
-            .list_open_prs()
-            {
-                let open_pr_map = open_prs
-                    .into_iter()
-                    .filter(|pr| pr.head_ref_name.starts_with("gardener/"))
-                    .map(|pr| (pr.head_ref_name, pr.number))
+                    runtime.process_runner.as_ref(),
+                    startup.scope.repo_root.as_ref().unwrap_or(&startup.scope.working_dir),
+                )
+                .list_open_prs()
+                {
+                    let open_pr_map = open_prs
+                        .into_iter()
+                        .filter(|pr| pr.head_ref_name.starts_with("gardener/"))
+                        .map(|pr| (pr.head_ref_name, pr.number))
                     .collect::<HashMap<_, _>>();
                 for task in startup_backlog
                     .iter()
@@ -511,7 +511,7 @@ pub fn run_with_runtime(
                     json!({ "cwd": startup.scope.working_dir.display().to_string() }),
                 );
             }
-                startup_backlog = store.list_tasks()?;
+            startup_backlog = store.list_tasks()?;
             }
             emit_record(RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
                 tasks: startup_backlog

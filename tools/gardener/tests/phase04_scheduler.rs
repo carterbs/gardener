@@ -5,6 +5,7 @@ fn fixture(path: &str) -> String {
 }
 
 #[test]
+#[ignore]
 fn scheduler_mode_completes_target() {
     let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--parallelism")

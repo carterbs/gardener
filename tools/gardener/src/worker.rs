@@ -284,6 +284,9 @@ fn execute_task_live(
             failure_reason,
         });
     }
+    let doing_output = parse_doing_output(&doing_result.payload, worker_id, task_summary);
+    let commit_message =
+        select_commit_message(&doing_output.commit_message, worker_id, task_summary);
     fsm.on_doing_turn_completed()?;
     if fsm.state == WorkerState::Parked {
         append_run_log(
@@ -307,7 +310,7 @@ fn execute_task_live(
     // --- Deterministic Commit ---
     // Agent wrote code — we commit deterministically.
     let git = GitClient::new(process_runner, &worktree_path);
-    git.commit_all("feat: implement task changes")?;
+    git.commit_all(&commit_message)?;
 
     // --- Deterministic Gitting ---
     fsm.transition(WorkerState::Gitting)?;
@@ -551,10 +554,7 @@ fn execute_task_live(
         match gh.merge_pr(pr) {
             Ok(()) => {
                 let view = gh.view_pr(pr)?;
-                let sha = view
-                    .merge_commit
-                    .map(|c| c.oid)
-                    .unwrap_or_default();
+                let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
                 merge_output = MergingOutput {
                     merged: true,
                     merge_sha: Some(sha),
@@ -1130,6 +1130,90 @@ fn parse_understand_output(
     }
 }
 
+fn parse_doing_output(
+    payload: &serde_json::Value,
+    worker_id: &str,
+    task_summary: &str,
+) -> DoingOutput {
+    if let Ok(parsed) = serde_json::from_value::<DoingOutput>(payload.clone()) {
+        return parsed;
+    }
+    append_run_log(
+        "warn",
+        "worker.doing.payload_invalid",
+        json!({
+            "worker_id": worker_id,
+            "task_summary": task_summary,
+            "payload": payload,
+        }),
+    );
+    DoingOutput {
+        summary: task_summary.to_string(),
+        files_changed: vec![],
+        commit_message: fallback_commit_message(task_summary),
+    }
+}
+
+fn select_commit_message(raw_message: &str, worker_id: &str, task_summary: &str) -> String {
+    let trimmed = raw_message.trim();
+    if is_valid_commit_message(trimmed) {
+        return trimmed.to_string();
+    }
+    let fallback = fallback_commit_message(task_summary);
+    append_run_log(
+        "warn",
+        "worker.doing.commit_message_invalid",
+        json!({
+            "worker_id": worker_id,
+            "provided": raw_message,
+            "fallback": fallback,
+        }),
+    );
+    fallback
+}
+
+fn is_valid_commit_message(message: &str) -> bool {
+    if message.is_empty() {
+        return false;
+    }
+    let normalized = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = normalized.to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "feat: implement task changes"
+            | "implement task changes"
+            | "wip"
+            | "update code"
+            | "misc changes"
+            | "fix stuff"
+    ) {
+        return false;
+    }
+    match normalized.split_once(':') {
+        Some((kind, desc)) => {
+            let kind = kind.trim();
+            let desc = desc.trim();
+            !kind.is_empty() && !desc.is_empty()
+        }
+        None => false,
+    }
+}
+
+fn fallback_commit_message(task_summary: &str) -> String {
+    let first_line = task_summary.lines().next().unwrap_or_default().trim();
+    if first_line.is_empty() {
+        return "feat: implement requested changes".to_string();
+    }
+    let normalized = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let max_desc_len = 72usize.saturating_sub("feat: ".len());
+    let desc = normalized.chars().take(max_desc_len).collect::<String>();
+    if desc.is_empty() {
+        "feat: implement requested changes".to_string()
+    } else {
+        format!("feat: {desc}")
+    }
+}
+
 fn parse_reviewing_output(payload: &serde_json::Value) -> ReviewingOutput {
     let verdict = payload
         .get("verdict")
@@ -1388,10 +1472,10 @@ fn classify_task(task_summary: &str) -> crate::fsm::TaskCategory {
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_task, extract_failure_reason, parse_reviewing_output, parse_understand_output,
-        review_artifact_path, sanitize_for_branch,
-        worktree_branch_for, worktree_path_for, worktree_slug_for_task, worktree_slug_suffix,
-        WORKTREE_TASK_SLUG_PREFIX_CHARS,
+        execute_task, extract_failure_reason, fallback_commit_message, parse_doing_output,
+        parse_reviewing_output, parse_understand_output, review_artifact_path, sanitize_for_branch,
+        select_commit_message, worktree_branch_for, worktree_path_for, worktree_slug_for_task,
+        worktree_slug_suffix, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::runtime::FakeProcessRunner;
@@ -1483,16 +1567,10 @@ mod tests {
         );
         assert_eq!(
             branch,
-            format!(
-                "gardener/{}",
-                worktree_slug_for_task("manual:tui:GARD-03")
-            )
+            format!("gardener/{}", worktree_slug_for_task("manual:tui:GARD-03"))
         );
 
-        let path = worktree_path_for(
-            std::path::Path::new("/repo"),
-            "manual:tui:GARD-03",
-        );
+        let path = worktree_path_for(std::path::Path::new("/repo"), "manual:tui:GARD-03");
         let dir_name = path
             .file_name()
             .expect("worktree path should have file name");
@@ -1568,6 +1646,40 @@ mod tests {
             output.reasoning,
             "fallback deterministic keyword classifier (invalid understand payload)"
         );
+    }
+
+    #[test]
+    fn parse_doing_output_falls_back_when_payload_invalid() {
+        let output = parse_doing_output(&serde_json::json!({"foo": "bar"}), "worker-1", "Add test");
+        assert_eq!(output.summary, "Add test");
+        assert!(output.files_changed.is_empty());
+        assert_eq!(output.commit_message, "feat: Add test");
+    }
+
+    #[test]
+    fn select_commit_message_uses_valid_message() {
+        let message = select_commit_message(
+            "fix(worker): wire deterministic commit to doing payload",
+            "worker-1",
+            "ignored",
+        );
+        assert_eq!(
+            message,
+            "fix(worker): wire deterministic commit to doing payload"
+        );
+    }
+
+    #[test]
+    fn select_commit_message_rejects_generic_message() {
+        let message =
+            select_commit_message("feat: implement task changes", "worker-1", "Enable lint");
+        assert_eq!(message, "feat: Enable lint");
+    }
+
+    #[test]
+    fn fallback_commit_message_handles_empty_summary() {
+        let message = fallback_commit_message("   ");
+        assert_eq!(message, "feat: implement requested changes");
     }
 
     #[test]

@@ -142,6 +142,7 @@ After implementation, you MUST verify your work actually works:
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
+Do not use generic commit messages like "feat: implement task changes", "update code", "misc changes", or "wip".
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -184,6 +185,7 @@ After implementation, verify your work actually works:
 Guardrails: max 100 turns, keep patch minimal, include changed files list.
 Output schema must be JSON envelope with payload fields: summary, files_changed, commit_message.
 commit_message must be a concise conventional-commit style message describing what was implemented.
+Do not use generic commit messages like "feat: implement task changes", "update code", "misc changes", or "wip".
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -319,7 +321,9 @@ mod tests {
             .template_for(WorkerState::Doing)
             .expect("template exists");
         assert_eq!(tpl.version, "v1-doing-retry-rebase");
-        assert!(tpl.body.contains("git fetch origin main && git rebase origin/main"));
+        assert!(tpl
+            .body
+            .contains("git fetch origin main && git rebase origin/main"));
     }
 
     #[test]

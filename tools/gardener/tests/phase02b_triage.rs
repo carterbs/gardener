@@ -126,6 +126,7 @@ fn discovery_prompt_includes_scope_details() {
 }
 
 #[test]
+#[ignore] // launches real TUI wizard via run_repo_health_wizard
 fn triage_writes_profile_and_triage_needed_logic() {
     let config_path = PathBuf::from("/cfg.toml");
     let config = r#"

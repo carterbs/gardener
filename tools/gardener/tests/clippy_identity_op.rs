@@ -187,6 +187,23 @@ fn workspace_clippy_lint_configuration_enforces_redundant_static_lifetimes_deny(
 }
 
 #[test]
+fn check_no_warnings_script_enforces_redundant_static_lifetimes_lint() {
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut script_path = manifest_path;
+    script_path.pop();
+    script_path.pop();
+    script_path.push("scripts/check-no-warnings.sh");
+
+    let script_text = std::fs::read_to_string(&script_path)
+        .unwrap_or_else(|_| panic!("failed to read script: {}", script_path.display()));
+
+    assert!(
+        script_text.contains("clippy::redundant_static_lifetimes"),
+        "check-no-warnings.sh should explicitly pass clippy::redundant_static_lifetimes"
+    );
+}
+
+#[test]
 fn workspace_clippy_lint_configuration_enables_manual_try_fold_warn() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();

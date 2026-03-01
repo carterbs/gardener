@@ -1077,7 +1077,7 @@ fn log_write_result(
     }
 }
 
-fn backlog_path_state(path: &Path) -> serde_json::Value {
+pub(crate) fn backlog_path_state(path: &Path) -> serde_json::Value {
     let file = |p: &Path| match std::fs::metadata(p) {
         Ok(meta) => {
             let modified_unix_ms = meta

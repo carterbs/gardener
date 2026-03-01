@@ -52,7 +52,7 @@ pub fn run_do(ctx: &DoContext<'_>) -> Result<DoOutcome, GardenerError> {
         return Err(GardenerError::Process(format!("do phase agent failure: {reason}")));
     }
 
-    let doing_output = parse_doing_output(&result.payload, &ctx.identity.worker_id, ctx.task_summary);
+    let doing_output = parse_doing_output(&result.payload, &ctx.identity.worker_id, ctx.task_summary)?;
 
     if let Some(on_step) = ctx.on_step {
         on_step("DO", "do phase complete");
@@ -64,12 +64,14 @@ pub fn run_do(ctx: &DoContext<'_>) -> Result<DoOutcome, GardenerError> {
     })
 }
 
-pub(crate) fn parse_doing_output(payload: &serde_json::Value, worker_id: &str, task_summary: &str) -> DoingOutput {
-    if let Ok(parsed) = serde_json::from_value::<DoingOutput>(payload.clone()) { return parsed; }
-    append_run_log("warn", "worker.doing.payload_invalid", json!({
+pub(crate) fn parse_doing_output(payload: &serde_json::Value, worker_id: &str, task_summary: &str) -> Result<DoingOutput, GardenerError> {
+    if let Ok(parsed) = serde_json::from_value::<DoingOutput>(payload.clone()) { return Ok(parsed); }
+    append_run_log("error", "worker.doing.payload_invalid", json!({
         "worker_id": worker_id, "task_summary": task_summary, "payload": payload,
     }));
-    DoingOutput { summary: task_summary.to_string() }
+    Err(GardenerError::Process(format!(
+        "doing phase produced invalid payload (task will be marked unresolved): {payload}"
+    )))
 }
 
 pub(crate) fn fallback_commit_message(task_summary: &str) -> String {

@@ -178,6 +178,14 @@ where
 
     // Backup the database before any store opens.
     let db_path = backlog_db_path(cfg, scope);
+    append_run_log(
+        "info",
+        "startup.backlog_db.resolved",
+        json!({
+            "path": db_path.display().to_string(),
+            "path_state": crate::backlog_store::backlog_path_state(&db_path),
+        }),
+    );
     if let Err(e) = backup_db_if_exists(&db_path) {
         append_run_log(
             "error",

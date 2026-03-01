@@ -343,7 +343,21 @@ fn execute_task_live(
             failure_reason,
         }));
     }
-    let _doing_output = parse_doing_output(&doing_result.payload, worker_id, task_summary);
+    let doing_output = match parse_doing_output(&doing_result.payload, worker_id, task_summary) {
+        Ok(output) => output,
+        Err(e) => {
+            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Failed,
+                logs,
+                teardown: None,
+                failure_reason: Some(e.to_string()),
+            }));
+        }
+    };
+    let _ = doing_output;
     fsm.on_doing_turn_completed()?;
     if fsm.state == WorkerState::Parked {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked);
@@ -1638,9 +1652,22 @@ mod tests {
     }
 
     #[test]
-    fn parse_doing_output_falls_back_when_payload_invalid() {
-        let output = parse_doing_output(&serde_json::json!({"foo": "bar"}), "worker-1", "Add test");
-        assert_eq!(output.summary, "Add test");
+    fn parse_doing_output_returns_err_when_payload_invalid() {
+        let result = parse_doing_output(&serde_json::json!({"foo": "bar"}), "worker-1", "Add test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_doing_output_returns_err_when_payload_null() {
+        let result = parse_doing_output(&serde_json::Value::Null, "worker-1", "Add test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_doing_output_succeeds_with_valid_payload() {
+        let payload = serde_json::json!({"summary": "did the thing"});
+        let result = parse_doing_output(&payload, "worker-1", "Add test");
+        assert_eq!(result.expect("valid payload should parse").summary, "did the thing");
     }
 
     #[test]

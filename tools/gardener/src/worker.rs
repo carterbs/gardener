@@ -148,8 +148,8 @@ fn execute_task_live(
     let mut logs = Vec::new();
     let factory = AdapterFactory::with_defaults();
     let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
-    let worktree_path = worktree_path_for(repo_root, worker_id, task_id);
-    let branch = worktree_branch_for(worker_id, task_id);
+    let worktree_path = worktree_path_for(repo_root, task_id);
+    let branch = worktree_branch_for(task_id);
     let worktree_client = WorktreeClient::new(process_runner, repo_root);
     worktree_client.create_or_resume(&worktree_path, &branch)?;
 
@@ -1275,16 +1275,16 @@ fn teardown_after_completion(
     }
 }
 
-fn worktree_branch_for(worker_id: &str, task_id: &str) -> String {
-    format!("gardener/{worker_id}-{}", worktree_slug_for_task(task_id))
+fn worktree_branch_for(task_id: &str) -> String {
+    format!("gardener/{}", worktree_slug_for_task(task_id))
 }
 
-fn worktree_path_for(repo_root: &Path, worker_id: &str, task_id: &str) -> PathBuf {
+fn worktree_path_for(repo_root: &Path, task_id: &str) -> PathBuf {
     let base = env::var("HOME").map_or_else(
         |_| repo_root.to_path_buf(),
         |_home| PathBuf::from("/tmp/gardener-worktrees"),
     );
-    base.join(format!("{worker_id}-{}", worktree_slug_for_task(task_id)))
+    base.join(worktree_slug_for_task(task_id))
 }
 
 /// Returns a git-safe slug derived from the task ID.
@@ -1476,7 +1476,7 @@ mod tests {
 
     #[test]
     fn worktree_names_are_git_safe_for_namespaced_task_ids() {
-        let branch = worktree_branch_for("worker-1", "manual:tui:GARD-03");
+        let branch = worktree_branch_for("manual:tui:GARD-03");
         assert!(
             !branch.contains(':'),
             "branch name must not contain colon: {branch}"
@@ -1484,14 +1484,13 @@ mod tests {
         assert_eq!(
             branch,
             format!(
-                "gardener/worker-1-{}",
+                "gardener/{}",
                 worktree_slug_for_task("manual:tui:GARD-03")
             )
         );
 
         let path = worktree_path_for(
             std::path::Path::new("/repo"),
-            "worker-1",
             "manual:tui:GARD-03",
         );
         let dir_name = path
@@ -1519,8 +1518,8 @@ mod tests {
             worktree_slug_suffix("manual:tui:GARD-11")
         );
         assert!(first.len() <= WORKTREE_TASK_SLUG_PREFIX_CHARS + 1 + 16);
-        let branch = worktree_branch_for("worker-1", "manual:tui:GARD-01");
-        assert_eq!(branch.len(), "gardener/worker-1-".len() + first.len());
+        let branch = worktree_branch_for("manual:tui:GARD-01");
+        assert_eq!(branch.len(), "gardener/".len() + first.len());
     }
 
     #[test]

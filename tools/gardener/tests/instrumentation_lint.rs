@@ -434,8 +434,8 @@ fn linter_run_triage_with_tty_must_be_ignored() {
             // Found #[test] — check if #[ignore] appears before the fn line
             let mut ignored = false;
             let mut fn_line_idx = None;
-            for j in (i + 1)..lines.len() {
-                let attr_trimmed = lines[j].trim();
+            for (j, line) in lines.iter().enumerate().skip(i + 1) {
+                let attr_trimmed = line.trim();
                 if attr_trimmed.starts_with("fn ") || attr_trimmed.starts_with("async fn ") {
                     fn_line_idx = Some(j);
                     break;
@@ -472,8 +472,8 @@ fn linter_run_triage_with_tty_must_be_ignored() {
             let mut brace_depth = 0isize;
             let mut body_start = None;
             let mut body_end = fn_idx;
-            for k in fn_idx..lines.len() {
-                for ch in lines[k].chars() {
+            for (k, line) in lines.iter().enumerate().skip(fn_idx) {
+                for ch in line.chars() {
                     if ch == '{' {
                         if body_start.is_none() {
                             body_start = Some(k);
@@ -567,8 +567,8 @@ fn find_tty_forwarding_helpers(lines: &[&str]) -> Vec<String> {
         let mut body_started = false;
         let mut body_end = i;
         let mut body_lines = Vec::new();
-        for k in i..lines.len() {
-            for ch in lines[k].chars() {
+        for (k, line) in lines.iter().enumerate().skip(i) {
+            for ch in line.chars() {
                 if ch == '{' {
                     body_started = true;
                     brace_depth += 1;
@@ -576,7 +576,7 @@ fn find_tty_forwarding_helpers(lines: &[&str]) -> Vec<String> {
                     brace_depth -= 1;
                 }
             }
-            body_lines.push(lines[k]);
+            body_lines.push(*line);
             if body_started && brace_depth == 0 {
                 body_end = k;
                 break;

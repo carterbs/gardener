@@ -1399,6 +1399,16 @@ fn parse_reviewing_output(payload: &serde_json::Value) -> ReviewingOutput {
     }
 }
 
+fn extract_envelope_body(text: &str) -> Option<&str> {
+    let start = text.rfind(START_MARKER)?;
+    let end = text.rfind(END_MARKER)?;
+    if end <= start {
+        return None;
+    }
+    let body_start = start + START_MARKER.len();
+    Some(text[body_start..end].trim())
+}
+
 fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
     let direct = parse_merge_output_object(payload);
     if direct.merged {
@@ -1406,10 +1416,20 @@ fn parse_merge_output(payload: &serde_json::Value) -> MergingOutput {
     }
 
     if let Some(enveloped_text) = find_enveloped_json_text(payload) {
+        // Stage 2: full OutputEnvelope format (schema_version + state + payload)
         if let Ok(parsed) =
             parse_typed_payload::<MergingOutput>(enveloped_text, WorkerState::Merging)
         {
             return parsed;
+        }
+        // Stage 3: agent emitted flat {"merged":true,"merge_sha":"..."} between markers
+        // This is the format the merging-pr prompt produces; no OutputEnvelope wrapper.
+        if let Some(body) = extract_envelope_body(enveloped_text) {
+            if let Ok(parsed) = serde_json::from_str::<MergingOutput>(body) {
+                if parsed.merged {
+                    return parsed;
+                }
+            }
         }
     }
 
@@ -1931,6 +1951,18 @@ mod tests {
         let output = parse_merge_output(&payload);
         assert!(output.merged);
         assert_eq!(output.merge_sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_merge_output_handles_flat_json_between_markers() {
+        let text = serde_json::Value::String(format!(
+            "The PR was merged.\n{}\n{{\"merged\":true,\"merge_sha\":\"abc123\"}}\n{}",
+            super::START_MARKER,
+            super::END_MARKER
+        ));
+        let output = parse_merge_output(&text);
+        assert!(output.merged);
+        assert_eq!(output.merge_sha.as_deref(), Some("abc123"));
     }
 
     #[test]

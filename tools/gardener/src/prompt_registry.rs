@@ -305,22 +305,48 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 
 fn merging_template_pr() -> PromptTemplate {
     PromptTemplate {
-        version: "v1-merging-pr",
-        body: r#"Intent: merge the open GitHub pull request for the current branch and report the resulting merge commit SHA.
+        version: "v2-merging-pr",
+        body: r#"Intent: merge the open GitHub pull request for the current branch into main and report the resulting merge commit SHA.
 
 ## Steps
 
-1. Confirm the current branch and PR state with: git status && gh pr view --json state,mergeable,mergeStateStatus
-2. If the PR is not in a mergeable state, explain why and set merged=false.
-3. Merge the PR: gh pr merge --merge --auto or gh pr merge <pr-number> --merge
-4. Capture the merge commit SHA from the merge result.
-5. Verify the merge completed: gh pr view <pr-number> --json state,mergedAt
+1. Confirm the current branch and PR state:
+   git status && gh pr view --json state,mergeable,mergeStateStatus
+
+2. If the PR has merge conflicts (mergeable == "CONFLICTING" or mergeStateStatus == "DIRTY"):
+   a. Fetch and rebase onto the latest main:
+      git fetch origin main && git rebase origin/main
+   b. If the rebase has conflicts, resolve them:
+      - Identify conflicts: git diff --name-only --diff-filter=U
+      - Resolve each file carefully — keep the intent of both sides
+      - Stage resolved files: git add <file>
+      - Continue: git rebase --continue
+      - Repeat until rebase completes cleanly
+   c. Validate the resolution: ./scripts/run-validate.sh
+      If validation fails, fix the code and re-run before proceeding.
+   d. Push the updated branch: git push --force-with-lease
+
+3. Check CI status: gh pr view --json statusCheckRollup
+   If any checks are failing:
+   a. Identify what is failing and why (fetch logs, read error output)
+   b. Fix the code causing the failure — lint errors, test failures, build errors, etc.
+   c. Commit the fix: git add <files> && git commit -m "<fix description>"
+   d. Push: git push
+   e. Wait for CI to re-run and pass before proceeding
+   Repeat until all required checks are green.
+
+4. Merge the PR. This repository requires squash merges:
+   gh pr merge --squash
+   If that fails with a strategy error, try: gh pr merge --merge
+
+5. Capture the merge commit SHA from the output or via:
+   gh pr view --json state,mergedAt,mergeCommit
 
 ## On failure
 
-If the merge cannot complete (CI failing, merge conflicts, review requirements not met), set merged=false, merge_sha="" and explain the failure in the summary.
+Only set merged=false if the merge truly cannot complete — for example, a semantic conflict that makes the change incorrect or a CI failure that cannot be resolved with code changes (e.g., infrastructure outage). Do not give up due to merge conflicts or fixable CI failures; resolve them above.
 
-Guardrails: do not perform a local git merge; do not modify source files; include the deterministic merge_sha when merged=true.
+Guardrails: resolve conflicts only through rebase (do not perform a local git merge); include the deterministic merge_sha when merged=true.
 Output schema must be JSON envelope with payload fields: merged, merge_sha.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }

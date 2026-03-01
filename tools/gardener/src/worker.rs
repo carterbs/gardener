@@ -880,6 +880,75 @@ fn execute_task_live(
         });
     }
 
+    // --- Friction analysis (best-effort, non-fatal) ---
+    {
+        let fa_run_id = crate::logging::current_run_id().unwrap_or_default();
+        let fa_log_path = crate::logging::current_run_log_path()
+            .unwrap_or_else(|| scope.working_dir.join(".gardener/otel-logs.jsonl"));
+        let fa_input = crate::friction_analysis::FrictionAnalysisInput {
+            worker_id,
+            task_id,
+            task_summary,
+            merge_sha: merge_output.merge_sha.as_deref(),
+            run_id: &fa_run_id,
+            log_path: &fa_log_path,
+        };
+        match crate::friction_analysis::run_friction_analysis(&fa_input, cfg, process_runner, scope)
+        {
+            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed { findings })
+                if !findings.is_empty() =>
+            {
+                let db_path = crate::startup::backlog_db_path(cfg, scope);
+                if let Ok(store) = crate::backlog_store::BacklogStore::open(db_path) {
+                    for task in crate::friction_analysis::findings_to_tasks(&findings) {
+                        if let Err(e) = store.upsert_task(task) {
+                            append_run_log(
+                                "warn",
+                                "friction_analysis.backlog_upsert_error",
+                                json!({
+                                    "worker_id": worker_id,
+                                    "error": e.to_string()
+                                }),
+                            );
+                        }
+                    }
+                    append_run_log(
+                        "info",
+                        "friction_analysis.tasks_created",
+                        json!({
+                            "worker_id": worker_id,
+                            "count": findings.len()
+                        }),
+                    );
+                }
+            }
+            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Skipped { reason }) => {
+                append_run_log(
+                    "debug",
+                    "friction_analysis.skipped",
+                    json!({ "worker_id": worker_id, "reason": reason }),
+                );
+            }
+            Ok(_) => {
+                append_run_log(
+                    "debug",
+                    "friction_analysis.smooth_run",
+                    json!({ "worker_id": worker_id }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "warn",
+                    "friction_analysis.error",
+                    json!({
+                        "worker_id": worker_id,
+                        "error": e.to_string()
+                    }),
+                );
+            }
+        }
+    }
+
     fsm.transition(WorkerState::Complete)?;
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Teardown);
 

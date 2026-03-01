@@ -5,6 +5,7 @@ pub mod backlog_snapshot;
 pub mod backlog_store;
 pub mod config;
 pub mod errors;
+pub mod friction_analysis;
 pub mod fsm;
 pub mod gh;
 pub mod git;

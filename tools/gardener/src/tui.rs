@@ -599,7 +599,7 @@ fn ordered_merge_queue_items(in_progress: &[String]) -> Vec<ParsedBacklogItem> {
 fn backlog_items_with_capacity(
     items: &[BacklogItem],
     content_capacity: usize,
-    empty_label: &str,
+    empty_label: &'static str,
 ) -> Vec<ListItem<'static>> {
     let mut rendered_items = Vec::new();
     let max_visible = if content_capacity == 0 {
@@ -638,13 +638,21 @@ fn merge_worker_card_item(
     command_stream_max_width: usize,
     command_scroll_offset: usize,
 ) -> ListItem<'static> {
-    let (state, task, command_details) = row.map(|row| {
-        (
-            row.state.clone(),
-            row.task_title.clone(),
-            row.command_details.clone(),
-        )
-    }).unwrap_or(("idle".to_string(), "idle".to_string(), Vec::new()));
+    let (state, task, command_details) = row
+        .map(|row| {
+            (
+                row.state.clone(),
+                row.task_title.clone(),
+                row.command_details
+                    .iter()
+                    .map(|(timestamp, command)| CommandEntry {
+                        timestamp: timestamp.clone(),
+                        command: command.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or(("idle".to_string(), "idle".to_string(), Vec::new()));
     let flow_line = worker_flow_chain_spans(&state);
     let mut flow_spans = Vec::new();
     flow_spans.push(Span::raw("    "));
@@ -1277,7 +1285,7 @@ fn draw_dashboard_frame(
         .saturating_sub(8 + "Commands: ".len() as u16) as usize;
 
     let backlog_items = backlog_items_with_capacity(
-        ordered_backlog,
+        &ordered_backlog,
         backlog_list_capacity,
         "No backlog items",
     );

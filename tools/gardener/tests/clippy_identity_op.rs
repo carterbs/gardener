@@ -365,7 +365,7 @@ fn workspace_clippy_lint_configuration_enables_manual_strip_warn() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_unnecessary_sort_by_warn() {
+fn workspace_clippy_lint_configuration_enforces_unnecessary_sort_by_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -384,7 +384,7 @@ fn workspace_clippy_lint_configuration_enables_unnecessary_sort_by_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.unnecessary_sort_by is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]

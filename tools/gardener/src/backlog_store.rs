@@ -22,6 +22,7 @@ pub enum TaskStatus {
     Ready,
     Leased,
     InProgress,
+    MergePending,
     Complete,
     Failed,
     Unresolved,
@@ -33,6 +34,7 @@ impl TaskStatus {
             Self::Ready => "ready",
             Self::Leased => "leased",
             Self::InProgress => "in_progress",
+            Self::MergePending => "merge_pending",
             Self::Complete => "complete",
             Self::Failed => "failed",
             Self::Unresolved => "unresolved",
@@ -44,6 +46,7 @@ impl TaskStatus {
             "ready" => Some(Self::Ready),
             "leased" => Some(Self::Leased),
             "in_progress" => Some(Self::InProgress),
+            "merge_pending" => Some(Self::MergePending),
             "complete" => Some(Self::Complete),
             "failed" => Some(Self::Failed),
             "unresolved" => Some(Self::Unresolved),
@@ -126,6 +129,17 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<bool>>,
     },
+    MarkMergePending {
+        task_id: String,
+        lease_owner: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    ClaimMergePending {
+        merge_worker_id: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<Option<BacklogTask>>>,
+    },
 }
 
 pub struct BacklogStore {
@@ -172,8 +186,8 @@ impl BacklogStore {
 
         // Reject zero-byte files — they indicate prior corruption.
         if existed_before_open {
-            let meta = std::fs::metadata(&path)
-                .map_err(|e| GardenerError::Database(e.to_string()))?;
+            let meta =
+                std::fs::metadata(&path).map_err(|e| GardenerError::Database(e.to_string()))?;
             if meta.len() == 0 {
                 append_run_log(
                     "error",
@@ -225,9 +239,7 @@ impl BacklogStore {
                         let result = upsert_task(&write_conn, &task, now).and_then(|_| {
                             fetch_task(&write_conn, &compute_task_id_from_new_task(&task))?
                                 .ok_or_else(|| {
-                                    GardenerError::Database(
-                                        "row missing after upsert".to_string(),
-                                    )
+                                    GardenerError::Database("row missing after upsert".to_string())
                                 })
                         });
                         let _ = reply.send(result);
@@ -270,19 +282,38 @@ impl BacklogStore {
                         now,
                         reply,
                     } => {
-                let result = release_lease(&write_conn, &task_id, &lease_owner, now);
-                let _ = reply.send(result);
-            }
-            WriteCmd::MarkUnresolved {
-                task_id,
-                lease_owner,
-                now,
-                reply,
-            } => {
-                let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
-                let _ = reply.send(result);
-            }
-        }
+                        let result = release_lease(&write_conn, &task_id, &lease_owner, now);
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::MarkUnresolved {
+                        task_id,
+                        lease_owner,
+                        now,
+                        reply,
+                    } => {
+                        let result = mark_unresolved(&write_conn, &task_id, &lease_owner, now);
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::MarkMergePending {
+                        task_id,
+                        lease_owner,
+                        now,
+                        reply,
+                    } => {
+                        let result =
+                            mark_merge_pending(&write_conn, &task_id, &lease_owner, now);
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::ClaimMergePending {
+                        merge_worker_id,
+                        now,
+                        reply,
+                    } => {
+                        let result =
+                            claim_merge_pending(&write_conn, &merge_worker_id, now);
+                        let _ = reply.send(result);
+                    }
+                }
             }
         });
 
@@ -585,6 +616,81 @@ impl BacklogStore {
         result
     }
 
+    /// Transition a task from `in_progress` to `merge_pending`, clearing the lease
+    /// so the doing worker can claim new work immediately.
+    pub fn mark_merge_pending(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::MarkMergePending {
+                task_id: task_id.to_string(),
+                lease_owner: lease_owner.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.merge_pending",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.merge_pending.rejected",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.merge_pending.failed",
+                    json!({ "task_id": task_id, "lease_owner": lease_owner, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
+    /// Claim the oldest `merge_pending` task for the merge worker, transitioning
+    /// it to `in_progress` with the merge worker as lease owner (FIFO order).
+    pub fn claim_merge_pending(&self, merge_worker_id: &str) -> StoreResult<Option<BacklogTask>> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::ClaimMergePending {
+                merge_worker_id: merge_worker_id.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(Some(task)) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.merge_claimed",
+                    json!({ "task_id": task.task_id, "merge_worker_id": merge_worker_id }),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.merge_claimed.failed",
+                    json!({ "merge_worker_id": merge_worker_id, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
@@ -660,7 +766,7 @@ impl BacklogStore {
                         COALESCE(SUM(CASE WHEN priority = 'P1' THEN 1 ELSE 0 END), 0) AS p1,
                         COALESCE(SUM(CASE WHEN priority = 'P2' THEN 1 ELSE 0 END), 0) AS p2
                      FROM backlog_tasks
-                    WHERE status <> 'complete'"
+                    WHERE status <> 'complete'",
                 )
                 .map_err(db_err)?;
             statement
@@ -675,14 +781,12 @@ impl BacklogStore {
     }
 
     pub fn count_active_tasks(&self) -> StoreResult<usize> {
-        append_run_log(
-            "debug",
-            "backlog.tasks.count_active.started",
-            json!({}),
-        );
+        append_run_log("debug", "backlog.tasks.count_active.started", json!({}));
         self.read_pool.with_conn(|conn| {
             let mut statement = conn
-                .prepare("SELECT COUNT(*) FROM backlog_tasks WHERE status NOT IN ('complete', 'failed')")
+                .prepare(
+                    "SELECT COUNT(*) FROM backlog_tasks WHERE status NOT IN ('complete', 'failed')",
+                )
                 .map_err(db_err)?;
             statement
                 .query_row([], |row| {
@@ -971,7 +1075,7 @@ fn mark_complete(
         .execute(
             "UPDATE backlog_tasks
              SET status = 'complete', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
-             WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress')",
+             WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress', 'merge_pending')",
             params![now, task_id, lease_owner],
         )
         .map_err(db_err)?;
@@ -1028,6 +1132,75 @@ fn mark_unresolved(
     Ok(changed > 0)
 }
 
+fn mark_merge_pending(
+    conn: &Connection,
+    task_id: &str,
+    lease_owner: &str,
+    now: i64,
+) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.mark_merge_pending.started",
+        json!({
+            "task_id": task_id,
+            "lease_owner": lease_owner,
+        }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'merge_pending', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
+             WHERE task_id = ?2 AND lease_owner = ?3 AND status = 'in_progress'",
+            params![now, task_id, lease_owner],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn claim_merge_pending(
+    conn: &Connection,
+    merge_worker_id: &str,
+    now: i64,
+) -> StoreResult<Option<BacklogTask>> {
+    append_run_log(
+        "debug",
+        "backlog_store.claim_merge_pending.started",
+        json!({ "merge_worker_id": merge_worker_id }),
+    );
+    // Claim oldest merge_pending task (FIFO)
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'in_progress', lease_owner = ?1, last_updated = ?2
+             WHERE task_id = (
+                 SELECT task_id FROM backlog_tasks
+                 WHERE status = 'merge_pending'
+                 ORDER BY last_updated ASC
+                 LIMIT 1
+             )",
+            params![merge_worker_id, now],
+        )
+        .map_err(db_err)?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    // Fetch the just-claimed task
+    let task = conn
+        .query_row(
+            "SELECT task_id, kind, title, details, scope_key, priority, status,
+                    last_updated, lease_owner, lease_expires_at, source,
+                    related_pr, related_branch, rationale, attempt_count, created_at
+             FROM backlog_tasks
+             WHERE lease_owner = ?1 AND status = 'in_progress'
+             ORDER BY last_updated DESC LIMIT 1",
+            params![merge_worker_id],
+            row_to_task,
+        )
+        .optional()
+        .map_err(db_err)?;
+    Ok(task)
+}
+
 fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
     append_run_log(
         "debug",
@@ -1042,6 +1215,7 @@ fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
                  lease_expires_at = NULL,
                  last_updated = ?1
              WHERE status = 'in_progress'
+                OR status = 'merge_pending'
                 OR (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at < ?1))",
             [now],
         )
@@ -1392,10 +1566,7 @@ mod tests {
             .expect("owner match");
         assert!(allowed);
 
-        let task = store
-            .get_task(&row.task_id)
-            .expect("fetch")
-            .expect("row");
+        let task = store.get_task(&row.task_id).expect("fetch").expect("row");
         assert_eq!(task.status, TaskStatus::Unresolved);
         assert_eq!(task.lease_owner, None);
         assert_eq!(task.lease_expires_at, None);
@@ -1426,7 +1597,10 @@ mod tests {
         assert_eq!(TaskStatus::Failed.as_str(), "failed");
         assert_eq!(TaskStatus::Unresolved.as_str(), "unresolved");
         assert_eq!(TaskStatus::from_db("failed"), Some(TaskStatus::Failed));
-        assert_eq!(TaskStatus::from_db("unresolved"), Some(TaskStatus::Unresolved));
+        assert_eq!(
+            TaskStatus::from_db("unresolved"),
+            Some(TaskStatus::Unresolved)
+        );
         assert_eq!(TaskStatus::from_db("unknown"), None);
 
         let (store, _dir) = temp_store();

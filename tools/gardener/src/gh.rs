@@ -65,11 +65,6 @@ impl<'a> GhClient<'a> {
     }
 
     pub fn create_pr(&self, title: &str, body: &str) -> Result<(u64, String), GardenerError> {
-        #[derive(Deserialize)]
-        struct PrCreateOutput {
-            number: u64,
-            url: String,
-        }
         append_run_log(
             "info",
             "gh.pr.create.started",
@@ -84,8 +79,6 @@ impl<'a> GhClient<'a> {
                 title.to_string(),
                 "--body".to_string(),
                 body.to_string(),
-                "--json".to_string(),
-                "number,url".to_string(),
             ],
             cwd: Some(self.cwd.clone()),
         })?;
@@ -105,18 +98,26 @@ impl<'a> GhClient<'a> {
                 out.stderr
             )));
         }
-        let parsed: PrCreateOutput = serde_json::from_str(&out.stdout)
-            .map_err(|e| GardenerError::Process(format!("invalid gh pr create json: {e}")))?;
+        let url = out.stdout.trim().to_string();
+        let number = url
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .ok_or_else(|| {
+                GardenerError::Process(format!(
+                    "could not parse PR number from gh pr create output: {url}"
+                ))
+            })?;
         append_run_log(
             "info",
             "gh.pr.create.succeeded",
             json!({
                 "cwd": self.cwd.display().to_string(),
-                "pr_number": parsed.number,
-                "pr_url": parsed.url
+                "pr_number": number,
+                "pr_url": url
             }),
         );
-        Ok((parsed.number, parsed.url))
+        Ok((number, url))
     }
 
     pub fn view_pr(&self, pr_number: u64) -> Result<PrView, GardenerError> {
@@ -486,6 +487,20 @@ mod tests {
             upgrade_unmerged_collision_priority(Priority::P2),
             Priority::P1
         );
+    }
+
+    #[test]
+    fn create_pr_parses_number_from_url() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "https://github.com/owner/repo/pull/42\n".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let (number, url) = gh.create_pr("title", "body").expect("ok");
+        assert_eq!(number, 42);
+        assert_eq!(url, "https://github.com/owner/repo/pull/42");
     }
 
     #[test]

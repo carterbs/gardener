@@ -109,6 +109,27 @@ pub fn run_merge_loop(ctx: &mut MergeLoopContext<'_>) -> Result<MergeLoopOutcome
         let status =
             ctx.gh
                 .poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
+        if let Ok(pr_view) = ctx.gh.view_pr(pr) {
+            if pr_view.state.eq_ignore_ascii_case("MERGED") || pr_view.merged_at.is_some() {
+                let sha = pr_view.merge_commit.map(|c| c.oid).unwrap_or_default();
+                append_run_log(
+                    "info",
+                    "merge_loop.already_merged",
+                    json!({
+                        "worker_id": ctx.identity.worker_id,
+                        "pr_number": pr,
+                        "attempt": attempt + 1,
+                        "merge_sha": sha
+                    }),
+                );
+                step(
+                    ctx,
+                    "MERGE",
+                    &format!("pr already merged upstream (sha={sha})"),
+                );
+                return Ok(MergeLoopOutcome::Merged { sha });
+            }
+        }
 
         append_run_log(
             "info",
@@ -311,6 +332,22 @@ fn merge_main_and_push(
     branch: &str,
     attempt: u32,
 ) -> Result<(), GardenerError> {
+    if ctx.git.abort_merge_if_in_progress()? {
+        step(
+            ctx,
+            "REMEDIATE",
+            "aborted stale merge in progress before attempting merge main",
+        );
+        append_run_log(
+            "warn",
+            "merge_loop.merge_from_main.stale_merge_aborted",
+            json!({
+                "worker_id": ctx.identity.worker_id,
+                "pr_number": ctx.pr_number,
+                "attempt": attempt + 1
+            }),
+        );
+    }
     match ctx.git.try_merge_from_main() {
         Ok(RebaseResult::Clean) => {
             append_run_log(

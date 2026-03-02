@@ -520,6 +520,51 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn abort_merge_if_in_progress(&self) -> Result<bool, GardenerError> {
+        append_run_log(
+            "debug",
+            "git.merge.abort_if_in_progress.started",
+            json!({
+                "cwd": self.cwd.display().to_string()
+            }),
+        );
+        let merge_head = self.run(["git", "rev-parse", "--verify", "-q", "MERGE_HEAD"])?;
+        if merge_head.exit_code != 0 {
+            append_run_log(
+                "debug",
+                "git.merge.not_in_progress",
+                json!({
+                    "cwd": self.cwd.display().to_string()
+                }),
+            );
+            return Ok(false);
+        }
+        let out = self.run(["git", "merge", "--abort"])?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.merge.abort.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "merge abort failed: {}",
+                out.stderr
+            )));
+        }
+        append_run_log(
+            "info",
+            "git.merge.aborted_stale",
+            json!({
+                "cwd": self.cwd.display().to_string()
+            }),
+        );
+        Ok(true)
+    }
+
     pub fn pull_main(&self) -> Result<(), GardenerError> {
         append_run_log(
             "info",
@@ -829,6 +874,46 @@ mod tests {
             .expect("abort rebase");
         let spawned = runner.spawned();
         assert!(spawned[0].args.contains(&"--abort".to_string()));
+    }
+
+    #[test]
+    fn abort_merge_if_in_progress_noop_without_merge_head() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let aborted = GitClient::new(&runner, "/repo")
+            .abort_merge_if_in_progress()
+            .expect("merge abort check should succeed");
+        assert!(!aborted);
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 1);
+        assert!(spawned[0].args.contains(&"rev-parse".to_string()));
+    }
+
+    #[test]
+    fn abort_merge_if_in_progress_executes_abort() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let aborted = GitClient::new(&runner, "/repo")
+            .abort_merge_if_in_progress()
+            .expect("merge abort should run");
+        assert!(aborted);
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 2);
+        assert!(spawned[0].args.contains(&"rev-parse".to_string()));
+        assert!(spawned[1].args.contains(&"--abort".to_string()));
     }
 
     #[test]

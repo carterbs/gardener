@@ -6,12 +6,13 @@ use crate::errors::GardenerError;
 use crate::fsm::{
     DoingOutput, FsmSnapshot, MergingOutput, ReviewVerdict, ReviewingOutput, MAX_REVIEW_LOOPS,
 };
-use crate::gh::{generate_pr_title_body, GhClient, MergeStateStatus, Mergeable};
+use crate::gh::{GhClient, MergeStateStatus, Mergeable};
 use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
+use crate::pr_phase::{run_pr_gen, PrGenContext};
 use crate::prompt_registry::{
     ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry,
 };
@@ -538,7 +539,15 @@ fn execute_task_live(
 
     let gh = GhClient::new(process_runner, &worktree_path);
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PrCreating);
-    let (title, body) = generate_pr_title_body(process_runner, &worktree_path, task_summary)?;
+    let (title, body) = run_pr_gen(&PrGenContext {
+        cfg,
+        process_runner,
+        factory: &factory,
+        worktree_path: &worktree_path,
+        scope,
+        identity: &identity,
+        task_summary,
+    })?;
     let (number, _url) = gh.create_pr(&title, &body)?;
     let pr_number = number;
     append_run_log(
@@ -704,6 +713,33 @@ pub fn execute_merge_phase(
 
     for attempt in 0..MAX_MERGE_REMEDIATION {
         let status = gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
+        if let Ok(pr_view) = gh.view_pr(pr) {
+            if pr_view.state.eq_ignore_ascii_case("MERGED") || pr_view.merged_at.is_some() {
+                append_run_log(
+                    "info",
+                    "worker.merging.already_merged",
+                    json!({
+                        "worker_id": worker_id,
+                        "pr_number": pr,
+                        "attempt": attempt + 1,
+                        "merge_sha": pr_view.merge_commit.as_ref().map(|c| c.oid.clone())
+                    }),
+                );
+                if let Some(sha) = pr_view.merge_commit.as_ref() {
+                    merge_output = MergingOutput {
+                        merged: true,
+                        merge_sha: Some(sha.oid.clone()),
+                    };
+                } else {
+                    merge_output = MergingOutput {
+                        merged: true,
+                        merge_sha: None,
+                    };
+                }
+                break;
+            }
+        }
+
         let block_reason =
             merge_polling_block_reason(&status.mergeable, &status.merge_state_status);
         let mut poll_details = json!({
@@ -1309,6 +1345,18 @@ fn worker_merge_main_and_push(
     _task_id: &str,
     attempt: u32,
 ) -> Result<(), GardenerError> {
+    if git.abort_merge_if_in_progress()? {
+        append_run_log(
+            "warn",
+            "worker.merging.merge_from_main.stale_merge_aborted",
+            json!({
+                "worker_id": worker_id,
+                "pr_number": pr,
+                "attempt": attempt + 1
+            }),
+        );
+    }
+
     match git.try_merge_from_main() {
         Ok(RebaseResult::Clean) => {
             append_run_log(

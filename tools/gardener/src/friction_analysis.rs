@@ -50,12 +50,7 @@ pub enum FrictionAnalysisOutcome {
 // ---------------------------------------------------------------------------
 
 const MAX_TIMELINE_BYTES: usize = 32 * 1024;
-const INTERESTING_PREFIXES: &[&str] = &[
-    "worker.",
-    "agent.turn.",
-    "merge_loop.",
-    "worker.gitting.",
-];
+const INTERESTING_PREFIXES: &[&str] = &["worker.", "agent.turn.", "merge_loop.", "worker.gitting."];
 const NOISE_PREFIXES: &[&str] = &["boot.stage.", "prompt.rendered"];
 const MIN_SEVERITY: u8 = 9; // WARN=9, ERROR=13, FATAL=17 in OTEL
 
@@ -107,7 +102,9 @@ pub fn extract_worker_timeline(
         }
 
         // Keep events that are interesting by type OR by severity
-        let interesting_type = INTERESTING_PREFIXES.iter().any(|p| event_type.starts_with(p));
+        let interesting_type = INTERESTING_PREFIXES
+            .iter()
+            .any(|p| event_type.starts_with(p));
         let high_severity = severity_num >= MIN_SEVERITY;
 
         if !interesting_type && !high_severity {
@@ -115,10 +112,7 @@ pub fn extract_worker_timeline(
         }
 
         let compact = compact_payload(&parsed);
-        lines.push(format!(
-            "{} {}: {}",
-            severity_text, event_type, compact
-        ));
+        lines.push(format!("{} {}: {}", severity_text, event_type, compact));
 
         // Track line number for diagnostics
         let _ = idx;
@@ -537,8 +531,14 @@ mod tests {
         let path = write_log_file(dir.path(), &lines);
 
         let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
-        assert!(result.contains("worker.started"), "should include worker.started");
-        assert!(result.contains("agent.turn.completed"), "should include agent.turn.completed");
+        assert!(
+            result.contains("worker.started"),
+            "should include worker.started"
+        );
+        assert!(
+            result.contains("agent.turn.completed"),
+            "should include agent.turn.completed"
+        );
         assert!(!result.contains("w2"), "should not include w2 events");
         // Should have exactly 2 lines
         assert_eq!(result.lines().count(), 2);
@@ -556,7 +556,10 @@ mod tests {
 
         let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
         assert!(!result.contains("boot.stage"), "should drop boot.stage");
-        assert!(!result.contains("prompt.rendered"), "should drop prompt.rendered");
+        assert!(
+            !result.contains("prompt.rendered"),
+            "should drop prompt.rendered"
+        );
         assert!(result.contains("worker.task.started"));
     }
 
@@ -578,12 +581,9 @@ mod tests {
 
     #[test]
     fn extract_returns_empty_for_missing_file() {
-        let result = extract_worker_timeline(
-            Path::new("/nonexistent/otel-logs.jsonl"),
-            "run-1",
-            "w1",
-        )
-        .expect("extract timeline from missing file");
+        let result =
+            extract_worker_timeline(Path::new("/nonexistent/otel-logs.jsonl"), "run-1", "w1")
+                .expect("extract timeline from missing file");
         assert!(result.is_empty());
     }
 
@@ -592,23 +592,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("create tempdir");
         // Create many events that exceed 32KB
         let lines: Vec<String> = (0..2000)
-            .map(|i| {
-                otel_line(
-                    "run-1",
-                    "w1",
-                    &format!("worker.event.{}", i),
-                    "INFO",
-                    5,
-                )
-            })
+            .map(|i| otel_line("run-1", "w1", &format!("worker.event.{}", i), "INFO", 5))
             .collect();
         let path = write_log_file(dir.path(), &lines);
 
         let result = extract_worker_timeline(&path, "run-1", "w1").expect("extract timeline");
-        assert!(
-            result.contains("[..."),
-            "should contain omission marker"
-        );
+        assert!(result.contains("[..."), "should contain omission marker");
         assert!(
             result.len() <= MAX_TIMELINE_BYTES + 1024, // some slack for the marker
             "should be within size limit"
@@ -646,7 +635,8 @@ mod tests {
             }],
             "smooth_run": false
         }"#;
-        let resp: FrictionAnalysisResponse = serde_json::from_str(json_str).expect("deserialize response");
+        let resp: FrictionAnalysisResponse =
+            serde_json::from_str(json_str).expect("deserialize response");
         assert_eq!(resp.findings.len(), 1);
         assert!(!resp.smooth_run);
         assert_eq!(resp.findings[0].category, "tool_failure");
@@ -655,7 +645,8 @@ mod tests {
     #[test]
     fn response_deserializes_smooth_run() {
         let json_str = r#"{"findings": [], "smooth_run": true}"#;
-        let resp: FrictionAnalysisResponse = serde_json::from_str(json_str).expect("deserialize response");
+        let resp: FrictionAnalysisResponse =
+            serde_json::from_str(json_str).expect("deserialize response");
         assert!(resp.findings.is_empty());
         assert!(resp.smooth_run);
     }

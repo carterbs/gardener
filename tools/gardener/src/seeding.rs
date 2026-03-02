@@ -44,13 +44,17 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
 
     out.push_str("You are the Gardener backlog seeding worker.\n");
     out.push_str("Goal: research the repository and seed the backlog database directly with 10 actionable tasks.\n");
-    out.push_str("Do not implement code changes. Your output is backlog rows, not a JSON task envelope.\n\n");
+    out.push_str(
+        "Do not implement code changes. Your output is backlog rows, not a JSON task envelope.\n\n",
+    );
 
     out.push_str("System framing\n");
     out.push_str("- Do not invent nonexistent files, architecture, or conventions.\n");
     out.push_str("- Use AGENTS.md, CLAUDE.md, docs listing, quality grades, and codex article as source of truth.\n");
     out.push_str("- Add tasks that can be picked up immediately by runtime workers.\n");
-    out.push_str("- Prefer work that improves repository legibility, automation, and reliability.\n\n");
+    out.push_str(
+        "- Prefer work that improves repository legibility, automation, and reliability.\n\n",
+    );
 
     out.push_str("Inputs\n");
     out.push_str(&format!(
@@ -115,7 +119,9 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
     out.push_str("   --source seed_runner_v2_direct\n");
     out.push_str("   --title <title>\n");
     out.push_str("   --details <details + rationale in one concise paragraph>\n");
-    out.push_str("5. Insert exactly 10 new tasks, then run ./scripts/backlog-db.sh list to verify.\n");
+    out.push_str(
+        "5. Insert exactly 10 new tasks, then run ./scripts/backlog-db.sh list to verify.\n",
+    );
     out.push_str("6. Final response should be plain text summary only (no JSON envelope).\n\n");
 
     out.push_str("\nQuality doc (truncated for prompt budget)\n");
@@ -527,8 +533,12 @@ mod tests {
             working_dir: repo_root,
         };
         let profile = sample_profile();
-        let context =
-            build_seed_prompt_context(&profile, "Quality report", &scope, "No active backlog tasks.");
+        let context = build_seed_prompt_context(
+            &profile,
+            "Quality report",
+            &scope,
+            "No active backlog tasks.",
+        );
 
         assert_eq!(context.primary_gap, "coverage_signal");
         assert_eq!(context.agents_md, "# AGENTS");

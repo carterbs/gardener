@@ -91,6 +91,8 @@ pub fn run_worker_pool_fsm(
         .map(|idx| WorkerRow {
             worker_id: format!("worker-{}", idx + 1),
             state: "idle".to_string(),
+            task_id: None,
+            last_state_line: 0,
             task_title: "idle".to_string(),
             tool_line: "waiting for claim".to_string(),
             breadcrumb: "idle".to_string(),
@@ -111,6 +113,8 @@ pub fn run_worker_pool_fsm(
         let mut row = WorkerRow {
             worker_id: MERGE_WORKER_ID.to_string(),
             state: "idle".to_string(),
+            task_id: None,
+            last_state_line: 0,
             task_title: "idle".to_string(),
             tool_line: "waiting for merge".to_string(),
             breadcrumb: "idle".to_string(),
@@ -133,8 +137,12 @@ pub fn run_worker_pool_fsm(
                                   last_activity_pulse: &mut Vec<Instant>,
                                   merge_row_idx: usize,
                                   pr_number: u64,
+                                  task_id: &str,
+                                  last_worker_state_line: usize,
                                   task_summary: &str| {
         workers[merge_row_idx].state = "merging".to_string();
+        workers[merge_row_idx].task_id = Some(task_id.to_string());
+        workers[merge_row_idx].last_state_line = last_worker_state_line;
         workers[merge_row_idx].task_title =
             format!("PR #{pr_number} {task_title}", task_title = task_summary);
         let merge_msg = format!("merging PR #{pr_number}");
@@ -167,7 +175,7 @@ pub fn run_worker_pool_fsm(
         let worktree_client = WorktreeClient::new(runtime.process_runner.as_ref(), repo_root);
         let maybe_start_merge = |active_merging: &mut usize,
                                  merge_tx: &mut Option<mpsc::Sender<MergeRequest>>|
-         -> Result<Option<(u64, String)>, GardenerError> {
+         -> Result<Option<(u64, String, String)>, GardenerError> {
             if *active_merging >= 1 {
                 return Ok(None);
             }
@@ -223,9 +231,10 @@ pub fn run_worker_pool_fsm(
                     branch,
                     pr_number,
                     logs: Vec::new(),
+                    handoff_evidence_bundle: None,
                 });
                 *active_merging = active_merging.saturating_add(1);
-                return Ok(Some((pr_number, task_summary)));
+                return Ok(Some((pr_number, task_id, task_summary)));
             }
             Ok(None)
         };
@@ -255,6 +264,8 @@ pub fn run_worker_pool_fsm(
             workers[idx].state = "claimed".to_string();
             workers[idx].task_title = task.title.clone();
             workers[idx].tool_line = "claimed".to_string();
+            workers[idx].task_id = Some(task.task_id.clone());
+            workers[idx].last_state_line = last_worker_state_line;
             workers[idx].breadcrumb = "claim>claimed".to_string();
             workers[idx].lease_held = true;
             append_worker_command(&mut workers[idx], "claimed");
@@ -273,7 +284,7 @@ pub fn run_worker_pool_fsm(
             mpsc::channel();
         let runtime_scope = scope.clone();
         let mut merge_tx = Some(merge_tx);
-        if let Some((pr_number, task_summary)) =
+        if let Some((pr_number, task_id, task_summary)) =
             maybe_start_merge(&mut active_merging, &mut merge_tx)?
         {
             claimed_any = true;
@@ -282,6 +293,8 @@ pub fn run_worker_pool_fsm(
                 &mut last_activity_pulse,
                 merge_row_idx,
                 pr_number,
+                &task_id,
+                last_worker_state_line,
                 &task_summary,
             );
         }
@@ -433,14 +446,15 @@ pub fn run_worker_pool_fsm(
                                         last_activity_pulse[idx] = Instant::now();
                                     }
                                     // Update doing worker TUI to show handoff
-                                    workers[idx].state = "handoff".to_string();
+                                    workers[idx].state = "merging".to_string();
                                     let handoff_msg =
                                         format!("handed off PR #{} to merge worker", req.pr_number);
                                     workers[idx].tool_line = handoff_msg.clone();
                                     append_worker_command(&mut workers[idx], &handoff_msg);
                                     workers[idx].breadcrumb = "handoff>merge".to_string();
                                     workers[idx].lease_held = false;
-                                    if let Some((pr_number, task_summary)) =
+                                    workers[idx].last_state_line = last_worker_state_line;
+                                    if let Some((pr_number, task_id, task_summary)) =
                                         maybe_start_merge(&mut active_merging, &mut merge_tx)?
                                     {
                                         mark_merge_worker_busy(
@@ -448,6 +462,8 @@ pub fn run_worker_pool_fsm(
                                             &mut last_activity_pulse,
                                             merge_row_idx,
                                             pr_number,
+                                            &task_id,
+                                            last_worker_state_line,
                                             &task_summary,
                                         );
                                     }
@@ -499,6 +515,8 @@ pub fn run_worker_pool_fsm(
                                         let _ = store.mark_complete(&task_id, &worker_id)?;
                                         completed = completed.saturating_add(1);
                                         workers[idx].state = "complete".to_string();
+                                        workers[idx].task_id = None;
+                                        workers[idx].last_state_line = last_worker_state_line;
                                         let completed_message = format!("completed {}", task_id);
                                         workers[idx].tool_line = completed_message.clone();
                                         append_worker_command(
@@ -518,6 +536,8 @@ pub fn run_worker_pool_fsm(
                                         );
                                     } else {
                                         workers[idx].state = "failed".to_string();
+                                        workers[idx].task_id = None;
+                                        workers[idx].last_state_line = last_worker_state_line;
                                         let failed_message = if let Some(reason) =
                                             summary.failure_reason.clone()
                                         {
@@ -568,6 +588,7 @@ pub fn run_worker_pool_fsm(
                                                 failed_message.clone()
                                             };
                                             workers[idx].state = "unresolved".to_string();
+                                            workers[idx].last_state_line = last_worker_state_line;
                                             workers[idx].tool_line = unresolved_message.clone();
                                             workers[idx].breadcrumb = "unresolved".to_string();
                                             append_worker_command(
@@ -575,6 +596,8 @@ pub fn run_worker_pool_fsm(
                                                 &unresolved_message,
                                             );
                                         } else {
+                                            workers[idx].task_id = None;
+                                            workers[idx].last_state_line = last_worker_state_line;
                                             let _ = store.release_lease(&task_id, &worker_id)?;
                                         }
                                     }
@@ -610,6 +633,8 @@ pub fn run_worker_pool_fsm(
                                 workers[idx].state = "claimed".to_string();
                                 workers[idx].task_title = task.title.clone();
                                 workers[idx].tool_line = "claimed".to_string();
+                                workers[idx].task_id = Some(task.task_id.clone());
+                                workers[idx].last_state_line = last_worker_state_line;
                                 workers[idx].breadcrumb = "claim>claimed".to_string();
                                 workers[idx].lease_held = true;
                                 append_worker_command(&mut workers[idx], "claimed");
@@ -684,12 +709,16 @@ pub fn run_worker_pool_fsm(
                                     );
                                     workers[merge_row_idx].tool_line = fail_msg.clone();
                                     append_worker_command(&mut workers[merge_row_idx], &fail_msg);
+                                    workers[merge_row_idx].last_state_line = last_worker_state_line;
                                 }
                                 Ok(summary) => {
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
                                         completed = completed.saturating_add(1);
                                         workers[merge_row_idx].state = "complete".to_string();
+                                        workers[merge_row_idx].task_id = Some(task_id.clone());
+                                        workers[merge_row_idx].last_state_line =
+                                            last_worker_state_line;
                                         let done_msg = format!("merged {}", task_id);
                                         workers[merge_row_idx].tool_line = done_msg.clone();
                                         append_worker_command(
@@ -710,6 +739,9 @@ pub fn run_worker_pool_fsm(
                                     } else {
                                         let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID)?;
                                         workers[merge_row_idx].state = "failed".to_string();
+                                        workers[merge_row_idx].task_id = Some(task_id.clone());
+                                        workers[merge_row_idx].last_state_line =
+                                            last_worker_state_line;
                                         let fail_msg = summary
                                             .failure_reason
                                             .as_deref()
@@ -727,7 +759,7 @@ pub fn run_worker_pool_fsm(
                                 }
                             }
                         }
-                        if let Some((pr_number, task_summary)) =
+                        if let Some((pr_number, task_id, task_summary)) =
                             maybe_start_merge(&mut active_merging, &mut merge_tx)?
                         {
                             mark_merge_worker_busy(
@@ -735,6 +767,8 @@ pub fn run_worker_pool_fsm(
                                 &mut last_activity_pulse,
                                 merge_row_idx,
                                 pr_number,
+                                &task_id,
+                                last_worker_state_line,
                                 &task_summary,
                             );
                         }
@@ -1160,9 +1194,16 @@ fn append_worker_state_events(
 ) -> bool {
     let events = recent_worker_state_events(*last_worker_state_line, max_events);
     let mut updated = false;
-    for (line, worker_id, state, details) in events {
+    for (line, worker_id, state, task_id, details) in events {
         for worker in workers.iter_mut() {
             if worker.worker_id != worker_id {
+                continue;
+            }
+            if worker.task_id.as_deref() != Some(task_id.as_str()) {
+                continue;
+            }
+            if !is_non_regressive_state_transition(&worker.state, &state) {
+                worker.last_state_line = line + 1;
                 continue;
             }
             let details = details.trim();
@@ -1181,13 +1222,83 @@ fn append_worker_state_events(
                 } else {
                     append_worker_command(worker, &format!("state {state}: {details}"));
                 }
+                worker.last_state_line = line + 1;
                 updated = true;
+            } else {
+                worker.last_state_line = line + 1;
             }
             break;
         }
         *last_worker_state_line = line + 1;
     }
     updated
+}
+
+fn is_non_regressive_state_transition(current_state: &str, next_state: &str) -> bool {
+    let current = normalize_worker_state_for_transition(current_state);
+    let next = normalize_worker_state_for_transition(next_state);
+
+    match current {
+        "complete" | "failed" | "unresolved" | "parked" | "idle" => return false,
+        _ => {}
+    }
+    if next == "unknown" {
+        return false;
+    }
+    let current_rank = worker_state_rank(current);
+    let next_rank = worker_state_rank(next);
+    next_rank >= current_rank
+}
+
+fn worker_state_rank(state: &str) -> i32 {
+    match state {
+        "understand" => 0,
+        "planning" => 1,
+        "doing" => 2,
+        "gitting" => 3,
+        "reviewing" => 4,
+        "merging" => 5,
+        "complete" => 6,
+        "failed" => 7,
+        "unresolved" => 8,
+        "parked" => 9,
+        "idle" => 10,
+        _ => 10,
+    }
+}
+
+fn normalize_worker_state_for_transition(state: &str) -> &str {
+    let normalized_state = state.trim().to_ascii_lowercase();
+    let normalized_state = normalized_state
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .rfind(|part| !part.is_empty())
+        .unwrap_or(normalized_state.as_str());
+
+    match normalized_state {
+        "init" | "boot" | "backlog_sync" | "working" | "seeding" => "understand",
+        "claimed" | "starting" | "worktree_preparing" | "worktree_ready" => "understand",
+        "commit" | "gitting_remediation" | "pr_creating" => "gitting",
+        "merge_lock_waiting"
+        | "merge_from_main"
+        | "merge_lock_held"
+        | "merge_polling"
+        | "handoff"
+        | "merge_remediation"
+        | "post_merge_validation"
+        | "teardown" => "merging",
+        "understand" => "understand",
+        "planning" => "planning",
+        "doing" => "doing",
+        "gitting" => "gitting",
+        "reviewing" => "reviewing",
+        "merging" => "merging",
+        "complete" => "complete",
+        "failed" => "failed",
+        "unresolved" => "unresolved",
+        "idle" => "idle",
+        "parked" => "parked",
+        _ => "unknown",
+    }
 }
 
 fn is_copy_shortcut_key(key: char) -> bool {
@@ -1319,7 +1430,10 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 
 #[cfg(test)]
 mod tests {
-    use super::{hotkey_action, run_worker_pool_fsm, wait_for_quit, INTERRUPT_SENTINEL_KEY};
+    use super::{
+        hotkey_action, is_non_regressive_state_transition, run_worker_pool_fsm, wait_for_quit,
+        INTERRUPT_SENTINEL_KEY,
+    };
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
@@ -1677,6 +1791,17 @@ mod tests {
         assert!(!tasks.iter().any(|task| {
             task.priority == Priority::P0 && task.title.contains("Escalation requested")
         }));
+    }
+
+    #[test]
+    fn state_transition_guard_prevents_handoff_regression() {
+        assert!(is_non_regressive_state_transition("handoff", "merging"));
+        assert!(is_non_regressive_state_transition("handoff", "complete"));
+        assert!(!is_non_regressive_state_transition("merging", "understand"));
+        assert!(!is_non_regressive_state_transition(
+            "complete",
+            "understand"
+        ));
     }
 
     #[test]

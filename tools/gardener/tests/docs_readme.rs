@@ -28,6 +28,10 @@ fn docs_readme_is_navigation_index() {
         "docs/README.md must link to quality grades"
     );
     assert!(
+        readme.contains("[Backlog operations runbook](./runbooks/backlog-operations.md)"),
+        "docs/README.md must link to the backlog operations runbook"
+    );
+    assert!(
         readme.contains("[Workflow conventions](./conventions/workflow.md)"),
         "docs/README.md must link to workflow conventions"
     );
@@ -37,6 +41,7 @@ fn docs_readme_is_navigation_index() {
         "../../README.md",
         "../../docs/quality-grades.md",
         "../../docs/conventions/workflow.md",
+        "../../docs/runbooks/backlog-operations.md",
     ] {
         assert!(
             repo_root_path(required).exists(),

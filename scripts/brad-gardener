@@ -1,4 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ensure_git_worktree() {
+  local inside_worktree
+  local bare_repo
+  local script_root
+  local current_root
+
+  if ! inside_worktree=$(git rev-parse --is-inside-work-tree 2>/dev/null); then
+    echo "error: scripts/brad-gardener must be run from a git worktree" >&2
+    exit 1
+  fi
+
+  if [[ "$inside_worktree" != "true" ]]; then
+    echo "error: scripts/brad-gardener must be run from a git worktree" >&2
+    exit 1
+  fi
+
+  if ! bare_repo=$(git rev-parse --is-bare-repository 2>/dev/null); then
+    echo "error: unable to determine git repository type for scripts/brad-gardener" >&2
+    exit 1
+  fi
+
+  if [[ "$bare_repo" == "true" ]]; then
+    echo "error: scripts/brad-gardener requires a non-bare git worktree" >&2
+    exit 1
+  fi
+
+  if ! script_root=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." rev-parse --show-toplevel 2>/dev/null); then
+    echo "error: unable to determine git worktree context for scripts/brad-gardener" >&2
+    exit 1
+  fi
+
+  if ! current_root=$(git rev-parse --show-toplevel 2>/dev/null); then
+    echo "error: unable to determine current git worktree context for scripts/brad-gardener" >&2
+    exit 1
+  fi
+
+  if [[ "$script_root" != "$current_root" ]]; then
+    echo "error: scripts/brad-gardener must be run from its own git worktree" >&2
+    exit 1
+  fi
+}
+
+ensure_git_worktree
+
 cargo run --quiet -p gardener -- "$@"

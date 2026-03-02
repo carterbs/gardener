@@ -1,4 +1,4 @@
-#![deny(clippy::needless_update, clippy::redundant_clone)]
+#![deny(clippy::manual_strip, clippy::needless_update, clippy::redundant_clone)]
 
 pub mod agent;
 pub mod backlog_snapshot;

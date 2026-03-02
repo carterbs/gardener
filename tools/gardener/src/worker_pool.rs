@@ -87,8 +87,7 @@ pub fn run_worker_pool_fsm(
     let mut report_visible = false;
     let hb = cfg.scheduler.heartbeat_interval_seconds;
     let lt = cfg.scheduler.lease_timeout_seconds;
-    let configured_parallelism = cfg.orchestrator.parallelism.max(1) as usize;
-    let parallelism = configured_parallelism.min(target.max(1));
+    let parallelism = cfg.orchestrator.parallelism.max(1) as usize;
     let mut workers = (0..parallelism)
         .map(|idx| WorkerRow {
             worker_id: format!("worker-{}", idx + 1),
@@ -1941,7 +1940,7 @@ mod tests {
     }
 
     #[test]
-    fn run_worker_pool_limits_worker_slots_to_target() {
+    fn run_worker_pool_does_not_size_workers_from_target() {
         let dir = TempDir::new().expect("tempdir");
         let scope = test_scope(&dir);
         let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
@@ -1969,6 +1968,8 @@ mod tests {
             .expect("run fsm");
         let writes = terminal.written_lines();
         assert!(writes.iter().any(|line| line.contains("worker-1")));
-        assert!(!writes.iter().any(|line| line.contains("worker-2")));
+        assert!(writes.iter().any(|line| line.contains("worker-2")));
+        assert!(writes.iter().any(|line| line.contains("worker-3")));
+        assert!(!writes.iter().any(|line| line.contains("worker-4")));
     }
 }

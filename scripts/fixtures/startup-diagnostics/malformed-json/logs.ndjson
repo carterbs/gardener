@@ -1,0 +1,2 @@
+not-json
+{"event_type":"startup.phase","payload":{"phase":"seeded"},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-456"}}]}}

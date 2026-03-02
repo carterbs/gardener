@@ -54,7 +54,7 @@ is_true() {
 }
 
 while true; do
-  clear
+  clear 2>/dev/null || true
   echo "Watching: $LOG_PATH"
   echo "Last $OTEL_LOG_TAIL_LINES lines (refresh $OTEL_LOG_INTERVAL s)"
   echo "Time: $(date)"

@@ -14,7 +14,7 @@ use gardener::triage_agent_detection::{is_non_interactive, EnvMap};
 use gardener::types::{AgentKind, NonInteractiveReason, WorkerState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 fn default_profile_path(git_root: Option<&str>) -> PathBuf {
@@ -37,18 +37,41 @@ fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> 
         include_str!("fixtures/triage/expected-profiles/phase03-profile.toml"),
     )
     .expect("seed profile");
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+    if let Some(git_root) = git_root {
+        let working_dir_report_path = Path::new("/cwd").join("docs/quality-grades.md");
+        let report_path = Path::new(git_root).join("docs/quality-grades.md");
+        let working_dir_stamp_path = PathBuf::from(format!(
+            "{}.stamp",
+            working_dir_report_path.to_string_lossy()
+        ));
+        let report_stamp_path = PathBuf::from(format!("{}.stamp", report_path.to_string_lossy()));
+        fs.write_string(&report_path, "# Quality Grades\n")
+            .expect("seed quality report");
+        fs.write_string(&working_dir_report_path, "# Quality Grades\n")
+            .expect("seed quality report");
+        fs.write_string(&report_stamp_path, "10000")
+            .expect("seed quality report stamp");
+        fs.write_string(&working_dir_stamp_path, "10000")
+            .expect("seed quality report stamp");
+    }
     let process = FakeProcessRunner::default();
+    let detect_root_stdout = git_root.unwrap_or_default().to_string();
     for _ in 0..20 {
         process.push_response(Ok(ProcessOutput {
             exit_code: if git_root.is_some() { 0 } else { 1 },
-            stdout: git_root.map(|v| format!("{v}\n")).unwrap_or_default(),
+            stdout: if detect_root_stdout.is_empty() {
+                String::new()
+            } else {
+                format!("{detect_root_stdout}\n")
+            },
             stderr: String::new(),
         }));
     }
     let terminal = FakeTerminal::new(tty);
 
     ProductionRuntime {
-        clock: Arc::new(ProductionClock),
+        clock: Arc::new(FakeClock::new(now)),
         file_system: Arc::new(fs),
         process_runner: Arc::new(process),
         terminal: Arc::new(terminal),
@@ -157,7 +180,7 @@ fn run_with_runtime_paths_and_errors() {
     let dir = TempDir::new().expect("tempdir");
     let repo_root = dir.path().to_str().expect("utf8").to_string();
     let runtime = runtime_with_config(
-        "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n",
+        "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n\n[quality_report]\npath = \"docs/quality-grades.md\"\nstale_after_days = 7\nstale_if_head_commit_differs = false\n",
         true,
         Some(&repo_root),
     );
@@ -250,7 +273,22 @@ fn run_with_runtime_paths_and_errors() {
 
 #[test]
 fn run_with_runtime_validate_flag_runs_configured_validation_command() {
-    let fs = FakeFileSystem::with_file("/config.toml", "[execution]\ntest_mode = true\n");
+    let fs = FakeFileSystem::with_file(
+        "/config.toml",
+        r#"
+[validation]
+command = "npm run validate"
+
+[quality_report]
+path = "quality.md"
+stale_after_days = 1
+stale_if_head_commit_differs = false
+"#,
+    );
+    fs.write_string(Path::new("/repo/quality.md"), "# Quality Grades\n")
+        .expect("seed quality report");
+    fs.write_string(Path::new("/repo/quality.md.stamp"), "0")
+        .expect("seed quality report stamp");
     let process = FakeProcessRunner::default();
     process.push_response(Ok(ProcessOutput {
         exit_code: 0,
@@ -286,6 +324,56 @@ fn run_with_runtime_validate_flag_runs_configured_validation_command() {
         vec!["-lc".to_string(), "npm run validate".to_string()]
     );
     assert_eq!(spawned[1].cwd, Some(PathBuf::from("/repo")));
+}
+
+#[test]
+fn run_with_runtime_validate_guarded_by_fresh_quality_report_stamp() {
+    let fs = FakeFileSystem::with_file(
+        "/config.toml",
+        r#"
+[validation]
+command = "npm run validate"
+
+[quality_report]
+path = "quality.md"
+stale_after_days = 0
+stale_if_head_commit_differs = false
+"#,
+    );
+    fs.write_string(Path::new("/repo/quality.md"), "# Quality Grades\n")
+        .expect("seed quality report");
+    let process = FakeProcessRunner::default();
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process.clone()),
+        terminal: Arc::new(FakeTerminal::new(true)),
+    };
+    let validate = vec![
+        "gardener".into(),
+        "--validate".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime)
+        .expect_err("validation should be blocked");
+    assert!(matches!(
+        validate_result,
+        GardenerError::Cli(message) if message.contains("quality-grade report is stale")
+    ));
+    let spawned = process.spawned();
+    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned[0].program, "git");
+    assert_eq!(
+        spawned[0].args,
+        vec!["rev-parse".to_string(), "--show-toplevel".to_string()]
+    );
 }
 
 #[test]

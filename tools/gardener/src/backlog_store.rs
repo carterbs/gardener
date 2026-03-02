@@ -129,6 +129,20 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<bool>>,
     },
+    SetUnresolvedReady {
+        task_id: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    SetUnresolvedMergePending {
+        task_id: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    ClearRelatedPr {
+        task_id: String,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
     MarkMergePending {
         task_id: String,
         lease_owner: String,
@@ -403,6 +417,67 @@ impl BacklogStore {
                                 json!({
                                     "task_id": task_id,
                                     "lease_owner": lease_owner,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::SetUnresolvedReady {
+                        task_id,
+                        now,
+                        reply,
+                    } => {
+                        let result =
+                            set_unresolved_status(&write_conn, &task_id, TaskStatus::Ready, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "new_status": TaskStatus::Ready.as_str(),
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::SetUnresolvedMergePending {
+                        task_id,
+                        now,
+                        reply,
+                    } => {
+                        let result = set_unresolved_status(
+                            &write_conn,
+                            &task_id,
+                            TaskStatus::MergePending,
+                            now,
+                        );
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "new_status": TaskStatus::MergePending.as_str(),
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::ClearRelatedPr { task_id, reply } => {
+                        let result = clear_related_pr(&write_conn, &task_id);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
                                     "changed": changed,
                                 })
                             }),
@@ -792,6 +867,119 @@ impl BacklogStore {
         result
     }
 
+    pub fn set_unresolved_to_ready(&self, task_id: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::SetUnresolvedReady {
+                task_id: task_id.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.unresolved_to_ready",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.unresolved_to_ready.rejected",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.unresolved_to_ready.failed",
+                    json!({ "task_id": task_id, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
+    pub fn set_unresolved_to_merge_pending(&self, task_id: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::SetUnresolvedMergePending {
+                task_id: task_id.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.unresolved_to_merge_pending",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.unresolved_to_merge_pending.rejected",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.unresolved_to_merge_pending.failed",
+                    json!({ "task_id": task_id, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
+    pub fn clear_related_pr(&self, task_id: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::ClearRelatedPr {
+                task_id: task_id.to_string(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.related_pr_cleared",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.related_pr_cleared.none",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.related_pr_cleared.failed",
+                    json!({ "task_id": task_id, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
     /// Transition a task from `in_progress` to `merge_pending`, clearing the lease
     /// so the doing worker can claim new work immediately.
     pub fn mark_merge_pending(&self, task_id: &str, lease_owner: &str) -> StoreResult<bool> {
@@ -1135,6 +1323,26 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
                 "task_id": task_id,
                 "lease_owner": lease_owner,
                 "now": now,
+            }),
+        ),
+        WriteCmd::SetUnresolvedReady { task_id, now, .. } => (
+            "set_unresolved_ready",
+            json!({
+                "task_id": task_id,
+                "now": now,
+            }),
+        ),
+        WriteCmd::SetUnresolvedMergePending { task_id, now, .. } => (
+            "set_unresolved_merge_pending",
+            json!({
+                "task_id": task_id,
+                "now": now,
+            }),
+        ),
+        WriteCmd::ClearRelatedPr { task_id, .. } => (
+            "clear_related_pr",
+            json!({
+                "task_id": task_id,
             }),
         ),
         WriteCmd::MarkMergePending {
@@ -1587,6 +1795,51 @@ fn mark_unresolved(
              SET status = 'unresolved', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
              WHERE task_id = ?2 AND lease_owner = ?3 AND status IN ('leased', 'in_progress')",
             params![now, task_id, lease_owner],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn set_unresolved_status(
+    conn: &Connection,
+    task_id: &str,
+    status: TaskStatus,
+    now: i64,
+) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.set_unresolved_status.started",
+        json!({
+            "task_id": task_id,
+            "status": status.as_str(),
+        }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = ?1, lease_owner = NULL, lease_expires_at = NULL, last_updated = ?2
+             WHERE task_id = ?3 AND status = 'unresolved'",
+            params![status.as_str(), now, task_id],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn clear_related_pr(conn: &Connection, task_id: &str) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.clear_related_pr.started",
+        json!({
+            "task_id": task_id,
+        }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET related_pr = NULL,
+                 related_branch = NULL
+             WHERE task_id = ?1",
+            params![task_id],
         )
         .map_err(db_err)?;
     Ok(changed > 0)

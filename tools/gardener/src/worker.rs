@@ -9,7 +9,9 @@ use crate::fsm::{
 use crate::gh::{GhClient, MergeStateStatus, Mergeable};
 use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
-use crate::logging::append_run_log;
+use crate::logging::{
+    append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines,
+};
 use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
 use crate::prompt_registry::{
@@ -19,6 +21,7 @@ use crate::prompt_registry::{
 use crate::protocol::AgentTerminal;
 use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
+use crate::runtime::{Clock, FileSystem};
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::understand_phase::{classify_task, parse_understand_output};
 use crate::worker_identity::WorkerIdentity;
@@ -29,7 +32,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkerLogEvent {
     pub state: WorkerState,
     pub prompt_version: String,
@@ -69,6 +72,7 @@ pub struct MergeRequest {
     pub branch: String,
     pub pr_number: u64,
     pub logs: Vec<WorkerLogEvent>,
+    pub handoff_evidence_bundle: Option<PathBuf>,
 }
 
 /// Discriminates between a task that completed in-worker and one that needs
@@ -76,6 +80,21 @@ pub struct MergeRequest {
 pub enum WorkerOutcome {
     Completed(WorkerRunSummary),
     HandoffToMerge(MergeRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct HandoffRunEvidenceBundle {
+    task_id: String,
+    task_summary: String,
+    attempt_count: i64,
+    worker_id: String,
+    session_id: String,
+    branch: String,
+    run_id: String,
+    run_log_path: Option<String>,
+    worker_log_events: Vec<WorkerLogEvent>,
+    recent_worker_log_lines: Vec<String>,
+    recorded_at_unix_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -678,6 +697,16 @@ fn execute_task_live(
             "pr_number": pr_number
         }),
     );
+    let handoff_evidence_bundle = collect_handoff_evidence_bundle(
+        scope,
+        task_id,
+        task_summary,
+        attempt_count,
+        &identity.worker_id,
+        &identity.session.session_id,
+        &branch,
+        &logs,
+    );
     Ok(WorkerOutcome::HandoffToMerge(MergeRequest {
         slot_idx,
         task_id: task_id.to_string(),
@@ -689,7 +718,107 @@ fn execute_task_live(
         branch,
         pr_number,
         logs,
+        handoff_evidence_bundle,
     }))
+}
+
+fn handoff_evidence_bundle_path(scope: &RuntimeScope, task_id: &str, run_id: &str) -> PathBuf {
+    scope
+        .working_dir
+        .join(".cache/gardener/run-evidence-bundles")
+        .join(format!(
+            "{}-{}.json",
+            worktree_slug_for_task(task_id),
+            run_id
+        ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_handoff_evidence_bundle(
+    scope: &RuntimeScope,
+    task_id: &str,
+    task_summary: &str,
+    attempt_count: i64,
+    worker_id: &str,
+    session_id: &str,
+    branch: &str,
+    logs: &[WorkerLogEvent],
+) -> Option<PathBuf> {
+    let run_id = current_run_id().unwrap_or_else(|| "no-run-id".to_string());
+    let recent_lines = recent_worker_log_lines(worker_id, 250);
+    let run_log_path = current_run_log_path();
+
+    let evidence = HandoffRunEvidenceBundle {
+        task_id: task_id.to_string(),
+        task_summary: task_summary.to_string(),
+        attempt_count,
+        worker_id: worker_id.to_string(),
+        session_id: session_id.to_string(),
+        branch: branch.to_string(),
+        run_id: run_id.clone(),
+        run_log_path: run_log_path.as_ref().map(|path| path.display().to_string()),
+        worker_log_events: logs.to_vec(),
+        recent_worker_log_lines: recent_lines,
+        recorded_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0),
+    };
+    let artifact_path = handoff_evidence_bundle_path(scope, task_id, &run_id);
+    if let Some(parent) = artifact_path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            append_run_log(
+                "warn",
+                "worker.handoff_evidence.persist_failed",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "path": artifact_path.display().to_string(),
+                    "error": err.to_string(),
+                }),
+            );
+            return None;
+        }
+    }
+    match serde_json::to_string_pretty(&evidence) {
+        Ok(payload) => {
+            if let Err(err) = std::fs::write(&artifact_path, payload) {
+                append_run_log(
+                    "warn",
+                    "worker.handoff_evidence.persist_failed",
+                    json!({
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                        "path": artifact_path.display().to_string(),
+                        "error": err.to_string(),
+                    }),
+                );
+                return None;
+            }
+            append_run_log(
+                "info",
+                "worker.handoff_evidence.persisted",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "path": artifact_path.display().to_string(),
+                }),
+            );
+            Some(artifact_path)
+        }
+        Err(err) => {
+            append_run_log(
+                "warn",
+                "worker.handoff_evidence.persist_failed",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": worker_id,
+                    "error": err.to_string(),
+                }),
+            );
+            None
+        }
+    }
 }
 
 /// Execute the merge-and-teardown phase for a task that passed review.
@@ -699,6 +828,8 @@ pub fn execute_merge_phase(
     req: &MergeRequest,
     cfg: &AppConfig,
     process_runner: &dyn ProcessRunner,
+    runtime_file_system: &dyn FileSystem,
+    runtime_clock: &dyn Clock,
     scope: &RuntimeScope,
 ) -> Result<WorkerRunSummary, GardenerError> {
     let worker_id = &req.worker_id;
@@ -1075,7 +1206,13 @@ pub fn execute_merge_phase(
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation);
     let repo_root_git = GitClient::new(process_runner, &scope.working_dir);
     repo_root_git.pull_main().ok();
-    if let Err(err) = repo_root_git.run_validation_command(&cfg.validation.command) {
+    if let Err(err) = repo_root_git.run_validation_command_with_quality_guard(
+        &cfg.validation.command,
+        runtime_file_system,
+        runtime_clock,
+        cfg,
+        scope,
+    ) {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
         append_run_log(
             "error",
@@ -1629,16 +1766,19 @@ const WORKTREE_TASK_SLUG_PREFIX_CHARS: usize = 14;
 #[cfg(test)]
 mod tests {
     use super::{
-        execute_task, extract_failure_reason, review_artifact_path, sanitize_for_branch,
+        collect_handoff_evidence_bundle, execute_task, extract_failure_reason,
+        handoff_evidence_bundle_path, review_artifact_path, sanitize_for_branch,
         worktree_branch_for, worktree_path_for, worktree_slug_for_task, worktree_slug_suffix,
-        WorkerOutcome, WORKTREE_TASK_SLUG_PREFIX_CHARS,
+        WorkerLogEvent, WorkerOutcome, WORKTREE_TASK_SLUG_PREFIX_CHARS,
     };
     use crate::config::AppConfig;
     use crate::do_phase::{fallback_commit_message, parse_doing_output};
+    use crate::logging;
     use crate::review_phase::parse_reviewing_output;
     use crate::runtime::FakeProcessRunner;
     use crate::types::{RuntimeScope, WorkerState};
     use crate::understand_phase::parse_understand_output;
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[test]
@@ -1850,5 +1990,56 @@ mod tests {
         let plain = extract_failure_reason(&serde_json::json!({"reason":"hook failed"}));
         assert_eq!(plain.as_deref(), Some("hook failed"));
         assert!(extract_failure_reason(&serde_json::json!({"other":123})).is_none());
+    }
+
+    #[test]
+    fn collect_handoff_evidence_bundle_persists_runnable_artifact() {
+        logging::clear_run_logger();
+        let task_id = "manual:tui:GARD-01";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+        let log_path = scope.working_dir.join(".gardener/otel-logs.jsonl");
+        let run_id = logging::init_run_logger(&log_path, &scope.working_dir);
+        logging::append_run_log(
+            "info",
+            "worker.task.started",
+            json!({"worker_id":"worker-1","task_id": task_id}),
+        );
+        logging::append_run_log(
+            "info",
+            "worker.review.approved",
+            json!({"worker_id":"worker-1","task_id": task_id}),
+        );
+
+        let bundle_path = collect_handoff_evidence_bundle(
+            &scope,
+            task_id,
+            "Add test evidence bundle",
+            2,
+            "worker-1",
+            "session-1",
+            &worktree_branch_for(task_id),
+            &[WorkerLogEvent {
+                state: WorkerState::Reviewing,
+                prompt_version: "prompt-v1".to_string(),
+                context_manifest_hash: "a".repeat(64),
+            }],
+        )
+        .expect("bundle persisted");
+        assert_eq!(
+            bundle_path,
+            handoff_evidence_bundle_path(&scope, task_id, &run_id)
+        );
+        let payload = std::fs::read_to_string(&bundle_path).expect("artifact read");
+        let parsed = serde_json::from_str::<serde_json::Value>(&payload).expect("bundle json");
+        assert_eq!(parsed["task_id"], task_id);
+        assert_eq!(parsed["run_id"], run_id);
+        assert_eq!(parsed["worker_id"], "worker-1");
+        assert!(parsed["recent_worker_log_lines"].as_array().is_some());
+        logging::clear_run_logger();
     }
 }

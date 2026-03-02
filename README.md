@@ -70,7 +70,24 @@ COVERAGE_MIN_LINE=95 ./scripts/test-gardener-coverage.sh
 # Override ignored source files (optional):
 COVERAGE_IGNORE_REGEX="/tools/gardener/src/(agent/mod\.rs|agent/factory\.rs)" \
   ./scripts/test-gardener-coverage.sh
+
+# Override the ignore manifest (optional, reviewed list format):
+COVERAGE_IGNORE_MANIFEST=./scripts/coverage-ignore-manifest.txt ./scripts/test-gardener-coverage.sh
 ```
+
+### Validation pipeline
+
+Pre-commit uses the same validation pipeline as manual checks:
+
+1. `scripts/run-validate.sh`
+2. `scripts/check-skills-sync.sh`
+3. `scripts/check-no-warnings.sh`
+4. `scripts/check-migrations-wired.sh`
+5. `scripts/test-gardener-coverage.sh`
+
+`run-validate.sh` runs these scripts in order; it stops on the first failure, so fix each failure before re-running.
+
+`gardener.toml` points both startup/runtime validation at `./scripts/run-validate.sh`.
 
 ## Git Hooks
 
@@ -94,6 +111,27 @@ scripts/brad-gardener --config gardener.toml --validate --validation-command "sc
 
 That means each commit runs the configured custom linter set defined in
 `scripts/check-skills-sync.sh` before commit.
+
+### Pre-commit remediation playbook
+
+When commit is blocked by hooks:
+
+1. Run `./.githooks/pre-commit` directly to reproduce locally.
+2. Read the last stage name from the output:
+   - `Running custom linter: scripts/check-skills-sync.sh`
+   - `Running custom linter: scripts/check-no-warnings.sh`
+   - `Running custom linter: scripts/check-migrations-wired.sh`
+   - `Running project validation command: ./scripts/test-gardener-coverage.sh`
+3. Fix the root cause from the failing script output:
+   - Skills mismatch:
+     - Copy files from the command suggestions in `scripts/check-skills-sync.sh` output.
+   - Clippy warnings:
+     - Address the warning text, then re-run `./scripts/check-no-warnings.sh`.
+   - Migration wiring errors:
+     - Add each missing migration include to `tools/gardener/src/backlog_store.rs`.
+   - Coverage gate failure:
+     - Re-run `./scripts/test-gardener-coverage.sh`, inspect the reported `TOTAL` and failing areas, then tighten/fix uncovered paths in `tools/gardener/src`.
+4. Re-run `git add` on fixed files and commit again.
 
 ## Vision
 

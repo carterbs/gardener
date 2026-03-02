@@ -49,7 +49,6 @@ path = "src/bin/seed_backlog.rs"
 [[bin]]
 name = "log-query"
 path = "src/bin/log_query.rs"
-
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

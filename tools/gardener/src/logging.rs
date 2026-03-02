@@ -414,7 +414,7 @@ fn recent_worker_tool_commands_nolock(
 pub fn recent_worker_state_events(
     from_line: usize,
     max_lines: usize,
-) -> Vec<(usize, String, String, String)> {
+) -> Vec<(usize, String, String, String, String)> {
     let _guard = run_log_activity_lock()
         .lock()
         .expect("run log activity lock");
@@ -424,7 +424,7 @@ pub fn recent_worker_state_events(
 fn recent_worker_state_events_nolock(
     from_line: usize,
     max_lines: usize,
-) -> Vec<(usize, String, String, String)> {
+) -> Vec<(usize, String, String, String, String)> {
     let _ = structured_fallback_line("logging", "recent_worker_state_events_nolock", "starting");
     if max_lines == 0 {
         return Vec::new();
@@ -472,8 +472,16 @@ fn recent_worker_state_events_nolock(
             Some(state) if !state.is_empty() => state.to_string(),
             _ => continue,
         };
+        let task_id = match value
+            .get("payload")
+            .and_then(|p| p.get("task_id"))
+            .and_then(Value::as_str)
+        {
+            Some(task_id) if !task_id.is_empty() => task_id.to_string(),
+            _ => continue,
+        };
         let details = worker_state_details(&state, value.get("payload"));
-        events.push((idx, worker_id, state, details));
+        events.push((idx, worker_id, state, task_id, details));
     }
 
     if events.len() <= max_lines {
@@ -685,8 +693,45 @@ mod tests {
         local_time_for_next_check, structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
+    use std::env;
+    use std::ffi::OsString;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_GUARD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_GUARD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env guard lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = env::var_os(key);
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
 
     fn with_test_lock() -> std::sync::MutexGuard<'static, ()> {
         super::run_log_activity_lock()
@@ -825,6 +870,16 @@ mod tests {
     }
 
     #[test]
+    fn default_path_prefers_explicit_log_path_env() {
+        let _lock = env_guard_lock();
+        let _guard = EnvVarGuard::set("GARDENER_LOG_PATH", Some("/tmp/runtime-otel.jsonl"));
+
+        let path = default_run_log_path(Path::new("/repo"));
+
+        assert_eq!(path, PathBuf::from("/tmp/runtime-otel.jsonl"));
+    }
+
+    #[test]
     fn otel_severity_mapping_is_stable() {
         assert_eq!(super::to_otel_severity("trace"), ("TRACE", 1));
         assert_eq!(super::to_otel_severity("debug"), ("DEBUG", 5));
@@ -907,9 +962,9 @@ mod tests {
         let path = dir.path().join("run.jsonl");
         init_run_logger_nolock(&path, dir.path());
         let log_lines = [
-            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-1","state":"understand"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-1","task_id":"task-a","state":"understand"}}"#,
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"ToolCall","command":"ignored"}}"#,
-            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-2","state":"merge_lock_waiting"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-2","task_id":"task-b","state":"merge_lock_waiting"}}"#,
         ];
         std::fs::write(&path, log_lines.join("\n")).expect("seed log");
 
@@ -918,11 +973,13 @@ mod tests {
         assert_eq!(lines[0].0, 0);
         assert_eq!(lines[0].1, "worker-1");
         assert_eq!(lines[0].2, "understand");
-        assert_eq!(lines[0].3, "");
+        assert_eq!(lines[0].3, "task-a");
+        assert_eq!(lines[0].4, "");
         assert_eq!(lines[1].0, 2);
         assert_eq!(lines[1].1, "worker-2");
         assert_eq!(lines[1].2, "merge_lock_waiting");
-        assert_eq!(lines[1].3, "");
+        assert_eq!(lines[1].3, "task-b");
+        assert_eq!(lines[1].4, "");
         clear_run_logger_nolock();
     }
 

@@ -13,15 +13,19 @@ This directory is the canonical index for agent-oriented repository navigation. 
 - [Workflow conventions](./conventions/workflow.md)
 - [Repository reference essay](./references/codex-agent-team-article.md)
 - [Triage and worktree workflow docs](../thoughts/shared/plans/2026-02-27-tui-integration-testing.md)
+- [OTEL JSONL runtime failure triage cookbook](./runtime-failure-otel-jsonl-cookbook.md)
 
 ## Third: reusable agent capabilities
 
 - [Backlog DB skill](../.codex/skills/backlog-db/SKILL.md)
-- [Commit workflow skill](../.codex/skills/commit/SKILL.md)
 - [Debugging logs skill](../.codex/skills/log-debugging/SKILL.md)
 - [Session replay skill](../.codex/skills/session-replay/SKILL.md)
 
-## Fourth: repository map
+## Fourth: agent runbooks
+
+- [Backlog operations runbook](./runbooks/backlog-operations.md)
+
+## Fifth: repository map
 
 - [Repository map](./repository-map.md)
 

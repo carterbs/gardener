@@ -51,6 +51,52 @@ assert_file_not_contains() {
   fi
 }
 
+run_expect_exit_capture() {
+  local expected_exit=$1
+  local output=$2
+  shift 2
+
+  set +e
+  "$@" >"$output" 2>&1
+  local status=$?
+  set -e
+
+  if [[ $status -ne $expected_exit ]]; then
+    echo "command failed expectation" >&2
+    echo "expected exit code: $expected_exit" >&2
+    echo "actual exit code: $status" >&2
+    echo "command: $*" >&2
+    echo "output:" >&2
+    cat "$output" >&2
+    return 1
+  fi
+}
+
+create_backlog_db() {
+  local db_path=$1
+
+  sqlite3 "$db_path" <<'SQL'
+CREATE TABLE backlog_tasks (
+    task_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    details TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    priority TEXT NOT NULL CHECK(priority IN ('P0', 'P1', 'P2')),
+    status TEXT NOT NULL CHECK(status IN ('ready', 'leased', 'in_progress', 'merge_pending', 'complete', 'failed', 'unresolved')),
+    last_updated INTEGER NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at INTEGER,
+    source TEXT NOT NULL,
+    related_pr INTEGER,
+    related_branch TEXT,
+    rationale TEXT NOT NULL DEFAULT '',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+SQL
+}
+
 # check-skills-sync fixtures
 run_expect_exit 0 env \
   GARDENER_REPO_ROOT="$SCRIPT_DIR/fixtures/check-skills-sync/passing" \
@@ -114,5 +160,42 @@ run_expect_exit 0 "$SCRIPT_DIR/startup-diagnostics.sh" \
   --error "missing_logs"
 assert_file_contains "$start_diag_output_3" "No log file available for this run."
 rm -f "$start_diag_output_3"
+
+tmp_backlog_dir="$(mktemp -d)"
+backlog_db="$tmp_backlog_dir/backlog.sqlite"
+missing_backlog_db="$tmp_backlog_dir/missing.sqlite"
+create_backlog_db "$backlog_db"
+
+backlog_output="$(mktemp)"
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" list --db "$missing_backlog_db"
+assert_file_contains "$backlog_output" "database file not found"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --db "$missing_backlog_db"
+assert_file_contains "$backlog_output" "database file not found"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --priority "P3" --details "details" --db "$backlog_db"
+assert_file_contains "$backlog_output" "invalid --priority"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --status "stale" --db "$backlog_db"
+assert_file_contains "$backlog_output" "invalid --status"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --kind "Feature" --db "$backlog_db"
+assert_file_contains "$backlog_output" "invalid --kind"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --details "details" --db "$backlog_db"
+assert_file_contains "$backlog_output" "--title and --details are required for add"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --db "$backlog_db"
+assert_file_contains "$backlog_output" "--title and --details are required for add"
+
+rm -f "$backlog_output"
+rm -rf "$tmp_backlog_dir"
 
 echo "Script lint fixture tests completed successfully."

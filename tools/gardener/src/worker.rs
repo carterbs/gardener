@@ -176,7 +176,12 @@ pub fn execute_task(
     task_id: &str,
     task_summary: &str,
     attempt_count: i64,
+    pool_started_at_ms: i64,
+    task_created_at: i64,
+    task_last_updated: i64,
 ) -> Result<WorkerOutcome, GardenerError> {
+    let inserted_after_run_start = task_created_at >= pool_started_at_ms;
+    let task_age_ms = pool_started_at_ms.saturating_sub(task_created_at);
     append_run_log(
         "debug",
         "worker.execute.dispatch",
@@ -184,6 +189,12 @@ pub fn execute_task(
             "worker_id": worker_id,
             "task_id": task_id,
             "attempt_count": attempt_count,
+            "task_summary": task_summary,
+            "task_created_at": task_created_at,
+            "task_last_updated": task_last_updated,
+            "run_started_at_ms": pool_started_at_ms,
+            "task_age_ms": task_age_ms,
+            "inserted_after_run_start": inserted_after_run_start,
             "test_mode": cfg.execution.test_mode
         }),
     );
@@ -1868,6 +1879,9 @@ mod tests {
             "task-1",
             "feature: add prompt packet",
             1,
+            0,
+            0,
+            0,
         )
         .expect("ok");
         let summary = match outcome {

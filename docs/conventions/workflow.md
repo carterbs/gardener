@@ -23,3 +23,33 @@
 ## Quality Grades
 
 Quality-grade document ownership is in Gardener runtime startup audits. External orchestration should delegate to Gardener instead of maintaining a separate grade generation path.
+
+## Validation and pre-commit flow
+
+- Gardener validation command entrypoint is configured under `[validation] command` and `[startup] validation_command` in `gardener.toml`.
+- `scripts/run-validate.sh` is the canonical project validation command.
+  - It executes each custom linter in order:
+    - `scripts/check-skills-sync.sh`
+    - `scripts/check-no-warnings.sh`
+    - `scripts/check-migrations-wired.sh`
+    - `scripts/check-binary-blobs.sh`
+  - It ensures `cargo-llvm-cov` is available before running:
+    - `./scripts/test-gardener-coverage.sh`
+  - It fails fast and exits on first failed stage.
+- The `.githooks/pre-commit` hook runs this command sequence:
+  - auto-format staged Rust files with `rustfmt`
+  - re-add formatted Rust files to the index
+  - run `scripts/run-validate.sh`
+- Git hooks path is set by `./scripts/setup-git-hooks.sh` (`core.hooksPath=.githooks`).
+
+Pre-commit remediation playbook:
+
+1. Reproduce the same path by running `.githooks/pre-commit` directly.
+2. Capture the first failing step from the hook output.
+3. Fix the underlying issue and rerun `.githooks/pre-commit`:
+   - `skills` check mismatch: sync `/.claude/skills` and `/.codex/skills`
+   - clippy warnings: fix warnings and re-run `./scripts/check-no-warnings.sh`
+   - migration wiring failures: add include(s) in `tools/gardener/src/backlog_store.rs`
+   - binary blob failures: drop binary artifacts from staged changes
+   - coverage/test failures: inspect `./scripts/test-gardener-coverage.sh` output and harden code paths
+4. Stage updates (`git add`), then retry commit.

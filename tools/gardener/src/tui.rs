@@ -751,21 +751,6 @@ fn run_context_summary() -> (String, String) {
     (truncate_right(&run_id, 28), run_log_path)
 }
 
-fn worker_ids_summary<'a, I>(workers: I) -> String
-where
-    I: IntoIterator<Item = &'a WorkerRow>,
-{
-    let ids = workers
-        .into_iter()
-        .map(|worker| worker.worker_id.as_str())
-        .collect::<Vec<_>>();
-    if ids.is_empty() {
-        "none".to_string()
-    } else {
-        ids.into_iter().collect::<Vec<_>>().join(", ")
-    }
-}
-
 fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
     if worker_id.is_empty() {
         return WORKER_EQUIPMENT_NAMES[index % WORKER_EQUIPMENT_NAMES.len()].to_string();
@@ -1072,7 +1057,6 @@ fn draw_dashboard_frame(
 
     let metrics = WorkerMetrics::from_app_state(visible_worker_cards.iter().copied());
     let (run_id, run_log_path) = run_context_summary();
-    let worker_ids = worker_ids_summary(visible_worker_rows.iter().copied());
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![Span::styled(
@@ -1132,10 +1116,6 @@ fn draw_dashboard_frame(
                 Span::styled("failed", Style::default().fg(Color::Gray)),
             ]),
             Line::from(vec![
-                Span::styled("Workers: ", Style::default().fg(Color::Gray)),
-                Span::raw(truncate_right(&worker_ids, 52)),
-            ]),
-            Line::from(vec![
                 Span::styled("Run: ", Style::default().fg(Color::Gray)),
                 Span::raw(run_id),
                 Span::styled(" | Log: ", Style::default().fg(Color::Gray)),
@@ -1153,13 +1133,15 @@ fn draw_dashboard_frame(
         ),
         body[0],
     );
+    let workers_panel = body[1];
+    let viewport_cap = if compact_view {
+        frame.area().height.saturating_sub(11)
+    } else {
+        frame.area().height.saturating_sub(12)
+    };
+    let viewport_height = workers_panel.height.min(viewport_cap.max(1));
     let worker_row_height = worker_row_height_for_layout;
-    let provisional_workers_frame = Block::default()
-        .borders(Borders::ALL)
-        .title("Workers")
-        .border_style(Style::default().fg(Color::Rgb(82, 88, 126)));
-    let workers_area = provisional_workers_frame.inner(body[1]);
-    let worker_row_capacity = (workers_area.height as usize / worker_row_height).max(1);
+    let worker_row_capacity = (viewport_height as usize / worker_row_height).max(1);
     let max_worker_offset = visible_worker_count.saturating_sub(worker_row_capacity);
     WORKERS_VIEWPORT_CAPACITY.with(|cell| {
         *cell.borrow_mut() = worker_row_capacity;
@@ -1188,9 +1170,7 @@ fn draw_dashboard_frame(
         }
         *offset
     });
-    let worker_end = (worker_offset + worker_row_capacity).min(visible_worker_count);
-
-    let command_stream_max_width = workers_area
+    let command_stream_max_width = workers_panel
         .width
         .saturating_sub(8 + "Commands: ".len() as u16) as usize;
     let command_scroll_offset = current_command_scroll_offset();
@@ -1259,23 +1239,7 @@ fn draw_dashboard_frame(
         })
         .collect::<Vec<_>>();
 
-    let workers_frame_title = if visible_worker_count > worker_row_capacity {
-        format!(
-            "Workers ({:02}-{:02}/{:02})",
-            worker_offset + 1,
-            worker_end,
-            visible_worker_count
-        )
-    } else {
-        "Workers".to_string()
-    };
-    let workers_frame = Block::default()
-        .borders(Borders::ALL)
-        .title(workers_frame_title)
-        .border_style(Style::default().fg(Color::Rgb(82, 88, 126)));
-    frame.render_widget(workers_frame.clone(), body[1]);
-    let workers_area = workers_frame.inner(body[1]);
-    frame.render_widget(List::new(worker_items), workers_area);
+    frame.render_widget(List::new(worker_items), workers_panel);
 
     let ordered_backlog = app_state.backlog;
     let ordered_merge_queue = ordered_merge_queue_items(&backlog.in_progress)
@@ -2363,7 +2327,7 @@ mod tests {
         assert!(frame.contains("Now"));
         assert!(frame.contains("Scanning"));
         assert!(frame.contains("parallel workers"));
-        assert!(frame.contains("Workers"));
+        assert!(!frame.contains("Workers:"));
         assert!(!frame.contains("Problems"));
         assert!(frame.contains("Flow:"));
         assert!(frame.contains("Action:"));
@@ -2467,14 +2431,13 @@ mod tests {
         let top_right_corners =
             frame.matches('┐').count() + frame.matches('╮').count() + frame.matches('+').count();
         assert!(
-            top_left_corners >= 4,
-            "expected worker/backlog/merge queue/nows borders"
+            top_left_corners >= 3,
+            "expected now/backlog/merge queue borders"
         );
         assert!(
-            top_right_corners >= 4,
-            "expected worker/backlog/merge queue/nows borders"
+            top_right_corners >= 3,
+            "expected now/backlog/merge queue/nows borders"
         );
-        assert!(has_title_with_border(&frame, "Workers"));
         assert!(has_title_with_border(&frame, "Backlog"));
         assert!(has_title_with_border(&frame, "Merge Queue"));
         assert!(frame.contains("Backlog"));
@@ -2913,16 +2876,10 @@ mod tests {
         let backlog = BacklogView::default();
 
         let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        let strip_workers_summary = |frame: &str| {
-            frame
-                .lines()
-                .filter(|line| !line.contains("Workers:"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let initial_without_summary = strip_workers_summary(&initial);
+        assert!(!initial.contains("Workers:"));
+        assert!(!initial.contains("Workers ("));
         assert!(initial.contains("> Lawn Mower"));
-        assert!(!initial_without_summary.contains("w9 "));
+        assert!(!initial.contains("w9 "));
 
         for _ in 0..10 {
             let _ = scroll_workers_down();

@@ -13,6 +13,91 @@ pub struct PromptRegistry {
     templates: BTreeMap<WorkerState, PromptTemplate>,
 }
 
+pub const SEEDING_PROMPT_VERSION_SEEDING: &str = "seeding-v4";
+pub const SEEDING_PROMPT_VERSION_LEGACY: &str = SEEDING_PROMPT_VERSION_SEEDING;
+pub const SEEDING_PROMPT_VERSION_DIRECT: &str = SEEDING_PROMPT_VERSION_SEEDING;
+
+pub fn seeding_prompt_template() -> PromptTemplate {
+    PromptTemplate {
+        version: SEEDING_PROMPT_VERSION_SEEDING,
+        body: r#"You are the Gardener backlog seeding worker.
+Goal: identify 10 actionable tasks that improve repository hospitality for agents.
+Do not implement code changes. Do not propose product behavior changes.
+Generate exactly 10 tasks that improve repository maintainability, clarity, reliability, or safety for future agents.
+
+Output contract
+- Emit JSON only.
+- Return either:
+  - {"tasks":[...]}
+  - {"schema_version":1,"state":"seeding","payload":{"tasks":[...]}}
+- Each task must include: title, details, rationale, domain, priority.
+- priority must be one of P0, P1, P2.
+- details and rationale must be concrete and actionable in this repository.
+
+System framing
+- Do not invent nonexistent files, architecture, or conventions.
+- Use AGENTS.md, CLAUDE.md, docs listing, and quality grades as source of truth.
+- Before beginning, read docs/references/codex-agent-team-article.md.
+- Every task must be something a runtime worker can start immediately with the repository context provided.
+- Favor tasks that reduce agent friction, including onboarding, diagnostics, workflow, guardrails, and evidence gathering.
+- Prefer work types like: docs, testing, tooling, observability, cleanup, onboarding.
+
+Inputs
+- primary_gap: {PRIMARY_GAP}
+- readiness_score: {READINESS_SCORE}
+- readiness_grade: {READINESS_GRADE}
+
+Quality risks extracted from report
+{QUALITY_RISKS}
+
+Relevant repo anchors
+1) AGENTS.md
+{AGENTS_MD}
+2) CLAUDE.md
+{CLAUDE_MD}
+3) docs/
+{DOCS_LISTING}
+4) docs/references/codex-agent-team-article.md
+Read this file directly before writing tasks.
+
+Existing active backlog snapshot
+{EXISTING_BACKLOG}
+Backlog DB skill reference (.codex/skills/backlog-db/SKILL.md)
+{BACKLOG_SKILL_MD}
+
+Task contract
+Create exactly 10 tasks. Prefer a practical mix of immediate fixes and cleanup debt.
+- At least 2 tasks should map to primary_gap.
+- At least 2 tasks should be cleanup/debt reduction tasks.
+- At least 4 tasks should directly reduce repository friction for agents (docs, automation, diagnostics, workflow).
+- priority must be one of P0, P1, P2.
+- domain should be concrete and align to discovered file families.
+- rationale should state the immediate quality signal and why now.
+
+Seed-generation contract
+1. Read docs/quality-grades.md, AGENTS.md, docs/conventions/, and docs/references/codex-agent-team-article.md.
+2. Inspect docs/ and repository structure for concrete, non-duplicate work that helps agents move faster safely.
+3. Prefer exactly 10 tasks.
+4. Ensure at least 2 tasks map to primary_gap.
+5. Ensure at least 2 tasks are explicit cleanup/debt reduction tasks.
+6. Ensure at least 4 tasks explicitly reduce agent friction (onboarding, evidence, diagnostics, workflow, guardrails).
+7. Ensure there are no product feature tasks.
+8. Final output must be valid JSON matching the task schema described above.
+
+Quality doc (truncated for prompt budget)
+{QUALITY_DOC}
+"#,
+    }
+}
+
+pub fn seeding_v2_prompt_template() -> PromptTemplate {
+    seeding_prompt_template()
+}
+
+pub fn seeding_v3_direct_prompt_template() -> PromptTemplate {
+    seeding_prompt_template()
+}
+
 impl PromptRegistry {
     pub fn v1() -> Self {
         let mut templates = BTreeMap::new();

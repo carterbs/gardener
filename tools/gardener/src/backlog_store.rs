@@ -1192,6 +1192,31 @@ impl BacklogStore {
         })
     }
 
+    pub fn list_backlog_tasks(&self) -> StoreResult<Vec<BacklogTask>> {
+        self.read_pool.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated, \
+                            lease_owner, lease_expires_at, source, related_pr, related_branch, rationale, attempt_count, created_at \
+                     FROM backlog_tasks \
+                     WHERE status != 'merge_pending' \
+                     ORDER BY
+                        CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,
+                        CASE WHEN attempt_count > 0 THEN 0 ELSE 1 END,
+                        attempt_count DESC,
+                        last_updated ASC,
+                        created_at ASC",
+                )
+                .map_err(db_err)?;
+            let rows = statement
+                .query_map([], row_to_task)
+                .map_err(db_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            Ok(rows)
+        })
+    }
+
     pub fn count_tasks_by_priority(&self) -> StoreResult<(usize, usize, usize)> {
         append_run_log(
             "debug",
@@ -2536,5 +2561,39 @@ mod tests {
             Err(e) => panic!("expected Database error, got: {e}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
+    }
+
+    #[test]
+    fn list_backlog_tasks_hides_merge_pending() {
+        let (store, _dir) = temp_store();
+
+        let merge_task = store
+            .upsert_task(task("merge queue task", Priority::P0))
+            .expect("insert merge queue task");
+        let _ = store
+            .upsert_task(task("backlog task", Priority::P1))
+            .expect("insert backlog task");
+
+        let claimed = store
+            .claim_next("worker", 60)
+            .expect("claim")
+            .expect("claimed task");
+        assert_eq!(claimed.task_id, merge_task.task_id);
+
+        let in_progress = store
+            .mark_in_progress(&merge_task.task_id, "worker")
+            .expect("mark in progress");
+        assert!(in_progress);
+        let moved_to_queue = store
+            .mark_merge_pending(&merge_task.task_id, "worker")
+            .expect("mark merge pending");
+        assert!(moved_to_queue);
+
+        let tasks = store.list_backlog_tasks().expect("list backlog tasks");
+        assert!(tasks
+            .iter()
+            .all(|task| task.status != TaskStatus::MergePending));
+        assert!(tasks.iter().any(|task| task.title == "backlog task"));
+        assert!(!tasks.iter().any(|task| task.title == "merge queue task"));
     }
 }

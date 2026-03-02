@@ -922,7 +922,7 @@ fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerErro
         json!({}),
     );
     let mut lines = Vec::new();
-    for task in store.list_tasks()?.into_iter() {
+    for task in store.list_backlog_tasks()?.into_iter() {
         if matches!(
             task.status,
             crate::backlog_store::TaskStatus::Complete | crate::backlog_store::TaskStatus::Failed

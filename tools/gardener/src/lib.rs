@@ -112,6 +112,9 @@ pub struct Cli {
     pub force_seed_backlog: bool,
     #[arg(long, default_value_t = false)]
     pub seed_dry_run: bool,
+    /// Write a JSONL session recording to this path (also via GARDENER_RECORD_SESSION env var).
+    #[arg(long = "record-session")]
+    pub record_session: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

@@ -377,7 +377,7 @@ pub fn run_worker_pool_fsm(
                 let event_tx = event_tx.clone();
                 let worker_id = workers[idx].worker_id.clone();
                 let task_id = task.task_id.clone();
-                let task_summary = task_override.unwrap_or(task.title.as_str()).to_string();
+                let task_summary = execution_task_packet(&task, task_override);
                 let attempt_count = task.attempt_count;
                 let task_created_at = task.created_at;
                 let task_last_updated = task.last_updated;
@@ -775,8 +775,7 @@ pub fn run_worker_pool_fsm(
 
                                 let tx = tx.clone();
                                 let task_id = task.task_id.clone();
-                                let task_summary =
-                                    task_override.unwrap_or(task.title.as_str()).to_string();
+                                let task_summary = execution_task_packet(&task, task_override);
                                 let attempt_count = task.attempt_count;
                                 let task_created_at = task.created_at;
                                 let task_last_updated = task.last_updated;
@@ -1373,6 +1372,21 @@ fn append_worker_command(worker: &mut WorkerRow, command: &str) {
     }
 }
 
+fn execution_task_packet(
+    task: &crate::backlog_store::BacklogTask,
+    task_override: Option<&str>,
+) -> String {
+    if let Some(task_override) = task_override {
+        return task_override.to_string();
+    }
+    let details = task.details.trim();
+    if details.is_empty() {
+        task.title.clone()
+    } else {
+        format!("{}\n\n{}", task.title, details)
+    }
+}
+
 fn set_worker_idle(worker: &mut WorkerRow, tool_line: &str) {
     let should_log = worker.state != "idle" || worker.tool_line != tool_line;
     worker.state = "idle".to_string();
@@ -1606,10 +1620,11 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pool_stream_event, hotkey_action, is_non_regressive_state_transition,
-        run_worker_pool_fsm, wait_for_quit, PoolStreamEvent, WorkerRow, INTERRUPT_SENTINEL_KEY,
+        apply_pool_stream_event, execution_task_packet, hotkey_action,
+        is_non_regressive_state_transition, run_worker_pool_fsm, wait_for_quit, PoolStreamEvent,
+        WorkerRow, INTERRUPT_SENTINEL_KEY,
     };
-    use crate::backlog_store::{BacklogStore, NewTask};
+    use crate::backlog_store::{BacklogStore, BacklogTask, NewTask, TaskStatus};
     use crate::config::AppConfig;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
     use crate::logging::{clear_run_logger, init_run_logger};
@@ -1654,6 +1669,37 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create parent");
         }
         std::fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn execution_task_packet_includes_details_when_present() {
+        let task = BacklogTask {
+            task_id: "manual:test:task-1".to_string(),
+            kind: TaskKind::Maintenance,
+            title: "Implement direct event streaming".to_string(),
+            details: "Plan: thoughts/shared/plans/2026-03-02-direct-event-streaming-worker-ui.md"
+                .to_string(),
+            rationale: String::new(),
+            scope_key: "runtime".to_string(),
+            priority: Priority::P0,
+            status: TaskStatus::Ready,
+            last_updated: 0,
+            lease_owner: None,
+            lease_expires_at: None,
+            source: "test".to_string(),
+            related_pr: None,
+            related_branch: None,
+            attempt_count: 1,
+            created_at: 0,
+        };
+
+        let packet = execution_task_packet(&task, None);
+        assert!(packet.starts_with(&task.title));
+        assert!(packet.contains(&task.details));
+        assert!(packet.contains("\n\n"));
+
+        let override_packet = execution_task_packet(&task, Some("override summary"));
+        assert_eq!(override_packet, "override summary");
     }
 
     #[test]

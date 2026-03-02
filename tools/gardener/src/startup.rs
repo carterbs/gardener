@@ -8,7 +8,8 @@ use crate::protocol::{AgentEvent, AgentEventKind};
 use crate::quality_grades::render_quality_grade_document;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{ProcessRequest, ProductionRuntime};
-use crate::seeding::seed_backlog_if_needed_with_events;
+use crate::seed_runner::SeedTask;
+use crate::seeding::{recommend_seed_tasks_with_events, seed_backlog_if_needed_with_events};
 use crate::task_identity::TaskKind;
 use crate::triage::profile_path;
 use crate::types::RuntimeScope;
@@ -131,6 +132,7 @@ pub fn run_startup_audits(
     scope: &RuntimeScope,
     run_seeding: bool,
     force_seed_backlog: bool,
+    seed_dry_run: bool,
 ) -> Result<StartupSummary, GardenerError> {
     run_startup_audits_with_progress(
         runtime,
@@ -138,6 +140,7 @@ pub fn run_startup_audits(
         scope,
         run_seeding,
         force_seed_backlog,
+        seed_dry_run,
         |_detail| Ok(()),
     )
 }
@@ -148,6 +151,7 @@ pub fn run_startup_audits_with_progress<F>(
     scope: &RuntimeScope,
     run_seeding: bool,
     force_seed_backlog: bool,
+    seed_dry_run: bool,
     mut progress: F,
 ) -> Result<StartupSummary, GardenerError>
 where
@@ -160,6 +164,7 @@ where
         json!({
             "run_seeding": run_seeding,
             "force_seed_backlog": force_seed_backlog,
+            "seed_dry_run": seed_dry_run,
             "profile_loc": profile_loc.display().to_string(),
             "working_dir": scope.working_dir.display().to_string(),
         }),
@@ -331,6 +336,7 @@ where
             "test_mode": cfg.execution.test_mode,
             "existing_active_count": existing_active_backlog_count,
             "force_seed_backlog": force_seed_backlog,
+            "seed_dry_run": seed_dry_run,
             "will_seed": will_seed,
         }),
     );
@@ -371,90 +377,122 @@ where
                 cfg.seeding.backend, cfg.seeding.model
             ))?;
         }
-        let seed_generation = seed_generation(store)?;
-        let mut seeding_error: Option<String> = None;
         let backlog_snapshot = summarize_active_backlog(store)?;
-        if let Err(err) = run_seed_with_heartbeat(
-            runtime,
-            scope,
-            cfg,
-            &profile,
-            &quality_doc,
-            &backlog_snapshot,
-            &mut progress,
-        ) {
-            append_run_log(
-                "warn",
-                "startup.seeding.agent_failed",
-                json!({
-                    "error": err.to_string(),
-                    "fallback_target": fallback_target,
-                }),
-            );
-            progress(&format!(
-                "Seeding agent failed ({err}); checking backlog before fallback"
-            ))?;
-            runtime
-                .terminal
-                .write_line(&format!("WARN backlog seeding failed: {err}"))?;
-            seeding_error = Some(err.to_string());
-        }
-        let post_seed_active_count = store.count_active_tasks()?;
-        let agent_seeded = post_seed_active_count.saturating_sub(existing_active_backlog_count);
-        if agent_seeded > 0 {
+        if seed_dry_run {
             append_run_log(
                 "info",
-                "startup.seeding.direct_persisted",
+                "startup.seeding.dry_run.started",
                 json!({
-                    "task_count": agent_seeded,
-                    "source": "seed_runner_v2_direct",
-                    "existing_count": existing_active_backlog_count,
-                    "post_count": post_seed_active_count,
+                    "backend": format!("{:?}", cfg.seeding.backend),
+                    "model": cfg.seeding.model,
                 }),
             );
+            let recommendations = run_seed_recommendations_with_heartbeat(
+                runtime,
+                scope,
+                cfg,
+                &profile,
+                &quality_doc,
+                &backlog_snapshot,
+                &mut progress,
+            )?;
+            print_seed_recommendations(runtime, &recommendations)?;
             progress(&format!(
-                "Seeding agent inserted {} backlog task(s) directly",
-                agent_seeded
+                "Backlog seeding dry-run complete; recommended {} task(s)",
+                recommendations.len()
             ))?;
-            seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(agent_seeded);
-            if let Some(err) = seeding_error {
+            append_run_log(
+                "info",
+                "startup.seeding.dry_run.completed",
+                json!({
+                    "recommended_tasks": recommendations.len(),
+                }),
+            );
+        } else {
+            let seed_generation = seed_generation(store)?;
+            let mut seeding_error: Option<String> = None;
+            if let Err(err) = run_seed_with_heartbeat(
+                runtime,
+                scope,
+                cfg,
+                &profile,
+                &quality_doc,
+                &backlog_snapshot,
+                &mut progress,
+            ) {
                 append_run_log(
                     "warn",
-                    "startup.seeding.direct_persisted_after_error",
-                    json!({ "error": err, "task_count": agent_seeded }),
+                    "startup.seeding.agent_failed",
+                    json!({
+                        "error": err.to_string(),
+                        "fallback_target": fallback_target,
+                    }),
                 );
+                progress(&format!(
+                    "Seeding agent failed ({err}); checking backlog before fallback"
+                ))?;
+                runtime
+                    .terminal
+                    .write_line(&format!("WARN backlog seeding failed: {err}"))?;
+                seeding_error = Some(err.to_string());
             }
-        } else {
-            append_run_log(
-                "info",
-                "startup.seeding.fallback",
-                json!({
-                    "fallback_target": fallback_target,
-                    "primary_gap": profile.agent_readiness.primary_gap,
-                    "seed_generation": seed_generation,
-                }),
-            );
-            append_run_log(
-                "warn",
-                "startup.seeding.fallback.warn",
-                json!({
-                    "fallback_source": format!("seed_runner_v2_fallback_gen_{seed_generation}"),
-                    "fallback_target": fallback_target,
-                }),
-            );
-            progress(&format!(
-                "No seeded tasks produced; generating {} fallback bootstrap task(s)",
-                fallback_target
-            ))?;
-            for task in fallback_seed_tasks(
-                &quality_doc,
-                &profile.agent_readiness.primary_gap,
-                fallback_target,
-                &format!("seed_runner_v2_fallback_gen_{seed_generation}"),
-            ) {
-                let bootstrap = store.upsert_task(task)?;
-                if !bootstrap.task_id.is_empty() {
-                    seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
+            let post_seed_active_count = store.count_active_tasks()?;
+            let agent_seeded = post_seed_active_count.saturating_sub(existing_active_backlog_count);
+            if agent_seeded > 0 {
+                append_run_log(
+                    "info",
+                    "startup.seeding.direct_persisted",
+                    json!({
+                        "task_count": agent_seeded,
+                        "source": "seed_runner_v2_direct",
+                        "existing_count": existing_active_backlog_count,
+                        "post_count": post_seed_active_count,
+                    }),
+                );
+                progress(&format!(
+                    "Seeding agent inserted {} backlog task(s) directly",
+                    agent_seeded
+                ))?;
+                seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(agent_seeded);
+                if let Some(err) = seeding_error {
+                    append_run_log(
+                        "warn",
+                        "startup.seeding.direct_persisted_after_error",
+                        json!({ "error": err, "task_count": agent_seeded }),
+                    );
+                }
+            } else {
+                append_run_log(
+                    "info",
+                    "startup.seeding.fallback",
+                    json!({
+                        "fallback_target": fallback_target,
+                        "primary_gap": profile.agent_readiness.primary_gap,
+                        "seed_generation": seed_generation,
+                    }),
+                );
+                append_run_log(
+                    "warn",
+                    "startup.seeding.fallback.warn",
+                    json!({
+                        "fallback_source": format!("seed_runner_v2_fallback_gen_{seed_generation}"),
+                        "fallback_target": fallback_target,
+                    }),
+                );
+                progress(&format!(
+                    "No seeded tasks produced; generating {} fallback bootstrap task(s)",
+                    fallback_target
+                ))?;
+                for task in fallback_seed_tasks(
+                    &quality_doc,
+                    &profile.agent_readiness.primary_gap,
+                    fallback_target,
+                    &format!("seed_runner_v2_fallback_gen_{seed_generation}"),
+                ) {
+                    let bootstrap = store.upsert_task(task)?;
+                    if !bootstrap.task_id.is_empty() {
+                        seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
+                    }
                 }
             }
         }
@@ -704,6 +742,124 @@ where
             }
         }
     })
+}
+
+fn run_seed_recommendations_with_heartbeat<F>(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    profile: &crate::repo_intelligence::RepoIntelligenceProfile,
+    quality_doc: &str,
+    backlog_snapshot: &str,
+    progress: &mut F,
+) -> Result<Vec<SeedTask>, GardenerError>
+where
+    F: FnMut(&str) -> Result<(), GardenerError>,
+{
+    append_run_log(
+        "debug",
+        "startup.backlog_seed.dry_run.heartbeat.started",
+        json!({
+            "repo_root": scope.repo_root.as_ref().map(|p| p.display().to_string()),
+            "profile_set": !cfg.seeding.model.is_empty(),
+        }),
+    );
+    enum SeedProgressMessage {
+        AgentUpdate(String),
+        Done(Result<Vec<SeedTask>, GardenerError>),
+    }
+    let (tx, rx) = mpsc::channel::<SeedProgressMessage>();
+
+    std::thread::scope(|thread_scope| {
+        thread_scope.spawn(|| {
+            let mut on_event = |event: &AgentEvent| {
+                if let Some(summary) = summarize_seed_agent_event(event) {
+                    let _ = tx.send(SeedProgressMessage::AgentUpdate(summary));
+                }
+            };
+            let result = recommend_seed_tasks_with_events(
+                runtime.process_runner.as_ref(),
+                scope,
+                cfg,
+                profile,
+                quality_doc,
+                backlog_snapshot,
+                Some(&mut on_event),
+            );
+            let _ = tx.send(SeedProgressMessage::Done(result));
+        });
+
+        let mut waited_seconds = 0u64;
+        let mut last_event: Option<String> = None;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(SeedProgressMessage::AgentUpdate(update)) => {
+                    if last_event.as_deref() != Some(update.as_str()) {
+                        progress(&update)?;
+                        if !runtime.terminal.stdin_is_tty() {
+                            runtime.terminal.write_line(&format!(
+                                "startup backlog seeding dry-run: {update}"
+                            ))?;
+                        }
+                        last_event = Some(update);
+                    }
+                }
+                Ok(SeedProgressMessage::Done(result)) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    waited_seconds = waited_seconds.saturating_add(10);
+                    progress(&format!(
+                        "Backlog seeding dry-run still running ({waited_seconds}s elapsed); waiting for model output"
+                    ))?;
+                    if !runtime.terminal.stdin_is_tty() {
+                        runtime.terminal.write_line(&format!(
+                            "startup backlog seeding dry-run: still running, elapsed={}s",
+                            waited_seconds
+                        ))?;
+                    }
+                    if waited_seconds == 60 {
+                        progress(
+                            "Backlog seeding dry-run is taking longer than expected; this can happen during first-run auth or slow model/network response",
+                        )?;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(GardenerError::Process(
+                        "backlog seeding dry-run worker channel disconnected".to_string(),
+                    ));
+                }
+            }
+        }
+    })
+}
+
+fn print_seed_recommendations(
+    runtime: &ProductionRuntime,
+    recommendations: &[SeedTask],
+) -> Result<(), GardenerError> {
+    append_run_log(
+        "info",
+        "startup.seeding.dry_run.recommendations",
+        json!({ "count": recommendations.len() }),
+    );
+    runtime
+        .terminal
+        .write_line("seed dry-run recommendations (no backlog writes):")?;
+    for (index, task) in recommendations.iter().enumerate() {
+        runtime.terminal.write_line(&format!(
+            "{}. [{}] ({}) {}",
+            index + 1,
+            task.priority,
+            task.domain,
+            task.title
+        ))?;
+        runtime
+            .terminal
+            .write_line(&format!("   details: {}", task.details))?;
+        runtime
+            .terminal
+            .write_line(&format!("   rationale: {}", task.rationale))?;
+    }
+    Ok(())
 }
 
 fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerError> {
@@ -1013,8 +1169,9 @@ fn report_stamp_is_stale(
 mod tests {
     use super::{
         backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
-        extract_message_preview, fallback_seed_tasks, quality_stamp_path, report_stamp_is_stale,
-        seed_generation, should_seed_backlog, summarize_seed_agent_event,
+        extract_message_preview, fallback_seed_tasks, print_seed_recommendations,
+        quality_stamp_path, report_stamp_is_stale, seed_generation, should_seed_backlog,
+        summarize_seed_agent_event,
     };
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
@@ -1025,6 +1182,7 @@ mod tests {
         FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput,
         ProductionRuntime,
     };
+    use crate::seed_runner::SeedTask;
     use crate::task_identity::TaskKind;
     use crate::triage;
     use crate::triage_discovery::DiscoveryAssessment;
@@ -1231,6 +1389,34 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn print_seed_recommendations_writes_expected_lines() {
+        let terminal = Arc::new(FakeTerminal::default());
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(FakeFileSystem::default()),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: terminal.clone(),
+        };
+        let tasks = vec![SeedTask {
+            title: "Improve startup diagnostics".to_string(),
+            details: "Add startup error categorization and operator guidance.".to_string(),
+            rationale: "Recent startup failures lacked enough context for fast triage.".to_string(),
+            domain: "startup".to_string(),
+            priority: "P1".to_string(),
+        }];
+
+        print_seed_recommendations(&runtime, &tasks).expect("print recommendations");
+        let lines = terminal.written_lines();
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("seed dry-run recommendations")));
+        assert!(lines.iter().any(|line| line.contains("[P1] (startup)")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Recent startup failures lacked enough context")));
     }
 
     #[test]

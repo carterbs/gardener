@@ -7,6 +7,7 @@
 - `--backlog-only`: startup audits and backlog maintenance without worker pool launch.
 - `--quit-after <N>`: run worker pool until `N` task completions are reached, then exit.
 - `--sync-only`: reconciliation-only flow with startup audits (when not in test mode), PR/worktree sync, backlog snapshot export, then deterministic exit.
+- `seed-backlog --mode dry-run|write`: run the seeding phase as a standalone binary (default `dry-run` prints recommended tasks to stdout without backlog writes).
 
 ## Quality Grades
 

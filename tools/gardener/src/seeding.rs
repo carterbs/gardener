@@ -4,7 +4,9 @@ use crate::logging::append_run_log;
 use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
-use crate::seed_runner::run_seed_agent_direct_v2_with_events;
+use crate::seed_runner::{
+    run_legacy_seed_runner_v1_with_events, run_seed_agent_direct_v2_with_events, SeedTask,
+};
 use crate::types::RuntimeScope;
 use serde_json::json;
 use std::fmt::Write as _;
@@ -31,6 +33,16 @@ pub fn build_seed_prompt(
 ) -> String {
     let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
     build_seed_prompt_v2(&context)
+}
+
+pub fn build_seed_dry_run_prompt(
+    profile: &RepoIntelligenceProfile,
+    quality_doc: &str,
+    scope: &RuntimeScope,
+    existing_backlog: &str,
+) -> String {
+    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
+    build_seed_dry_run_prompt_v1(&context)
 }
 
 pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
@@ -130,6 +142,83 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
     out
 }
 
+fn build_seed_dry_run_prompt_v1(context: &SeedPromptContext) -> String {
+    let mut out = String::new();
+    let mut quality_risks = context.quality_risks.clone();
+    if quality_risks.is_empty() {
+        quality_risks.push_str(
+            "No parseable coverage rows found in quality report; infer risk from repository signals.",
+        );
+    }
+
+    out.push_str("You are the Gardener backlog seeding worker.\n");
+    out.push_str("Goal: research the repository and recommend 10 actionable backlog tasks.\n");
+    out.push_str("Do not write to the backlog database.\n");
+    out.push_str("Do not implement code changes.\n");
+    out.push_str("Return a JSON envelope that matches the task schema.\n\n");
+
+    out.push_str("System framing\n");
+    out.push_str("- Do not invent nonexistent files, architecture, or conventions.\n");
+    out.push_str(
+        "- Use AGENTS.md, CLAUDE.md, docs listing, and quality grades as source of truth.\n",
+    );
+    out.push_str(
+        "- Recommend work that improves repository legibility, automation, and reliability.\n\n",
+    );
+
+    out.push_str("Inputs\n");
+    out.push_str(&format!(
+        "- primary_gap: {}\n- readiness_score: {}\n- readiness_grade: {}\n\n",
+        context.primary_gap, context.readiness_score, context.readiness_grade
+    ));
+    out.push_str("Quality risks extracted from report\n");
+    out.push_str(&quality_risks);
+    out.push('\n');
+    out.push_str("Relevant repo anchors\n");
+    out.push_str("1) AGENTS.md\n");
+    if context.agents_md.is_empty() {
+        out.push_str("No AGENTS.md found.\n");
+    } else {
+        out.push_str(&context.agents_md);
+        out.push('\n');
+    }
+    out.push_str("2) CLAUDE.md\n");
+    if context.claude_md.is_empty() {
+        out.push_str("No CLAUDE.md found.\n");
+    } else {
+        out.push_str(&context.claude_md);
+        out.push('\n');
+    }
+    out.push_str("3) docs/\n");
+    if context.docs_listing.is_empty() {
+        out.push_str("No docs directory found or readable.\n");
+    } else {
+        out.push_str(&context.docs_listing);
+    }
+    out.push('\n');
+    out.push_str("4) docs/references/codex-agent-team-article.md\n");
+    out.push_str("Read this file directly before writing recommendations.\n\n");
+
+    out.push_str("Existing active backlog snapshot\n");
+    out.push_str(&context.existing_backlog);
+    out.push_str("\n\n");
+
+    out.push_str("Recommendation contract\n");
+    out.push_str("Generate exactly 10 recommended tasks.\n");
+    out.push_str("- At least 2 tasks should map to primary_gap.\n");
+    out.push_str("- At least 2 tasks should be cleanup/debt reduction tasks.\n");
+    out.push_str("- priority must be one of P0, P1, P2.\n");
+    out.push_str("- domain should be concrete and align to discovered file families.\n");
+    out.push_str("- rationale should state the immediate quality signal and why now.\n");
+    out.push_str("- details should be concise and implementation-ready.\n");
+    out.push_str("- Output only schema-compliant JSON.\n\n");
+
+    out.push_str("Quality doc (truncated for prompt budget)\n");
+    out.push_str(&context.quality_doc);
+
+    out
+}
+
 pub fn seed_backlog_if_needed(
     process_runner: &dyn ProcessRunner,
     scope: &RuntimeScope,
@@ -147,6 +236,72 @@ pub fn seed_backlog_if_needed(
         existing_backlog,
         None,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn recommend_seed_tasks_with_events(
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    profile: &RepoIntelligenceProfile,
+    quality_doc: &str,
+    existing_backlog: &str,
+    mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+) -> Result<Vec<SeedTask>, GardenerError> {
+    append_run_log(
+        "info",
+        "seeding.dry_run.started",
+        json!({
+            "backend": format!("{:?}", cfg.seeding.backend),
+            "model": cfg.seeding.model,
+            "primary_gap": profile.agent_readiness.primary_gap,
+            "readiness_score": profile.agent_readiness.readiness_score,
+            "working_dir": scope.working_dir.display().to_string(),
+        }),
+    );
+
+    let prompt = build_seed_dry_run_prompt(profile, quality_doc, scope, existing_backlog);
+    let result = if let Some(sink) = on_event.as_mut() {
+        run_legacy_seed_runner_v1_with_events(
+            process_runner,
+            scope,
+            cfg.seeding.backend,
+            &cfg.seeding.model,
+            &prompt,
+            Some(*sink),
+        )
+    } else {
+        run_legacy_seed_runner_v1_with_events(
+            process_runner,
+            scope,
+            cfg.seeding.backend,
+            &cfg.seeding.model,
+            &prompt,
+            None,
+        )
+    };
+
+    match &result {
+        Ok(tasks) => append_run_log(
+            "info",
+            "seeding.dry_run.completed",
+            json!({
+                "backend": format!("{:?}", cfg.seeding.backend),
+                "model": cfg.seeding.model,
+                "task_count": tasks.len(),
+            }),
+        ),
+        Err(e) => append_run_log(
+            "error",
+            "seeding.dry_run.failed",
+            json!({
+                "backend": format!("{:?}", cfg.seeding.backend),
+                "model": cfg.seeding.model,
+                "error": e.to_string(),
+            }),
+        ),
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -335,8 +490,9 @@ fn extract_quality_risks(quality_doc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_seed_prompt, build_seed_prompt_context, build_seed_prompt_v2, collect_docs_listing,
-        extract_quality_risks, read_optional_file, walk_docs, SeedPromptContext,
+        build_seed_dry_run_prompt, build_seed_prompt, build_seed_prompt_context,
+        build_seed_prompt_v2, collect_docs_listing, extract_quality_risks, read_optional_file,
+        walk_docs, SeedPromptContext,
     };
     use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
@@ -573,5 +729,23 @@ mod tests {
         assert!(prompt.contains("No backlog-db skill file found."));
         assert!(prompt.contains("Existing active backlog snapshot"));
         assert!(prompt.contains("Quality doc"));
+    }
+
+    #[test]
+    fn build_seed_dry_run_prompt_forbids_db_writes() {
+        let profile = sample_profile();
+        let prompt = build_seed_dry_run_prompt(
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+            "No active backlog tasks.",
+        );
+
+        assert!(prompt.contains("Do not write to the backlog database."));
+        assert!(prompt.contains("Return a JSON envelope"));
     }
 }

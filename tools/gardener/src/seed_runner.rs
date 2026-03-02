@@ -279,6 +279,7 @@ fn seed_output_schema() -> String {
     r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
+  "additionalProperties": false,
   "properties": {
     "schema_version": {
       "type": "integer",
@@ -290,6 +291,7 @@ fn seed_output_schema() -> String {
     },
     "payload": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["tasks"],
       "properties": {
         "tasks": {
@@ -298,6 +300,7 @@ fn seed_output_schema() -> String {
           "maxItems": 12,
           "items": {
             "type": "object",
+            "additionalProperties": false,
             "required": ["title", "details", "rationale", "domain", "priority"],
             "properties": {
               "title": { "type": "string", "minLength": 5 },
@@ -573,5 +576,20 @@ mod tests {
         let payload = serde_json::json!("not-an-object");
         let result = parse_seed_payload(payload);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn seed_output_schema_is_strict() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&super::seed_output_schema()).expect("valid JSON schema");
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["properties"]["payload"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            schema["properties"]["payload"]["properties"]["tasks"]["items"]["additionalProperties"],
+            serde_json::json!(false)
+        );
     }
 }

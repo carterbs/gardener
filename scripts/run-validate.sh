@@ -9,6 +9,7 @@ CUSTOM_LINTERS=(
   "scripts/check-skills-sync.sh"
   "scripts/check-no-warnings.sh"
   "scripts/check-migrations-wired.sh"
+  "scripts/check-binary-blobs.sh"
   "scripts/run-script-lint-fixture-tests.sh"
 )
 

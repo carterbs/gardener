@@ -1,5 +1,5 @@
 use crate::errors::GardenerError;
-use crate::log_retention::enforce_total_budget;
+use crate::log_retention::rotate_log_if_needed;
 use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -11,7 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 50 * 1024 * 1024;
+/// Maximum size of the active OTEL log file before it is rotated.
+pub const LOG_ROTATION_MAX_BYTES: u64 = 20 * 1024 * 1024; // 20 MB
+/// Number of rotated log files to keep alongside the active one.
+/// Total log storage cap: (LOG_ROTATION_KEEP + 1) × LOG_ROTATION_MAX_BYTES ≈ 80 MB.
+pub const LOG_ROTATION_KEEP: u32 = 3;
 pub const DEFAULT_RUN_LOG_RELATIVE_PATH: &str = ".gardener/otel-logs.jsonl";
 const PROMPT_LINE_LIMIT: usize = 220;
 
@@ -19,7 +23,8 @@ const PROMPT_LINE_LIMIT: usize = 220;
 pub struct JsonlLogger {
     pub path: PathBuf,
     pub max_payload_bytes: usize,
-    pub budget_bytes: u64,
+    pub rotation_max_bytes: u64,
+    pub rotation_keep: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +62,8 @@ impl JsonlLogger {
         Self {
             path: path.as_ref().to_path_buf(),
             max_payload_bytes: 4096,
-            budget_bytes: DEFAULT_DISK_BUDGET_BYTES,
+            rotation_max_bytes: LOG_ROTATION_MAX_BYTES,
+            rotation_keep: LOG_ROTATION_KEEP,
         }
     }
 
@@ -71,6 +77,9 @@ impl JsonlLogger {
         line.push('\n');
 
         let _guard = run_log_write_lock().lock().expect("run log write lock");
+        // Rotate before writing so the triggering event lands in the new file,
+        // not at the tail of the file we're about to rename away.
+        let _ = rotate_log_if_needed(&self.path, self.rotation_max_bytes, self.rotation_keep)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -78,10 +87,6 @@ impl JsonlLogger {
             .map_err(|e| GardenerError::Io(e.to_string()))?;
         file.write_all(line.as_bytes())
             .map_err(|e| GardenerError::Io(e.to_string()))?;
-
-        if let Some(parent) = self.path.parent() {
-            let _ = enforce_total_budget(parent, self.budget_bytes)?;
-        }
 
         Ok(())
     }
@@ -676,6 +681,7 @@ mod tests {
         local_time_for_next_check, structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
+    use std::fs;
     use std::path::Path;
 
     fn with_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -750,15 +756,24 @@ mod tests {
     }
 
     #[test]
-    fn logger_enforces_budget() {
+    fn logger_rotates_at_threshold() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("run.jsonl");
+        // Pre-fill to just over the threshold.
+        fs::write(&path, vec![b'x'; 200]).expect("seed");
         let mut logger = JsonlLogger::new(&path);
-        logger.budget_bytes = 1024;
+        logger.rotation_max_bytes = 100;
+        logger.rotation_keep = 2;
         logger
             .append_json(&json!({"event_type":"tool"}))
             .expect("append");
-        assert!(path.exists());
+        // After append the rotation should have fired: run.1.jsonl contains
+        // the old content and run.jsonl is a fresh file with the new line.
+        assert!(path.exists(), "active log must exist after rotation");
+        assert!(
+            dir.path().join("run.1.jsonl").exists(),
+            "rotation slot 1 must exist"
+        );
     }
 
     #[test]

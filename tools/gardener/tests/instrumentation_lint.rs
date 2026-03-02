@@ -7,6 +7,9 @@ const MIN_INSTRUMENTATION_COVERAGE: f64 = 90.0;
 const EXCLUDED_FILES: &[&str] = &[
     "errors.rs",
     "hotkeys.rs",
+    // log_retention.rs is the log-rotation/pruning infrastructure. Calling
+    // append_run_log from within it while the write lock is held would deadlock.
+    "log_retention.rs",
     "main.rs",
     "output_envelope.rs",
     "priority.rs",

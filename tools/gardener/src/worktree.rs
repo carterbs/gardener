@@ -276,14 +276,26 @@ impl<'a> WorktreeClient<'a> {
 
     fn ensure_core_bare_false(&self, worktree_path: &Path) -> Result<(), GardenerError> {
         let out = self.runner.run(ProcessRequest {
-            program: "git".to_string(),
+            program: "sh".to_string(),
             args: vec![
-                "-C".to_string(),
+                "-eu".to_string(),
+                "-c".to_string(),
+                r#"current="$(git -C "$1" config --bool --get core.bare 2>/dev/null || true)"; \
+if [ "$current" = "false" ]; then \
+  exit 0; \
+fi; \
+if git -C "$1" config --worktree core.bare false; then \
+  exit 0; \
+fi; \
+for attempt in 1 2 3 4 5; do \
+  if git -C "$1" config --local core.bare false; then \
+    exit 0; \
+  fi; \
+  sleep 0.1; \
+done; \
+exit 1"#
+                    .to_string(),
                 worktree_path.display().to_string(),
-                "config".to_string(),
-                "--local".to_string(),
-                "core.bare".to_string(),
-                "false".to_string(),
             ],
             cwd: Some(self.cwd.clone()),
         })?;

@@ -223,6 +223,7 @@ pub fn run_worker_pool_fsm(
                     branch,
                     pr_number,
                     logs: Vec::new(),
+                    handoff_evidence_bundle: None,
                 });
                 *active_merging = active_merging.saturating_add(1);
                 return Ok(Some((pr_number, task_summary)));

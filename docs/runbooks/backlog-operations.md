@@ -57,7 +57,7 @@ Optional fields:
 - `--status` (`ready|leased|in_progress|merge_pending|complete|failed|unresolved`, default `ready`)
 - `--source` (default `manual`)
 - `--id` (default `manual:<scope>:auto-<unix_ms>`)
-- `--db` (defaults to `~/.gardener/backlog.sqlite`)
+- `--db` (defaults to `.cache/gardener/backlog.sqlite`)
 
 ## State glossary
 

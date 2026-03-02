@@ -119,6 +119,13 @@ pub fn clear_run_logger() {
 }
 
 fn init_run_logger_nolock(path: impl AsRef<Path>, working_dir: &Path) -> String {
+    let mut logger_slot = run_logger_slot().lock().expect("run logger lock");
+    let mut context_slot = run_context_slot().lock().expect("run context lock");
+
+    if let Some(existing) = context_slot.as_ref() {
+        return existing.run_id.clone();
+    }
+
     let run_id = random_hex(16);
     let context = RunLogContext {
         run_id: run_id.clone(),
@@ -127,10 +134,7 @@ fn init_run_logger_nolock(path: impl AsRef<Path>, working_dir: &Path) -> String 
         working_dir: working_dir.display().to_string(),
     };
 
-    let mut logger_slot = run_logger_slot().lock().expect("run logger lock");
     *logger_slot = Some(JsonlLogger::new(path));
-
-    let mut context_slot = run_context_slot().lock().expect("run context lock");
     *context_slot = Some(context);
     run_id
 }

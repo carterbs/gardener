@@ -98,6 +98,27 @@ fn dashboard_worker_states_all_render() {
 }
 
 #[test]
+fn flow_chain_renders_for_early_states() {
+    // 'planning' and 'understand' previously fell through to "unknown" in
+    // normalize_worker_state, showing only a single gray label instead of the
+    // full flow chain. Verify the chain (Understand → Planning → …) renders.
+    for state in ["planning", "understand"] {
+        let frame = render_dashboard(
+            &[make_worker("w-01", state, "task")],
+            &zero_stats(),
+            &empty_backlog(),
+            120,
+            30,
+        );
+        let frame_lower = frame.to_ascii_lowercase();
+        assert!(
+            frame_lower.contains("understand") && frame_lower.contains("doing"),
+            "full flow chain not rendered for state '{state}': missing understand/doing steps"
+        );
+    }
+}
+
+#[test]
 fn dashboard_keeps_three_workers_visible_in_short_viewports_without_backlog() {
     let workers = vec![
         make_worker("w-01", "doing", "task-a"),

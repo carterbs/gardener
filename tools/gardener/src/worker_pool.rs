@@ -9,8 +9,6 @@ use crate::logging::{
     recent_worker_tool_commands, structured_fallback_line,
 };
 use crate::priority::Priority;
-use crate::replay::recorder::{emit_record, next_seq, set_recording_worker_id, timestamp_ns};
-use crate::replay::recording::{BacklogMutationRecord, RecordEntry};
 use crate::runtime::Terminal;
 use crate::runtime::{
     clear_interrupt, request_interrupt, ProductionRuntime, INTERRUPT_SENTINEL_KEY,
@@ -47,7 +45,6 @@ enum PoolResultMessage {
     },
     MergeResult {
         task_id: String,
-        worker_id: String,
         result: Result<crate::worker::WorkerRunSummary, GardenerError>,
     },
 }
@@ -259,23 +256,7 @@ pub fn run_worker_pool_fsm(
                     "title": task.title
                 }),
             );
-            emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                seq: next_seq(),
-                timestamp_ns: timestamp_ns(),
-                worker_id: worker_id.clone(),
-                operation: "claim_next".to_string(),
-                task_id: task.task_id.clone(),
-                result_ok: true,
-            }));
             let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
-            emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                seq: next_seq(),
-                timestamp_ns: timestamp_ns(),
-                worker_id: worker_id.clone(),
-                operation: "mark_in_progress".to_string(),
-                task_id: task.task_id.clone(),
-                result_ok: true,
-            }));
 
             workers[idx].state = "claimed".to_string();
             workers[idx].task_title = task.title.clone();
@@ -318,7 +299,11 @@ pub fn run_worker_pool_fsm(
         let mut active_doing = claimed.len();
         let mut shutdown_error: Option<(String, String, String)> = None;
         let mut quit_requested = false;
+        let mut quit_requested_at: Option<Instant> = None;
+        let mut last_shutdown_log = Instant::now();
         let mut last_dashboard_refresh = Instant::now();
+        let mut last_render_completed: Option<Instant> = None;
+        let mut last_render_heartbeat = Instant::now() - Duration::from_secs(60);
 
         std::thread::scope(|scope_guard| -> Result<(), GardenerError> {
             // Spawn doing workers.
@@ -332,7 +317,6 @@ pub fn run_worker_pool_fsm(
                 let process_runner = runtime.process_runner.clone();
                 let worker_scope = runtime_scope.clone();
                 scope_guard.spawn(move || {
-                    set_recording_worker_id(&worker_id);
                     let result = execute_task(
                         &cfg,
                         process_runner.as_ref(),
@@ -360,18 +344,14 @@ pub fn run_worker_pool_fsm(
                 scope_guard.spawn(move || {
                     while let Ok(req) = merge_rx.recv() {
                         let task_id = req.task_id.clone();
-                        let worker_id = req.worker_id.clone();
                         let result = execute_merge_phase(
                             &req,
                             &merge_cfg,
                             merge_runner.as_ref(),
                             &merge_scope,
                         );
-                        let _ = merge_result_tx.send(PoolResultMessage::MergeResult {
-                            task_id,
-                            worker_id,
-                            result,
-                        });
+                        let _ = merge_result_tx
+                            .send(PoolResultMessage::MergeResult { task_id, result });
                     }
                 });
             }
@@ -392,6 +372,19 @@ pub fn run_worker_pool_fsm(
                     report_visible: &mut report_visible,
                 })? {
                     request_interrupt();
+                    if !quit_requested {
+                        quit_requested_at = Some(Instant::now());
+                        last_shutdown_log = Instant::now();
+                        append_run_log(
+                            "warn",
+                            "worker_pool.shutdown.requested",
+                            json!({
+                                "worker_id": WORKER_POOL_ID,
+                                "active_doing": active_doing,
+                                "active_merging": active_merging,
+                            }),
+                        );
+                    }
                     quit_requested = true;
                 }
 
@@ -435,16 +428,6 @@ pub fn run_worker_pool_fsm(
                                         req.pr_number as i64,
                                         &req.branch,
                                     );
-                                    emit_record(RecordEntry::BacklogMutation(
-                                        BacklogMutationRecord {
-                                            seq: next_seq(),
-                                            timestamp_ns: timestamp_ns(),
-                                            worker_id: worker_id.clone(),
-                                            operation: "mark_merge_pending".to_string(),
-                                            task_id: task_id.clone(),
-                                            result_ok: true,
-                                        },
-                                    ));
                                     // Process doing worker logs for TUI
                                     for event in &req.logs {
                                         workers[idx].state = event.state.as_str().to_string();
@@ -520,16 +503,6 @@ pub fn run_worker_pool_fsm(
                                     }
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, &worker_id)?;
-                                        emit_record(RecordEntry::BacklogMutation(
-                                            BacklogMutationRecord {
-                                                seq: next_seq(),
-                                                timestamp_ns: timestamp_ns(),
-                                                worker_id: worker_id.clone(),
-                                                operation: "mark_complete".to_string(),
-                                                task_id: task_id.clone(),
-                                                result_ok: true,
-                                            },
-                                        ));
                                         completed = completed.saturating_add(1);
                                         workers[idx].state = "complete".to_string();
                                         let completed_message = format!("completed {}", task_id);
@@ -609,16 +582,6 @@ pub fn run_worker_pool_fsm(
                                             );
                                         } else {
                                             let _ = store.release_lease(&task_id, &worker_id)?;
-                                            emit_record(RecordEntry::BacklogMutation(
-                                                BacklogMutationRecord {
-                                                    seq: next_seq(),
-                                                    timestamp_ns: timestamp_ns(),
-                                                    worker_id: worker_id.clone(),
-                                                    operation: "release_lease".to_string(),
-                                                    task_id: task_id.clone(),
-                                                    result_ok: true,
-                                                },
-                                            ));
                                         }
                                     }
                                 }
@@ -648,23 +611,7 @@ pub fn run_worker_pool_fsm(
                                         "title": task.title
                                     }),
                                 );
-                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                    seq: next_seq(),
-                                    timestamp_ns: timestamp_ns(),
-                                    worker_id: worker_id.clone(),
-                                    operation: "claim_next".to_string(),
-                                    task_id: task.task_id.clone(),
-                                    result_ok: true,
-                                }));
                                 let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
-                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                    seq: next_seq(),
-                                    timestamp_ns: timestamp_ns(),
-                                    worker_id: worker_id.clone(),
-                                    operation: "mark_in_progress".to_string(),
-                                    task_id: task.task_id.clone(),
-                                    result_ok: true,
-                                }));
 
                                 workers[idx].state = "claimed".to_string();
                                 workers[idx].task_title = task.title.clone();
@@ -678,6 +625,7 @@ pub fn run_worker_pool_fsm(
                                 workers[idx].session_age_secs = 0;
                                 refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                                 render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                                last_render_completed = Some(Instant::now());
 
                                 let tx = tx.clone();
                                 let task_id = task.task_id.clone();
@@ -688,7 +636,6 @@ pub fn run_worker_pool_fsm(
                                 let process_runner = runtime.process_runner.clone();
                                 let worker_scope = runtime_scope.clone();
                                 scope_guard.spawn(move || {
-                                    set_recording_worker_id(&worker_id);
                                     let result = execute_task(
                                         &cfg,
                                         process_runner.as_ref(),
@@ -722,12 +669,9 @@ pub fn run_worker_pool_fsm(
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                        last_render_completed = Some(Instant::now());
                     }
-                    Ok(PoolResultMessage::MergeResult {
-                        task_id,
-                        worker_id,
-                        result,
-                    }) => {
+                    Ok(PoolResultMessage::MergeResult { task_id, result }) => {
                         active_merging = active_merging.saturating_sub(1);
                         if shutdown_error.is_some() {
                             request_interrupt();
@@ -756,16 +700,6 @@ pub fn run_worker_pool_fsm(
                                 Ok(summary) => {
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
-                                        emit_record(RecordEntry::BacklogMutation(
-                                            BacklogMutationRecord {
-                                                seq: next_seq(),
-                                                timestamp_ns: timestamp_ns(),
-                                                worker_id: worker_id.clone(),
-                                                operation: "mark_complete".to_string(),
-                                                task_id: task_id.clone(),
-                                                result_ok: true,
-                                            },
-                                        ));
                                         completed = completed.saturating_add(1);
                                         workers[merge_row_idx].state = "complete".to_string();
                                         let done_msg = format!("merged {}", task_id);
@@ -823,6 +757,7 @@ pub fn run_worker_pool_fsm(
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                        last_render_completed = Some(Instant::now());
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         let updated_commands = append_worker_tool_commands(
@@ -840,8 +775,44 @@ pub fn run_worker_pool_fsm(
                             || last_dashboard_refresh.elapsed() >= Duration::from_secs(1)
                         {
                             refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
-                            render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
+                            let snapshot = dashboard_snapshot(store)?;
+                            if last_render_heartbeat.elapsed() >= Duration::from_secs(60) {
+                                last_render_heartbeat = Instant::now();
+                                append_run_log(
+                                    "debug",
+                                    "dashboard.snapshot",
+                                    json!({
+                                        "worker_id": WORKER_POOL_ID,
+                                        "workers": workers.len(),
+                                        "active": snapshot.stats.active,
+                                        "ready": snapshot.stats.ready,
+                                        "failed": snapshot.stats.failed,
+                                        "unresolved": snapshot.stats.unresolved,
+                                        "tty": terminal.stdin_is_tty(),
+                                        "last_render_ago_ms": last_render_completed
+                                            .map(|t| t.elapsed().as_millis() as u64)
+                                            .unwrap_or(0),
+                                    }),
+                                );
+                            }
+                            render(terminal, &workers, &snapshot, hb, lt)?;
+                            last_render_completed = Some(Instant::now());
                             last_dashboard_refresh = Instant::now();
+                        }
+                        if quit_requested && last_shutdown_log.elapsed() >= Duration::from_secs(5) {
+                            last_shutdown_log = Instant::now();
+                            append_run_log(
+                                "warn",
+                                "worker_pool.shutdown.waiting",
+                                json!({
+                                    "worker_id": WORKER_POOL_ID,
+                                    "active_doing": active_doing,
+                                    "active_merging": active_merging,
+                                    "elapsed_ms": quit_requested_at
+                                        .map(|t| t.elapsed().as_millis() as u64)
+                                        .unwrap_or(0),
+                                }),
+                            );
                         }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -1234,13 +1205,6 @@ struct DashboardSnapshot {
 }
 
 fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, GardenerError> {
-    append_run_log(
-        "debug",
-        "worker_pool.dashboard_snapshot.started",
-        json!({
-            "worker_id": WORKER_POOL_ID
-        }),
-    );
     let tasks = store.list_tasks()?;
     let mut stats = QueueStats {
         ready: 0,
@@ -1308,21 +1272,6 @@ fn render(
     heartbeat_interval_seconds: u64,
     lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
-    append_run_log(
-        "debug",
-        "dashboard.snapshot",
-        json!({
-            "worker_id": WORKER_POOL_ID,
-            "workers": workers.len(),
-            "ready": snapshot.stats.ready,
-            "active": snapshot.stats.active,
-            "failed": snapshot.stats.failed,
-            "unresolved": snapshot.stats.unresolved,
-            "backlog_in_progress": snapshot.backlog.in_progress.len(),
-            "backlog_queued": snapshot.backlog.queued.len(),
-            "tty": terminal.stdin_is_tty()
-        }),
-    );
     if terminal.stdin_is_tty() {
         terminal.draw_dashboard_with_config(
             workers,

@@ -19,11 +19,6 @@ const EXCLUDED_FILES: &[&str] = &[
     "prompts.rs",
     "protocol.rs",
     "quality_domain_catalog.rs",
-    // replay module: recording/replay infrastructure (writes session file, not otel log)
-    "replay/mod.rs",
-    "replay/recorder.rs",
-    "replay/recording.rs",
-    "replay/replayer.rs",
     "runtime/mod.rs",
     "task_identity.rs",
     "tui.rs",
@@ -300,6 +295,12 @@ fn is_eligible_function(function: &FunctionStats) -> bool {
     }
 
     if function.name == "default" || function.name == "new" {
+        return false;
+    }
+
+    // dashboard_snapshot is a pure data-aggregation helper; its caller
+    // (render / run_worker_pool_fsm) owns the instrumentation.
+    if function.name == "dashboard_snapshot" {
         return false;
     }
 

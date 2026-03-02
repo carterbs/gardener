@@ -366,7 +366,6 @@ where
                 "startup backlog seeding: preparing context from repo profile + quality report",
             )?;
         }
-        let fallback_target = cfg.orchestrator.parallelism.max(3) as usize;
         progress(&format!(
             "Launching {:?} seeding agent ({})",
             cfg.seeding.backend, cfg.seeding.model
@@ -409,7 +408,6 @@ where
                 }),
             );
         } else {
-            let seed_generation = seed_generation(store)?;
             let mut seeding_error: Option<String> = None;
             if let Err(err) = run_seed_with_heartbeat(
                 runtime,
@@ -423,14 +421,9 @@ where
                 append_run_log(
                     "warn",
                     "startup.seeding.agent_failed",
-                    json!({
-                        "error": err.to_string(),
-                        "fallback_target": fallback_target,
-                    }),
+                    json!({ "error": err.to_string() }),
                 );
-                progress(&format!(
-                    "Seeding agent failed ({err}); checking backlog before fallback"
-                ))?;
+                progress(&format!("Seeding agent failed ({err})"))?;
                 runtime
                     .terminal
                     .write_line(&format!("WARN backlog seeding failed: {err}"))?;
@@ -460,39 +453,6 @@ where
                         "startup.seeding.direct_persisted_after_error",
                         json!({ "error": err, "task_count": agent_seeded }),
                     );
-                }
-            } else {
-                append_run_log(
-                    "info",
-                    "startup.seeding.fallback",
-                    json!({
-                        "fallback_target": fallback_target,
-                        "primary_gap": profile.agent_readiness.primary_gap,
-                        "seed_generation": seed_generation,
-                    }),
-                );
-                append_run_log(
-                    "warn",
-                    "startup.seeding.fallback.warn",
-                    json!({
-                        "fallback_source": format!("seed_runner_v2_fallback_gen_{seed_generation}"),
-                        "fallback_target": fallback_target,
-                    }),
-                );
-                progress(&format!(
-                    "No seeded tasks produced; generating {} fallback bootstrap task(s)",
-                    fallback_target
-                ))?;
-                for task in fallback_seed_tasks(
-                    &quality_doc,
-                    &profile.agent_readiness.primary_gap,
-                    fallback_target,
-                    &format!("seed_runner_v2_fallback_gen_{seed_generation}"),
-                ) {
-                    let bootstrap = store.upsert_task(task)?;
-                    if !bootstrap.task_id.is_empty() {
-                        seeded_tasks_upserted = seeded_tasks_upserted.saturating_add(1);
-                    }
                 }
             }
         }
@@ -639,21 +599,6 @@ fn should_seed_backlog(
     force_seed_backlog: bool,
 ) -> bool {
     run_seeding && !test_mode && (existing_backlog_count == 0 || force_seed_backlog)
-}
-
-fn seed_generation(store: &BacklogStore) -> Result<usize, GardenerError> {
-    append_run_log("debug", "startup.seed_generation.started", json!({}));
-    let highest = store
-        .list_tasks()?
-        .into_iter()
-        .filter_map(|task| {
-            task.source
-                .strip_prefix("seed_runner_v2_gen_")
-                .and_then(|value| value.parse::<usize>().ok())
-        })
-        .max()
-        .unwrap_or(0);
-    Ok(highest.saturating_add(1))
 }
 
 fn run_seed_with_heartbeat<F>(
@@ -1026,104 +971,6 @@ fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("{}.stamp", quality_path.display()))
 }
 
-fn fallback_seed_tasks(
-    quality_doc: &str,
-    primary_gap: &str,
-    target: usize,
-    source: &str,
-) -> Vec<NewTask> {
-    let mut tasks: Vec<NewTask> = fallback_from_quality_doc(quality_doc, target)
-        .into_iter()
-        .map(|(domain, grade)| {
-            let priority = if grade == "F" {
-                Priority::P0
-            } else {
-                Priority::P1
-            };
-            NewTask {
-                kind: TaskKind::QualityGap,
-                title: format!("Improve {domain} from {grade} to B"),
-                details: format!("Raise the {domain} quality grade and remove technical debt blocking progression."),
-                rationale: format!(
-                    "Fallback task derived from quality report showing {domain} currently at grade {grade}."
-                ),
-                scope_key: domain,
-                priority,
-                source: source.to_string(),
-                related_pr: None,
-                related_branch: None,
-            }
-        })
-        .collect();
-
-    if tasks.is_empty() {
-        let templates = [
-            (
-                "Bootstrap backlog",
-                "Seed runner returned no tasks; map the repo and identify concrete work items.",
-            ),
-            (
-                "Stabilize validation loop",
-                "Audit failing validations and convert findings into prioritized remediation tasks.",
-            ),
-            (
-                "Rank quality risks",
-                "Review quality grades and convert the top risks into actionable backlog items.",
-            ),
-        ];
-        let count = target.max(3);
-        tasks = (0..count)
-            .map(|idx| {
-                let (title, details) = templates[idx % templates.len()];
-                NewTask {
-                    kind: TaskKind::QualityGap,
-                    title: format!("{title} for {primary_gap} #{}", idx + 1),
-                    details: details.to_string(),
-                    rationale: format!(
-                        "Fallback quality placeholder to guarantee seeded tasks for domain {primary_gap}."
-                    ),
-                    scope_key: primary_gap.to_string(),
-                    priority: Priority::P1,
-                    source: source.to_string(),
-                    related_pr: None,
-                    related_branch: None,
-                }
-            })
-            .collect();
-    }
-
-    tasks
-}
-
-fn fallback_from_quality_doc(quality_doc: &str, target: usize) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for line in quality_doc.lines() {
-        let line = line.trim();
-        if !line.starts_with('|') {
-            continue;
-        }
-        if line.contains("| Domain |") || line.starts_with("| ---") || line.contains("|---") {
-            continue;
-        }
-        let columns: Vec<_> = line
-            .split('|')
-            .map(|column| column.trim())
-            .filter(|column| !column.is_empty())
-            .collect();
-        if columns.len() == 3 {
-            let domain = columns[0].to_string();
-            let grade = columns[2].to_string();
-            if matches!(grade.as_str(), "C" | "D" | "F") {
-                out.push((domain, grade));
-            }
-        }
-        if out.len() >= target {
-            break;
-        }
-    }
-    out
-}
-
 fn report_stamp_is_stale(
     runtime: &ProductionRuntime,
     cfg: &AppConfig,
@@ -1169,13 +1016,10 @@ fn report_stamp_is_stale(
 mod tests {
     use super::{
         backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
-        extract_message_preview, fallback_seed_tasks, print_seed_recommendations,
-        quality_stamp_path, report_stamp_is_stale, seed_generation, should_seed_backlog,
-        summarize_seed_agent_event,
+        extract_message_preview, print_seed_recommendations, quality_stamp_path,
+        report_stamp_is_stale, should_seed_backlog, summarize_seed_agent_event,
     };
-    use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
-    use crate::priority::Priority;
     use crate::protocol::{AgentEvent, AgentEventKind};
     use crate::repo_intelligence::{self, RepoIntelligenceProfile};
     use crate::runtime::{
@@ -1183,26 +1027,12 @@ mod tests {
         ProductionRuntime,
     };
     use crate::seed_runner::SeedTask;
-    use crate::task_identity::TaskKind;
     use crate::triage;
     use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
-
-    #[test]
-    fn fallback_seed_tasks_generate_multiple_unique_items() {
-        let tasks = fallback_seed_tasks(
-            "# Domain | Score | Grade |\n| --- | --- | --- |\n| agent_steering | 10 | B |\n| startup | 60 | B |\n",
-            "agent_steering",
-            3,
-            "seed_runner_v2_fallback_gen_1",
-        );
-        assert_eq!(tasks.len(), 3);
-        assert_ne!(tasks[0].title, tasks[1].title);
-        assert_ne!(tasks[1].title, tasks[2].title);
-    }
 
     #[test]
     fn seeding_gate_requires_empty_backlog() {
@@ -1264,64 +1094,9 @@ mod tests {
     }
 
     #[test]
-    fn fallback_seed_tasks_uses_templates_when_no_risky_rows() {
-        let tasks = fallback_seed_tasks(
-            "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 92 | B |\n",
-            "infrastructure",
-            1,
-            "seed_runner_v2_fallback_gen_4",
-        );
-        assert_eq!(tasks.len(), 3);
-        assert!(tasks[0]
-            .title
-            .contains("Bootstrap backlog for infrastructure #1"));
-    }
-
-    #[test]
-    fn fallback_seed_tasks_marks_f_fails_as_p0() {
-        let tasks = fallback_seed_tasks(
-            "| Domain | Score | Grade |\n| --- | --- | --- |\n| startup | 30 | F |\n",
-            "startup",
-            1,
-            "seed_runner_v2_fallback_gen_4",
-        );
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].priority, Priority::P0);
-    }
-
-    #[test]
     fn quality_stamp_path_appends_extension() {
         let path = quality_stamp_path(std::path::Path::new("/tmp/report.md"));
         assert_eq!(path, std::path::PathBuf::from("/tmp/report.md.stamp"));
-    }
-
-    #[test]
-    fn seed_generation_uses_max_observed_seed_run() {
-        let dir = tempdir().expect("tempdir");
-        let store = BacklogStore::open(dir.path().join("backlog.sqlite")).expect("open store");
-        let _ = store.upsert_task(NewTask {
-            kind: TaskKind::QualityGap,
-            title: "first".into(),
-            details: "details".into(),
-            rationale: "rationale".into(),
-            scope_key: "startup".into(),
-            priority: Priority::P1,
-            source: "seed_runner_v2_gen_2".into(),
-            related_pr: None,
-            related_branch: None,
-        });
-        let _ = store.upsert_task(NewTask {
-            kind: TaskKind::QualityGap,
-            title: "second".into(),
-            details: "details".into(),
-            rationale: "rationale".into(),
-            scope_key: "startup".into(),
-            priority: Priority::P1,
-            source: "seed_runner_v2_gen_7".into(),
-            related_pr: None,
-            related_branch: None,
-        });
-        assert_eq!(seed_generation(&store).expect("generation"), 8);
     }
 
     #[test]

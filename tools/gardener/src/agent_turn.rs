@@ -10,8 +10,6 @@ use crate::prompt_knowledge::to_prompt_lines;
 use crate::prompt_registry::{PromptRegistry, PromptTemplate};
 use crate::prompts::{render_prompt_with_body, render_state_prompt};
 use crate::protocol::AgentTerminal;
-use crate::replay::recorder::{emit_record, get_recording_worker_id, next_seq, timestamp_ns};
-use crate::replay::recording::{AgentTurnRecord, RecordEntry};
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerState};
 use crate::worker_identity::WorkerIdentity;
@@ -171,19 +169,6 @@ pub fn run_agent_turn(input: AgentTurnInput<'_>) -> Result<AgentTurnOutput, Gard
             "diagnostic_count": step.diagnostics.len()
         }),
     );
-
-    emit_record(RecordEntry::AgentTurn(AgentTurnRecord {
-        seq: next_seq(),
-        timestamp_ns: timestamp_ns(),
-        worker_id: get_recording_worker_id(),
-        state: state.as_str().to_string(),
-        terminal: match step.terminal {
-            AgentTerminal::Success => "success".to_string(),
-            AgentTerminal::Failure => "failure".to_string(),
-        },
-        payload: step.payload.clone(),
-        diagnostic_count: step.diagnostics.len(),
-    }));
 
     Ok(AgentTurnOutput {
         terminal: step.terminal,

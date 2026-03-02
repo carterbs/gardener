@@ -49,6 +49,7 @@ impl PhaseRuntime {
             backlog_only: false,
             quality_grades_only: false,
             validation_command: None,
+            worker_mode: None,
             agent: None,
             retriage: false,
             triage_only: false,

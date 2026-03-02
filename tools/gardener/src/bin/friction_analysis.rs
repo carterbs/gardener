@@ -1,4 +1,9 @@
-#![deny(clippy::manual_strip, clippy::unwrap_used, clippy::expect_used, clippy::redundant_clone)]
+#![deny(
+    clippy::manual_strip,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::redundant_clone
+)]
 
 use gardener::config::load_config;
 use gardener::config::CliOverrides;
@@ -117,6 +122,7 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
         backlog_only: false,
         quality_grades_only: false,
         validation_command: None,
+        worker_mode: None,
         agent: None,
         retriage: false,
         triage_only: false,

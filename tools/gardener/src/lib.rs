@@ -90,6 +90,8 @@ pub struct Cli {
     pub task: Option<String>,
     #[arg(long = "quit-after")]
     pub target: Option<u32>,
+    #[arg(long, value_enum)]
+    pub worker_mode: Option<CliWorkerMode>,
     #[arg(long, default_value_t = false)]
     pub prune_only: bool,
     #[arg(long, default_value_t = false)]
@@ -118,6 +120,23 @@ pub struct Cli {
 pub enum CliAgent {
     Claude,
     Codex,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliWorkerMode {
+    #[value(name = "normal")]
+    Normal,
+    #[value(name = "stub_complete")]
+    StubComplete,
+}
+
+impl CliWorkerMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::StubComplete => "stub_complete",
+        }
+    }
 }
 
 impl From<CliAgent> for AgentKind {
@@ -192,6 +211,7 @@ pub fn run_with_runtime(
                 "validate": cli.validate,
                 "task_override": cli.task,
                 "target": cli.target,
+                "worker_mode": cli.worker_mode.map(|mode| mode.as_str()),
                 "triage_only": cli.triage_only,
                 "sync_only": cli.sync_only,
                 "force_seed_backlog": cli.force_seed_backlog,
@@ -218,6 +238,7 @@ pub fn run_with_runtime(
             parallelism: cli.parallelism,
             task: cli.task.clone(),
             target: cli.target,
+            worker_mode: cli.worker_mode.map(|mode| mode.as_str().to_string()),
             prune_only: cli.prune_only,
             backlog_only: cli.backlog_only,
             quality_grades_only: cli.quality_grades_only,

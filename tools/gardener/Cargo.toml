@@ -43,6 +43,10 @@ name = "friction-analysis"
 path = "src/bin/friction_analysis.rs"
 
 [[bin]]
+name = "log-query"
+path = "src/bin/log_query.rs"
+
+[[bin]]
 name = "seed-backlog"
 path = "src/bin/seed_backlog.rs"
 

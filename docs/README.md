@@ -25,6 +25,10 @@ This directory is the canonical index for agent-oriented repository navigation. 
 
 - [Backlog operations runbook](./runbooks/backlog-operations.md)
 
+## Fifth: repository map
+
+- [Repository map](./repository-map.md)
+
 ## Before editing
 
 1. Read [`AGENTS.md`](../AGENTS.md) and the [root README](../README.md).

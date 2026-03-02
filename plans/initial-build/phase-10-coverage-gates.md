@@ -2,7 +2,7 @@
 Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-foundation.md)
 ### Changes Required
 - Add dedicated coverage command:
-  - `npm run test:gardener:coverage` -> `cargo llvm-cov -p gardener --bin brad-gardener ...`.
+  - `npm run test:gardener:coverage` -> `cargo llvm-cov -p gardener --bin gardener ...`.
   - `cargo llvm-cov` is the only authoritative coverage engine for this plan (do not mix with tarpaulin for gates).
 - Add enforcement checker:
   - implement as CI/local tooling check (not runtime orchestrator module), e.g. `tools/dev-cli/src/bin/gardener_coverage_gate.rs` or CI parser.
@@ -32,7 +32,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 ### Phase Validation Gate (Mandatory)
 - Run: `cargo test -p gardener --all-targets`
 - Run: `npm run test:gardener:coverage` (must report 100.00% lines for `tools/gardener/src/**`).
-- Run full E2E binary smoke: `scripts/brad-gardener --parallelism 3 --target 3 --config tools/gardener/tests/fixtures/configs/phase10-full.toml` and verify expected task completion + clean shutdown.
+- Run full E2E binary smoke: `cargo run -p gardener --bin gardener -- --parallelism 3 --target 3 --config tools/gardener/tests/fixtures/configs/phase10-full.toml` and verify expected task completion + clean shutdown.
 - Run repository gate: `npm run validate`.
 
 ### Autonomous Completion Rule

@@ -28,7 +28,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 ### Phase Validation Gate (Mandatory)
 - Run: `cargo test -p gardener --all-targets`
 - Run: `cargo llvm-cov -p gardener --all-targets --summary-only` (must report 100.00% lines for current `tools/gardener/src/**` code at this phase).
-- Run E2E binary smoke: `scripts/brad-gardener --backlog-only --config tools/gardener/tests/fixtures/configs/phase02-backlog.toml` then `scripts/brad-gardener --target 1 --config tools/gardener/tests/fixtures/configs/phase02-backlog.toml`.
+- Run E2E binary smoke: `cargo run -p gardener --bin gardener -- --backlog-only --config tools/gardener/tests/fixtures/configs/phase02-backlog.toml` then `cargo run -p gardener --bin gardener -- --target 1 --config tools/gardener/tests/fixtures/configs/phase02-backlog.toml`.
 
 ### Autonomous Completion Rule
 - Continue directly to the next phase only after all success criteria and this phase validation gate pass.

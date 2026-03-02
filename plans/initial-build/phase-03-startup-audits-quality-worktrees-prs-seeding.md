@@ -16,7 +16,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 - Startup sequence:
   1. Load repo intelligence profile from `triage.output_path`:
      - if profile missing: hard stop regardless of interactive/non-interactive mode.
-       Error message: "No repo intelligence profile found. Run `brad-gardener --triage-only` in a terminal to complete setup."
+       Error message: "No repo intelligence profile found. Run `cargo run -p gardener --bin gardener -- --triage-only` in a terminal to complete setup."
        A coding agent receiving this error should surface it to a human rather than attempting to proceed.
      - if profile stale (HEAD diverged by > `triage.stale_after_commits`): emit non-blocking `WARN`, continue with existing profile.
      - if `user_validated.validation_command` is set and `startup.validation_command` is not: inject profile value into startup config.
@@ -83,8 +83,8 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 ### Phase Validation Gate (Mandatory)
 - Run: `cargo test -p gardener --all-targets`
 - Run: `cargo llvm-cov -p gardener --all-targets --summary-only` (must report 100.00% lines for current `tools/gardener/src/**` code at this phase).
-- Run E2E binary smoke: `scripts/brad-gardener --quality-grades-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml` and `scripts/brad-gardener --backlog-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml`.
-- Run E2E binary smoke: `scripts/brad-gardener --working-dir tools/gardener/tests/fixtures/repos/scoped-app/packages/functions/src --quality-grades-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml` and `scripts/brad-gardener --working-dir tools/gardener/tests/fixtures/repos/scoped-app/packages/functions/src --backlog-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml`.
+- Run E2E binary smoke: `cargo run -p gardener --bin gardener -- --quality-grades-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml` and `cargo run -p gardener --bin gardener -- --backlog-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml`.
+- Run E2E binary smoke: `cargo run -p gardener --bin gardener -- --working-dir tools/gardener/tests/fixtures/repos/scoped-app/packages/functions/src --quality-grades-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml` and `cargo run -p gardener --bin gardener -- --working-dir tools/gardener/tests/fixtures/repos/scoped-app/packages/functions/src --backlog-only --config tools/gardener/tests/fixtures/configs/phase03-startup-seeding.toml`.
 
 ### Autonomous Completion Rule
 - Continue directly to the next phase only after all success criteria and this phase validation gate pass.

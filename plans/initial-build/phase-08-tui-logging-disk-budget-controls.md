@@ -45,8 +45,8 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 - Run: `cargo test -p gardener --all-targets`
 - Run: `cargo llvm-cov -p gardener --all-targets --summary-only` (must report 100.00% lines for current `tools/gardener/src/**` code at this phase).
 - Run E2E binary smoke:
-  - non-TTY: `scripts/brad-gardener --target 1 --config tools/gardener/tests/fixtures/configs/phase08-ui.toml > /tmp/gardener-phase8.log`
-  - TTY/manual smoke (supplemental): launch `scripts/brad-gardener --target 1 --config tools/gardener/tests/fixtures/configs/phase08-ui.toml` and verify graceful quit (`q` / `Ctrl-C`) and terminal restoration.
+  - non-TTY: `cargo run -p gardener --bin gardener -- --target 1 --config tools/gardener/tests/fixtures/configs/phase08-ui.toml > /tmp/gardener-phase8.log`
+  - TTY/manual smoke (supplemental): launch `cargo run -p gardener --bin gardener -- --target 1 --config tools/gardener/tests/fixtures/configs/phase08-ui.toml` and verify graceful quit (`q` / `Ctrl-C`) and terminal restoration.
 
 ### Autonomous Completion Rule
 - Continue directly to the next phase only after all success criteria and this phase validation gate pass.

@@ -356,7 +356,7 @@ fn looks_like_command_target(token: &str) -> bool {
 #[test]
 fn parses_markdown_links_from_agent_docs() {
     let parsed = extract_markdown_links(
-        "Use [AGENTS](../AGENTS.md) then run [`scripts/brad-gardener --help`](./scripts/brad-gardener).",
+        "Use [AGENTS](../AGENTS.md) then run `cargo run -p gardener --bin gardener -- --help`.",
     );
     let normalized = parsed
         .into_iter()
@@ -364,7 +364,7 @@ fn parses_markdown_links_from_agent_docs() {
         .collect::<HashSet<_>>();
 
     assert!(normalized.contains("../AGENTS.md"));
-    assert!(normalized.contains("./scripts/brad-gardener"));
+    assert_eq!(normalized.len(), 1);
 }
 
 #[test]

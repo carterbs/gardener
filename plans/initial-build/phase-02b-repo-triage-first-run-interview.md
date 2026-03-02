@@ -45,7 +45,7 @@ No repo intelligence profile was found at .gardener/repo-intelligence.toml.
 Triage gathers context that Gardener cannot determine automatically.
 
 To complete setup, run in a terminal:
-  brad-gardener --triage-only
+  cargo run -p gardener --bin gardener -- --triage-only
 
 Then re-run your agent or pipeline.
 ```
@@ -523,18 +523,18 @@ Phase 03 reads the profile before quality grade generation:
 - Run: `cargo llvm-cov -p gardener --all-targets --summary-only` (100.00% lines for `tools/gardener/src/**`)
 - E2E smoke (interactive, FakeTerminal, test_mode=true):
   ```
-  scripts/brad-gardener --triage-only \
+  cargo run -p gardener --bin gardener -- --triage-only \
     --config tools/gardener/tests/fixtures/configs/phase02b-triage.toml \
     --working-dir tools/gardener/tests/fixtures/repos/triage-fully-equipped
   ```
   Assert: profile written, `detected_agent.primary` correct, `readiness_score` derived, `discovery_used = true`.
 - Non-interactive hard-stop smoke (CLAUDECODE, profile missing):
   ```
-  CLAUDECODE="" scripts/brad-gardener \
+  CLAUDECODE="" cargo run -p gardener --bin gardener -- \
     --config tools/gardener/tests/fixtures/configs/phase02b-triage.toml \
     --working-dir tools/gardener/tests/fixtures/repos/triage-minimal
   ```
-  Assert: exits non-zero, stderr contains `brad-gardener --triage-only`, no profile written.
+  Assert: exits non-zero, stderr contains `cargo run -p gardener --bin gardener -- --triage-only`, no profile written.
 - Non-interactive hard-stop smoke (CODEX_THREAD_ID, profile missing): same assertion with `CODEX_THREAD_ID=test-id`.
 - Non-interactive proceed smoke (profile pre-exists):
   pre-seed profile fixture → run with `CLAUDECODE=""` → assert exits zero, triage not entered.

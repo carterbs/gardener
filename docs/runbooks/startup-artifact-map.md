@@ -26,13 +26,13 @@ Use this runbook when startup indicates:
 - Gather startup-only artifacts:
 
 ```bash
-scripts/brad-gardener --quality-grades-only --config <path/to/gardener.toml>
+cargo run -p gardener --bin gardener -- --quality-grades-only --config <path/to/gardener.toml>
 ```
 
 - Re-run full startup flow for startup-seeding diagnostics:
 
 ```bash
-scripts/brad-gardener --backlog-only --config <path/to/gardener.toml>
+cargo run -p gardener --bin gardener -- --backlog-only --config <path/to/gardener.toml>
 ```
 
 - Emit startup diagnostic bundle on failure (automatic in runtime):

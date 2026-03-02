@@ -47,12 +47,12 @@ Replace `scripts/ralph` with a Rust orchestrator under `tools/gardener` that is 
 - Required worker request-order dispatch on explicit priorities is not implemented today (`scripts/ralph/orchestrator-requirements.md:10`).
 
 ## Desired End State
-- A Rust binary orchestrator (`brad-gardener`) under `tools/gardener` fully replaces TypeScript `scripts/ralph` runtime.
+- A Rust binary orchestrator (`cargo run -p gardener --bin gardener --`) under `tools/gardener` fully replaces TypeScript `scripts/ralph` runtime.
 - Central backlog uses durable, concurrent-safe storage with explicit `P0/P1/P2` priorities and lease-based assignment.
 - Worker lifecycle is a typed state machine with durable transitions: `UNDERSTAND`, conditional `PLANNING`, `DOING`, `GITTING`, `REVIEWING`, `MERGING`, `COMPLETE`.
 - Worker dispatch is highest-priority first, FIFO by `last_updated` within each priority, and in the order workers request work.
 - Startup behavior:
-  - On first run (no repo intelligence profile at `triage.output_path`): hard stop with actionable error directing the user to run `brad-gardener --triage-only` in a terminal. Triage requires a human; there is no automated fallback.
+  - On first run (no repo intelligence profile at `triage.output_path`): hard stop with actionable error directing the user to run `cargo run -p gardener --bin gardener -- --triage-only` in a terminal. Triage requires a human; there is no automated fallback.
   - Check configured quality-grade output document (`quality_report.path`, default `docs/quality-grades.md`).
   - If missing: attempt bootstrap generation using repo intelligence profile as input context; if bootstrap cannot complete, enqueue/execute a `P0` infra-repair task.
   - Else use existing backlog.
@@ -383,7 +383,7 @@ Codex uses a different config layout than Claude. Gardener's agent detection and
 - `codex_readiness` flags are computed deterministically from `discovery.*` + `user_validated.*`; no LLM involvement.
 - Quality grade generation (Phase 03) reads this profile: `user_validated.validation_command` overrides startup config; `[codex_readiness]` scores populate the `## Agent Readiness` section of the unified quality document; `primary_gap` is included in the seeding agent prompt.
 - Schema version mismatch returns typed `TriageError::SchemaMismatch` without panic; startup emits actionable error with upgrade instructions.
-- Non-interactive hard stop: if non-interactive environment is detected (`CLAUDECODE` env var, `CODEX_THREAD_ID` env var, `CI` env var, or non-TTY stdin), triage refuses to run and emits: "Triage requires a human and cannot run non-interactively. Run `brad-gardener --triage-only` in a terminal."
+- Non-interactive hard stop: if non-interactive environment is detected (`CLAUDECODE` env var, `CODEX_THREAD_ID` env var, `CI` env var, or non-TTY stdin), triage refuses to run and emits: "Triage requires a human and cannot run non-interactively. Run `cargo run -p gardener --bin gardener -- --triage-only` in a terminal."
 
 ## Quality Scoring Rubric (V1, Deterministic)
 Two distinct scoring formulas apply; both are deterministic and produce reproducible output.

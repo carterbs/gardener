@@ -2,7 +2,7 @@
 
 Gardener orchestration is Rust-first.
 
-- Runtime entrypoint: `scripts/brad-gardener`
+- Runtime entrypoint: `cargo run -p gardener --bin gardener --`
 - Run workers: `npm run gardener:run -- --quit-after 1 --config <path>`
 - Reconciliation only: `npm run gardener:sync`
 

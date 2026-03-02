@@ -11,7 +11,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 - Add workspace wiring:
   - root `Cargo.toml` adds `tools/gardener` member.
 - Add compatibility wrapper script:
-  - `scripts/brad-gardener` (thin delegate only).
+  - `cargo run -p gardener --bin gardener --` (thin delegate only).
 - Wire package script:
   - `package.json` (`gardener:run` -> wrapper/binary).
 - Define CLI contract for:
@@ -59,7 +59,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
   - create all phase config fixture files listed in `99-testing-rollout-references.md` (may start as minimal valid stubs, expanded by each phase).
 
 ### Success Criteria
-- `brad-gardener --help` exposes required CLI options including `--agent`; `--headless` does not exist.
+- `cargo run -p gardener --bin gardener -- --help` exposes required CLI options including `--agent`; `--headless` does not exist.
 - Non-interactive detection is test-covered for all four signals (`CLAUDECODE`, `CODEX_THREAD_ID`, `CI`, stdin non-TTY) using FakeTerminal and fake env injection.
 - Config parsing supports `agent.default` single-agent simplicity path: when set, all tasks without explicit `[states.*]` backend entries inherit the default and Gardener applies its recommended model for the task tier.
 - Config parsing supports per-state agent+model overrides that take precedence over `agent.default`.
@@ -79,8 +79,8 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 ### Phase Validation Gate (Mandatory)
 - Run: `cargo test -p gardener --all-targets`
 - Run: `cargo llvm-cov -p gardener --all-targets --summary-only` (must report 100.00% lines for current `tools/gardener/src/**` code at this phase).
-- Run E2E binary smoke: `scripts/brad-gardener --help` and `scripts/brad-gardener --prune-only --config tools/gardener/tests/fixtures/configs/phase01-minimal.toml`.
-- Run E2E binary smoke: `scripts/brad-gardener --working-dir tools/gardener/tests/fixtures/repos/scoped-app/packages/functions/src --prune-only --config tools/gardener/tests/fixtures/configs/phase01-minimal.toml`.
+- Run E2E binary smoke: `cargo run -p gardener --bin gardener -- --help` and `cargo run -p gardener --bin gardener -- --prune-only --config tools/gardener/tests/fixtures/configs/phase01-minimal.toml`.
+- Run E2E binary smoke: `cargo run -p gardener --bin gardener -- --working-dir tools/gardener/tests/fixtures/repos/scoped-app/packages/functions/src --prune-only --config tools/gardener/tests/fixtures/configs/phase01-minimal.toml`.
 
 ### Autonomous Completion Rule
 - Continue directly to the next phase only after all success criteria and this phase validation gate pass.

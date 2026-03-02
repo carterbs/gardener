@@ -18,7 +18,7 @@ This repository is organized into a small number of stable file families to keep
 ## Family 2: Execution Entry and Utilities
 
 - `scripts/`
-  - Runtime entrypoint (`brad-gardener`), validation hooks, and developer tooling.
+  - Runtime entrypoint (`cargo run -p gardener --bin gardener --`), validation hooks, and developer tooling.
 - `scripts/*`
   - Repository support scripts used by CI, checks, and local automation.
 

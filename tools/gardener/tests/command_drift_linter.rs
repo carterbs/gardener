@@ -6,7 +6,6 @@ use std::process::Command;
 enum CommandKind {
     Gardener,
     SeedBacklog,
-    Unknown,
 }
 
 #[derive(Debug)]
@@ -37,16 +36,6 @@ fn linter_agent_facing_commands_match_current_cli() {
 
     for reference in mentions {
         match reference.command_kind {
-            CommandKind::Unknown => {
-                let command = reference.command.clone();
-                drifts.push(CommandDrift {
-                    file: reference.file,
-                    line: reference.line,
-                    command: command.clone(),
-                    missing_flags: Vec::new(),
-                    unknown_command: Some(command),
-                });
-            }
             CommandKind::Gardener => {
                 let mut missing_flags = Vec::new();
                 for flag in &reference.flag {
@@ -225,23 +214,37 @@ fn parse_command_reference(
         return None;
     }
 
-    let mut command_parts = cleaned.split_whitespace();
-    let raw_command = command_parts.next()?;
-    let normalized_command = normalize_token(raw_command);
-    let command_kind = match normalized_command {
-        "scripts/brad-gardener" | "gardener" | "brad-gardener" => {
-            if normalized_command == "brad-gardener" {
-                CommandKind::Unknown
-            } else {
-                CommandKind::Gardener
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    let normalized_parts: Vec<&str> = parts.iter().map(|part| normalize_token(part)).collect();
+    if normalized_parts.is_empty() {
+        return None;
+    }
+
+    let raw_command = normalized_parts[0];
+    let (command_kind, flag_parts): (CommandKind, Vec<&str>) = match raw_command {
+        "gardener" => (CommandKind::Gardener, parts[1..].to_vec()),
+        "seed-backlog" => (CommandKind::SeedBacklog, parts[1..].to_vec()),
+        "cargo" => {
+            let sep = normalized_parts.iter().position(|part| *part == "--")?;
+            let run_tokens = &normalized_parts[..sep];
+            let command_tokens = &parts[sep + 1..];
+            let is_gardener_run = run_tokens.contains(&"run")
+                && run_tokens
+                    .windows(2)
+                    .any(|window| window == ["-p", "gardener"])
+                && run_tokens
+                    .windows(2)
+                    .any(|window| window == ["--bin", "gardener"]);
+            if !is_gardener_run {
+                return None;
             }
+            (CommandKind::Gardener, command_tokens.to_vec())
         }
-        "seed-backlog" => CommandKind::SeedBacklog,
         _ => return None,
     };
 
     let mut flags = Vec::new();
-    for part in command_parts {
+    for part in flag_parts {
         if !part.starts_with("--") {
             continue;
         }

@@ -30,6 +30,28 @@ fn startup_artifact_map_runbook_has_steering_focus() {
 }
 
 #[test]
+fn docs_readme_uses_stable_worktree_link_target() {
+    let readme_path = repo_root_path("../../docs/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("unable to read docs/README.md: {err}"));
+
+    assert!(
+        !readme.contains("../thoughts/shared/plans/"),
+        "docs/README.md must not link to ephemeral thoughts plans"
+    );
+
+    assert!(
+        readme.contains("[Triage and worktree workflow docs](./conventions/workflow.md)"),
+        "docs/README.md must link triage and worktree workflow docs to stable target"
+    );
+
+    assert!(
+        repo_root_path("../../docs/conventions/workflow.md").exists(),
+        "stable triage/worktree workflow docs target is missing"
+    );
+}
+
+#[test]
 fn docs_readme_links_runtime_failure_triage_cookbook() {
     let readme_path = repo_root_path("../../docs/README.md");
     let readme = std::fs::read_to_string(&readme_path)

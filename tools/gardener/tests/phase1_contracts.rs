@@ -106,6 +106,7 @@ fn cli_help_contract() {
         "--parallelism",
         "--task",
         "--quit-after",
+        "--worker-mode",
         "--prune-only",
         "--backlog-only",
         "--quality-grades-only",
@@ -216,6 +217,15 @@ fn run_with_runtime_paths_and_errors() {
 
     let invalid = vec!["gardener".into(), "--agent".into(), "invalid".into()];
     let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime)
+        .expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Cli(_)));
+
+    let invalid_mode = vec![
+        "gardener".into(),
+        "--worker-mode".into(),
+        "unsupported".into(),
+    ];
+    let err = gardener::run_with_runtime(&invalid_mode, &[], Path::new("/cwd"), &runtime)
         .expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(_)));
 
@@ -346,6 +356,20 @@ default = "claude"
     assert_eq!(cfg.orchestrator.parallelism, 9);
     assert_eq!(cfg.validation.command, "npm run validate:cli");
     assert_eq!(cfg.agent.default, Some(AgentKind::Codex));
+
+    let worker_mode_override = CliOverrides {
+        config_path: Some(PathBuf::from("/cfg.toml")),
+        worker_mode: Some("stub_complete".to_string()),
+        ..CliOverrides::default()
+    };
+    let (cfg, _scope) = load_config(
+        &worker_mode_override,
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("test fixture should not fail");
+    assert_eq!(cfg.execution.worker_mode, "stub_complete");
 
     let mut cfg2 = AppConfig::default();
     cfg2.agent.default = Some(AgentKind::Claude);
@@ -512,6 +536,23 @@ test_mode = true
     assert!(
         matches!(err, GardenerError::InvalidConfig(message) if message.contains("states.doing.model"))
     );
+
+    let bad_worker_mode =
+        FakeFileSystem::with_file("/bad5.toml", "[execution]\nworker_mode = \"unsupported\"\n");
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad5.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_worker_mode,
+        &FakeProcessRunner::default(),
+    )
+    .expect_err("test fixture should not fail");
+    assert!(matches!(
+        err,
+        GardenerError::InvalidConfig(message) if message.contains("execution.worker_mode")
+    ));
 
     let mut cfg2 = AppConfig::default();
     cfg2.agent.default = Some(AgentKind::Claude);

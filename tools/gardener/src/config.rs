@@ -16,6 +16,7 @@ pub struct CliOverrides {
     pub parallelism: Option<u32>,
     pub task: Option<String>,
     pub target: Option<u32>,
+    pub worker_mode: Option<String>,
     pub prune_only: bool,
     pub backlog_only: bool,
     pub quality_grades_only: bool,
@@ -294,6 +295,7 @@ pub fn load_config(
             "process_cwd": process_cwd.display().to_string(),
             "config_path_override": overrides.config_path.as_ref().map(|p| p.display().to_string()),
             "parallelism_override": overrides.parallelism,
+            "worker_mode_override": overrides.worker_mode,
             "agent_override": overrides.agent.map(|a| format!("{:?}", a))
         }),
     );
@@ -519,6 +521,9 @@ fn apply_cli_overrides(cfg: &mut AppConfig, overrides: &CliOverrides) {
     if let Some(parallelism) = overrides.parallelism {
         cfg.orchestrator.parallelism = parallelism;
     }
+    if let Some(worker_mode) = &overrides.worker_mode {
+        cfg.execution.worker_mode = worker_mode.clone();
+    }
     if let Some(agent) = overrides.agent {
         cfg.agent.default = Some(agent);
     }
@@ -711,6 +716,15 @@ fn validate_config(cfg: &AppConfig) -> Result<(), GardenerError> {
     if model_is_invalid(&cfg.seeding.model) {
         return Err(GardenerError::InvalidConfig(
             "seeding.model must be a real model id".to_string(),
+        ));
+    }
+
+    if !matches!(
+        cfg.execution.worker_mode.as_str(),
+        "normal" | "stub_complete"
+    ) {
+        return Err(GardenerError::InvalidConfig(
+            "execution.worker_mode must be 'normal' or 'stub_complete'".to_string(),
         ));
     }
 

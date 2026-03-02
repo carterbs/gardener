@@ -1632,19 +1632,13 @@ fn worker_merge_main_and_push(
 
 fn run_repo_validation_with_quality_guard(
     repo_root_git: &GitClient<'_>,
-    runtime_file_system: &dyn FileSystem,
-    runtime_clock: &dyn Clock,
+    _runtime_file_system: &dyn FileSystem,
+    _runtime_clock: &dyn Clock,
     cfg: &AppConfig,
-    scope: &RuntimeScope,
+    _scope: &RuntimeScope,
 ) -> Result<(), GardenerError> {
     repo_root_git.pull_main().ok();
-    repo_root_git.run_validation_command_with_quality_guard(
-        &cfg.validation.command,
-        runtime_file_system,
-        runtime_clock,
-        cfg,
-        scope,
-    )
+    repo_root_git.run_validation_command(&cfg.validation.command)
 }
 
 fn log_event_from(output: &AgentTurnOutput, state: WorkerState) -> WorkerLogEvent {
@@ -1990,7 +1984,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_merge_phase_blocks_merge_when_pre_merge_validation_fails() {
+    fn execute_merge_phase_blocks_merge_when_validation_command_fails() {
         let runner = FakeProcessRunner::default();
         let dir = tempfile::tempdir().expect("tempdir");
         let scope = RuntimeScope {
@@ -2000,13 +1994,6 @@ mod tests {
         };
         let mut cfg = AppConfig::default();
         cfg.validation.command = "npm run validate".to_string();
-        cfg.quality_report.path = "quality.md".to_string();
-        cfg.quality_report.stale_after_days = 0;
-        cfg.quality_report.stale_if_head_commit_differs = false;
-
-        std::fs::write(scope.working_dir.join("quality.md"), "# Quality Grades\n")
-            .expect("seed quality report");
-        std::fs::write(scope.working_dir.join("quality.md.stamp"), "0").expect("seed stale stamp");
 
         // gh pr view <pr> --json mergeable,mergeStateStatus
         runner.push_response(Ok(ProcessOutput {
@@ -2018,6 +2005,18 @@ mod tests {
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"{"mergedAt":null,"mergeCommit":null,"headRefName":"gardener/manual-test","state":"OPEN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
             stderr: String::new(),
         }));
         // git config --bool --get core.bare
@@ -2032,17 +2031,11 @@ mod tests {
             stdout: "false\n".to_string(),
             stderr: String::new(),
         }));
-        // git fetch origin main
+        // sh -lc npm run validate
         runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
+            exit_code: 1,
             stdout: String::new(),
-            stderr: String::new(),
-        }));
-        // git merge --ff-only origin/main
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
+            stderr: "failed validation".to_string(),
         }));
 
         let req = super::MergeRequest {

@@ -384,7 +384,7 @@ stale_if_head_commit_differs = false
 }
 
 #[test]
-fn run_with_runtime_validate_guarded_by_fresh_quality_report_stamp() {
+fn run_with_runtime_validate_ignores_quality_report_freshness() {
     let fs = FakeFileSystem::with_file(
         "/config.toml",
         r#"
@@ -405,6 +405,11 @@ stale_if_head_commit_differs = false
         stdout: "/repo\n".to_string(),
         stderr: String::new(),
     }));
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
 
     let runtime = ProductionRuntime {
         clock: Arc::new(FakeClock::default()),
@@ -419,17 +424,19 @@ stale_if_head_commit_differs = false
         "/config.toml".into(),
     ];
     let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime)
-        .expect_err("validation should be blocked");
-    assert!(matches!(
-        validate_result,
-        GardenerError::Cli(message) if message.contains("quality-grade report is stale")
-    ));
+        .expect("validation should run");
+    assert_eq!(validate_result, 0);
     let spawned = process.spawned();
-    assert_eq!(spawned.len(), 1);
+    assert_eq!(spawned.len(), 2);
     assert_eq!(spawned[0].program, "git");
     assert_eq!(
         spawned[0].args,
         vec!["rev-parse".to_string(), "--show-toplevel".to_string()]
+    );
+    assert_eq!(spawned[1].program, "sh");
+    assert_eq!(
+        spawned[1].args,
+        vec!["-lc".to_string(), "npm run validate".to_string()]
     );
 }
 

@@ -42,6 +42,10 @@ path = "src/bin/merge_pr.rs"
 name = "friction-analysis"
 path = "src/bin/friction_analysis.rs"
 
+[[bin]]
+name = "seed-backlog"
+path = "src/bin/seed_backlog.rs"
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

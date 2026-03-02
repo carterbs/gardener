@@ -58,3 +58,10 @@ fn invalid_config_path_exits_nonzero() {
         .arg(fixture("configs/missing.toml"));
     cmd.assert().failure();
 }
+
+#[test]
+fn seed_backlog_invalid_config_path_exits_nonzero() {
+    let mut cmd = cargo_bin_cmd!("seed-backlog");
+    cmd.arg("--config").arg(fixture("configs/missing.toml"));
+    cmd.assert().failure();
+}

@@ -113,6 +113,8 @@ pub struct Cli {
     pub sync_only: bool,
     #[arg(long, default_value_t = false)]
     pub force_seed_backlog: bool,
+    #[arg(long, default_value_t = false)]
+    pub seed_dry_run: bool,
     /// Write a JSONL session recording to this path (also via GARDENER_RECORD_SESSION env var).
     #[arg(long = "record-session")]
     pub record_session: Option<std::path::PathBuf>,
@@ -198,7 +200,8 @@ pub fn run_with_runtime(
                 "target": cli.target,
                 "triage_only": cli.triage_only,
                 "sync_only": cli.sync_only,
-                "force_seed_backlog": cli.force_seed_backlog
+                "force_seed_backlog": cli.force_seed_backlog,
+                "seed_dry_run": cli.seed_dry_run
             }),
         );
 
@@ -341,6 +344,7 @@ pub fn run_with_runtime(
                 &startup.scope,
                 true,
                 cli.force_seed_backlog,
+                cli.seed_dry_run,
             )?;
             return Ok(0);
         }
@@ -348,8 +352,14 @@ pub fn run_with_runtime(
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
             let mut cfg_for_startup = cfg;
-            let _ =
-                run_startup_audits(runtime, &mut cfg_for_startup, &startup.scope, false, false)?;
+            let _ = run_startup_audits(
+                runtime,
+                &mut cfg_for_startup,
+                &startup.scope,
+                false,
+                false,
+                false,
+            )?;
             return Ok(0);
         }
 
@@ -360,6 +370,7 @@ pub fn run_with_runtime(
                     runtime,
                     &mut cfg_for_startup,
                     &startup.scope,
+                    false,
                     false,
                     false,
                 )?;
@@ -471,6 +482,7 @@ pub fn run_with_runtime(
                     &startup.scope,
                     true,
                     cli.force_seed_backlog,
+                    cli.seed_dry_run,
                     |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
                 )?;
             }

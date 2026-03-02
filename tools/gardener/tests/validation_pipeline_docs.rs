@@ -22,20 +22,12 @@ fn validation_pipeline_docs_match_live_validation_hook() {
         .unwrap_or_else(|err| panic!("failed to read .githooks/pre-commit: {err}"));
 
     assert!(
-        readme.contains("scripts/check-binary-blobs.sh"),
-        "README validation pipeline should list the binary-blob linter"
-    );
-    assert!(
-        readme.contains("scripts/run-script-lint-fixture-tests.sh"),
-        "README validation pipeline should list fixture-script lint command"
+        readme.contains("docs/conventions/workflow.md#validation-and-pre-commit-flow"),
+        "README should reference the canonical validation workflow section"
     );
     assert!(
         workflow.contains("scripts/run-script-lint-fixture-tests.sh"),
         "workflow doc should include fixture-script lint command"
-    );
-    assert!(
-        readme.contains("./.githooks/pre-commit"),
-        "README should document how to run pre-commit remediation directly"
     );
     assert!(
         workflow.contains("Validation and pre-commit flow"),
@@ -44,6 +36,10 @@ fn validation_pipeline_docs_match_live_validation_hook() {
     assert!(
         workflow.contains(".githooks/pre-commit"),
         "workflow doc should reference the repository pre-commit hook path"
+    );
+    assert!(
+        workflow.contains("Re-stage updates (`git add`), then retry commit."),
+        "workflow should include remediation re-staging guidance"
     );
     assert!(
         pre_commit.contains("rustfmt --edition 2021"),

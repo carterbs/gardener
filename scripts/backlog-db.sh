@@ -142,6 +142,33 @@ case "$cmd" in
       exit 1
     fi
 
+    case "$priority" in
+      P0|P1|P2)
+        ;;
+      *)
+        echo "invalid --priority: $priority (expected one of: P0|P1|P2)" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$status" in
+      ready|leased|in_progress|merge_pending|complete|failed|unresolved)
+        ;;
+      *)
+        echo "invalid --status: $status (expected one of: ready|leased|in_progress|merge_pending|complete|failed|unresolved)" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$kind" in
+      feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision)
+        ;;
+      *)
+        echo "invalid --kind: $kind (expected one of: feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision)" >&2
+        exit 1
+        ;;
+    esac
+
     now=$(date +%s000)
     if [[ -z "$task_id" ]]; then
       task_id="manual:${scope_key}:auto-${now}"

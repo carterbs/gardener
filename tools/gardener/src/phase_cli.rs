@@ -215,15 +215,15 @@ fn set_core_bare_false(
         args: vec![
             "-eu".to_string(),
             "-c".to_string(),
-            r#"current="$(git -C "$1" config --bool --get core.bare 2>/dev/null || true)"; \
+            r#"current="$(git -C "$0" config --bool --get core.bare 2>/dev/null || true)"; \
 if [ "$current" = "false" ]; then \
   exit 0; \
 fi; \
-if git -C "$1" config --worktree core.bare false; then \
+if git -C "$0" config --worktree core.bare false; then \
   exit 0; \
 fi; \
 for attempt in 1 2 3 4 5; do \
-  if git -C "$1" config --local core.bare false; then \
+  if git -C "$0" config --local core.bare false; then \
     exit 0; \
   fi; \
   sleep 0.1; \

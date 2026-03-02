@@ -59,3 +59,50 @@ fn docs_readme_links_runtime_failure_triage_cookbook() {
         "runtime failure cookbook should include the one-command run audit"
     );
 }
+
+#[test]
+fn docs_readme_links_agent_bootstrap_runbook() {
+    let readme_path = repo_root_path("../../docs/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("unable to read docs/README.md: {err}"));
+
+    let link = "[Agent bootstrap runbook (first run)](./runbooks/agent-bootstrap.md)";
+    assert!(
+        readme.contains(link),
+        "docs/README.md must link to the agent bootstrap runbook"
+    );
+
+    let runbook_path = repo_root_path("../../docs/runbooks/agent-bootstrap.md");
+    assert!(
+        runbook_path.exists(),
+        "agent bootstrap runbook link points to a missing file"
+    );
+}
+
+#[test]
+fn agent_bootstrap_runbook_has_required_sections() {
+    let runbook_path = repo_root_path("../../docs/runbooks/agent-bootstrap.md");
+    let runbook = std::fs::read_to_string(&runbook_path)
+        .unwrap_or_else(|err| panic!("unable to read agent bootstrap runbook: {err}"));
+
+    assert!(
+        runbook.contains("# Agent Bootstrap Runbook for First-Run Worktree Setup"),
+        "agent bootstrap runbook should include the expected heading"
+    );
+    assert!(
+        runbook.contains("## Prerequisites"),
+        "agent bootstrap runbook should list prerequisites"
+    );
+    assert!(
+        runbook.contains("## Bootstrap sequence"),
+        "agent bootstrap runbook should list bootstrap sequence steps"
+    );
+    assert!(
+        runbook.contains("## Recovery and escalation"),
+        "agent bootstrap runbook should include recovery guidance"
+    );
+    assert!(
+        runbook.contains("## Completion criteria"),
+        "agent bootstrap runbook should include completion criteria"
+    );
+}

@@ -750,6 +750,18 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
+        // git.run_validation_command now verifies non-bare state before running
+        // the validation command.
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
 
         let gh = GhClient::new(&runner, "/repo");
         let git = GitClient::new(&runner, "/repo");

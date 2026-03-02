@@ -1,8 +1,0 @@
-# Test manifest with comments and inline justifications.
-
-tools/gardener/src/bin/do_task\.rs    # temporary helper
-
-# A second ignored file used in this test.
-tools/gardener/src/worker_pool\.rs
-
-tools/gardener/src/startup\.rs

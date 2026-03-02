@@ -24,6 +24,11 @@ This directory is the canonical index for agent-oriented repository navigation. 
 ## Fourth: agent runbooks
 
 - [Backlog operations runbook](./runbooks/backlog-operations.md)
+- [Startup artifact map runbook](./runbooks/startup-artifact-map.md)
+
+## Fifth: repository map
+
+- [Repository map](./repository-map.md)
 
 ## Before editing
 

@@ -1,6 +1,9 @@
+use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::runtime::{ProcessRequest, ProcessRunner};
+use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner};
+use crate::startup::ensure_quality_report_fresh_for_validation_with_context;
+use crate::types::RuntimeScope;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -571,6 +574,7 @@ impl<'a> GitClient<'a> {
             "git.pull_main.started",
             json!({ "cwd": self.cwd.display().to_string() }),
         );
+        self.ensure_non_bare_worktree()?;
         let fetch = self.run(["git", "fetch", "origin", "main"])?;
         if fetch.exit_code != 0 {
             append_run_log(
@@ -618,6 +622,7 @@ impl<'a> GitClient<'a> {
                 "command": command
             }),
         );
+        self.ensure_non_bare_worktree()?;
         let out = self.run(["sh", "-lc", command])?;
         if out.exit_code != 0 {
             append_run_log(
@@ -643,6 +648,78 @@ impl<'a> GitClient<'a> {
             }),
         );
         Ok(())
+    }
+
+    fn ensure_non_bare_worktree(&self) -> Result<(), GardenerError> {
+        let bare_config = self.run(["git", "config", "--bool", "--get", "core.bare"])?;
+        let bare_value = bare_config.stdout.trim().to_ascii_lowercase();
+        if bare_config.exit_code == 0 && bare_value == "true" {
+            append_run_log(
+                "warn",
+                "git.config.core_bare_true_detected",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                }),
+            );
+            let set_out = self.run(["git", "config", "--local", "core.bare", "false"])?;
+            if set_out.exit_code != 0 {
+                append_run_log(
+                    "error",
+                    "git.config.core_bare_correction_failed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "exit_code": set_out.exit_code,
+                        "stderr": set_out.stderr
+                    }),
+                );
+                return Err(GardenerError::Process(format!(
+                    "failed to enforce core.bare=false: {}",
+                    set_out.stderr
+                )));
+            }
+            append_run_log(
+                "info",
+                "git.config.core_bare_corrected",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                }),
+            );
+        }
+
+        let bare_check = self.run(["git", "rev-parse", "--is-bare-repository"])?;
+        let still_bare = bare_check.exit_code == 0 && bare_check.stdout.trim() == "true";
+        if still_bare {
+            append_run_log(
+                "error",
+                "git.config.core_bare_enforcement_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": bare_check.stderr
+                }),
+            );
+            return Err(GardenerError::Process(
+                "repository is bare after core.bare enforcement".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn run_validation_command_with_quality_guard(
+        &self,
+        command: &str,
+        file_system: &dyn FileSystem,
+        clock: &dyn Clock,
+        cfg: &AppConfig,
+        scope: &RuntimeScope,
+    ) -> Result<(), GardenerError> {
+        ensure_quality_report_fresh_for_validation_with_context(
+            file_system,
+            self.runner,
+            clock,
+            cfg,
+            scope,
+        )?;
+        self.run_validation_command(command)
     }
 
     fn run<I, S>(&self, args: I) -> Result<crate::runtime::ProcessOutput, GardenerError>
@@ -694,7 +771,11 @@ fn is_non_fast_forward_push(stderr: &str) -> bool {
 mod tests {
     use super::GitClient;
     use super::RebaseResult;
-    use crate::runtime::{FakeProcessRunner, ProcessOutput};
+    use crate::config::AppConfig;
+    use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
+    use crate::types::RuntimeScope;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::tempdir;
 
     #[test]
     fn push_force_with_lease_recovery_path() {
@@ -1062,6 +1143,16 @@ mod tests {
     fn run_validation_command_reports_failure() {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
             exit_code: 1,
             stdout: String::new(),
             stderr: "failed validation".to_string(),
@@ -1072,6 +1163,200 @@ mod tests {
         assert!(err
             .to_string()
             .contains("post-merge validation command failed"));
+    }
+
+    #[test]
+    fn run_validation_command_with_quality_guard_blocks_stale_reports() {
+        let _tmp_dir = tempdir().expect("tmpdir");
+        let repo_root = _tmp_dir.path().to_path_buf();
+        let mut cfg = AppConfig::default();
+        cfg.quality_report.path = "quality.md".to_string();
+        cfg.quality_report.stale_after_days = 0;
+        cfg.quality_report.stale_if_head_commit_differs = false;
+        std::fs::write(
+            repo_root.join(&cfg.quality_report.path),
+            "# Quality Grades\n",
+        )
+        .expect("seed quality doc");
+        let scope = RuntimeScope {
+            process_cwd: repo_root.clone(),
+            repo_root: Some(repo_root.clone()),
+            working_dir: repo_root.clone(),
+        };
+
+        let runner = FakeProcessRunner::default();
+        let clock = ProductionClock;
+        let fs = ProductionFileSystem;
+        let err = GitClient::new(&runner, repo_root.as_path())
+            .run_validation_command_with_quality_guard(
+                "npm run validate",
+                &fs,
+                &clock,
+                &cfg,
+                &scope,
+            )
+            .expect_err("guard should block stale reports");
+        assert!(matches!(
+            err,
+            crate::errors::GardenerError::Cli(message) if message.contains("quality-grade report is stale")
+        ));
+        assert_eq!(runner.spawned().len(), 0);
+    }
+
+    #[test]
+    fn run_validation_command_with_quality_guard_allows_fresh_reports() {
+        let _tmp_dir = tempdir().expect("tmpdir");
+        let repo_root = _tmp_dir.path().to_path_buf();
+        let mut cfg = AppConfig::default();
+        cfg.quality_report.path = "quality.md".to_string();
+        cfg.quality_report.stale_after_days = 1;
+        cfg.quality_report.stale_if_head_commit_differs = false;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("now")
+            .as_secs()
+            .to_string();
+        std::fs::write(
+            repo_root.join(&cfg.quality_report.path),
+            "# Quality Grades\n",
+        )
+        .expect("seed quality doc");
+        std::fs::write(repo_root.join("quality.md.stamp"), now).expect("seed stamp");
+
+        let scope = RuntimeScope {
+            process_cwd: repo_root.clone(),
+            repo_root: Some(repo_root.clone()),
+            working_dir: repo_root.clone(),
+        };
+        let runner = FakeProcessRunner::default();
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // sh -lc npm run validate
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let clock = ProductionClock;
+        let fs = ProductionFileSystem;
+        GitClient::new(&runner, repo_root.as_path())
+            .run_validation_command_with_quality_guard(
+                "npm run validate",
+                &fs,
+                &clock,
+                &cfg,
+                &scope,
+            )
+            .expect("validation should run");
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 3);
+        assert_eq!(spawned[0].program, "git");
+        assert_eq!(
+            spawned[0].args,
+            vec![
+                "config".to_string(),
+                "--bool".to_string(),
+                "--get".to_string(),
+                "core.bare".to_string()
+            ]
+        );
+        assert_eq!(spawned[1].program, "git");
+        assert_eq!(
+            spawned[1].args,
+            vec!["rev-parse".to_string(), "--is-bare-repository".to_string()]
+        );
+        assert_eq!(spawned[2].program, "sh");
+        assert_eq!(
+            spawned[2].args,
+            vec!["-lc".to_string(), "npm run validate".to_string()]
+        );
+    }
+
+    #[test]
+    fn pull_main_corrects_core_bare_true_before_merge() {
+        let runner = FakeProcessRunner::default();
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "true\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git config --local core.bare false
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        GitClient::new(&runner, "/repo")
+            .pull_main()
+            .expect("pull_main should recover");
+
+        let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec!["config", "--bool", "--get", "core.bare"]
+        );
+        assert_eq!(
+            spawned[1].args,
+            vec!["config", "--local", "core.bare", "false"]
+        );
+        assert_eq!(spawned[2].args, vec!["rev-parse", "--is-bare-repository"]);
+        assert_eq!(spawned[3].args, vec!["fetch", "origin", "main"]);
+        assert_eq!(spawned[4].args, vec!["merge", "--ff-only", "origin/main"]);
+    }
+
+    #[test]
+    fn run_validation_command_fails_when_core_bare_correction_fails() {
+        let runner = FakeProcessRunner::default();
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "true\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git config --local core.bare false
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "permission denied".to_string(),
+        }));
+
+        let err = GitClient::new(&runner, "/repo")
+            .run_validation_command("npm run validate")
+            .expect_err("correction should fail");
+
+        assert!(err
+            .to_string()
+            .contains("failed to enforce core.bare=false"));
     }
 
     #[test]

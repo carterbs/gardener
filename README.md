@@ -70,9 +70,6 @@ COVERAGE_MIN_LINE=95 ./scripts/test-gardener-coverage.sh
 # Override ignored source files (optional):
 COVERAGE_IGNORE_REGEX="/tools/gardener/src/(agent/mod\.rs|agent/factory\.rs)" \
   ./scripts/test-gardener-coverage.sh
-
-# Override the ignore manifest (optional, reviewed list format):
-COVERAGE_IGNORE_MANIFEST=./scripts/coverage-ignore-manifest.txt ./scripts/test-gardener-coverage.sh
 ```
 
 ### Validation pipeline
@@ -89,6 +86,7 @@ Pre-commit uses the same validation pipeline as manual checks:
 `run-validate.sh` runs these scripts in order; it stops on the first failure, so fix each failure before re-running.
 
 `gardener.toml` points both startup/runtime validation at `./scripts/run-validate.sh`.
+
 
 ## Git Hooks
 
@@ -137,6 +135,7 @@ When commit is blocked by hooks:
    - Coverage gate failure:
      - Re-run `./scripts/test-gardener-coverage.sh`, inspect the reported `TOTAL` and failing areas, then tighten/fix uncovered paths in `tools/gardener/src`.
 4. Re-stage any files changed by the remediation command (`git add`) and commit again.
+
 
 ## Vision
 

@@ -9,7 +9,7 @@ pub fn export_markdown_snapshot(
     store: &BacklogStore,
     output: impl AsRef<Path>,
 ) -> Result<String, GardenerError> {
-    let tasks = store.list_tasks()?;
+    let tasks = store.list_backlog_tasks()?;
     append_run_log(
         "debug",
         "backlog_snapshot.export.started",
@@ -79,6 +79,62 @@ mod tests {
         let rendered = render_markdown(&store.list_tasks().expect("tasks"));
         assert!(rendered.contains("# Gardener Backlog Snapshot"));
         assert!(rendered.contains("| P1 | ready | First task |"));
+    }
+
+    #[test]
+    fn snapshot_hides_merge_queue_tasks() {
+        let dir = tempdir().expect("dir");
+        let db = dir.path().join("snapshot.sqlite");
+        let out = dir.path().join("backlog.md");
+        let store = BacklogStore::open(&db).expect("store");
+
+        let merge_task = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Feature,
+                title: "Merge queue task".to_string(),
+                details: String::new(),
+                rationale: String::new(),
+                scope_key: "global".to_string(),
+                priority: Priority::P0,
+                source: "test".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })
+            .expect("insert merge task");
+
+        let _ = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Feature,
+                title: "Visible backlog task".to_string(),
+                details: String::new(),
+                rationale: String::new(),
+                scope_key: "global".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })
+            .expect("insert backlog task");
+
+        let claimed = store
+            .claim_next("worker", 60)
+            .expect("claim")
+            .expect("claimed task");
+        assert_eq!(claimed.task_id, merge_task.task_id);
+        let _ = store
+            .mark_in_progress(&claimed.task_id, "worker")
+            .expect("mark in progress");
+        let _ = store
+            .mark_merge_pending(&claimed.task_id, "worker")
+            .expect("mark merge pending");
+
+        let rendered = export_markdown_snapshot(&store, &out).expect("export");
+        let disk = std::fs::read_to_string(&out).expect("read");
+
+        assert!(rendered.contains("Visible backlog task"));
+        assert!(!rendered.contains(&claimed.task_id));
+        assert!(!rendered.contains("merge_pending"));
+        assert_eq!(rendered, disk);
     }
 
     #[test]

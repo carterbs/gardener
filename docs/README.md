@@ -13,6 +13,7 @@ This directory is the canonical index for agent-oriented repository navigation. 
 - [Workflow conventions](./conventions/workflow.md)
 - [Repository reference essay](./references/codex-agent-team-article.md)
 - [Triage and worktree workflow docs](../thoughts/shared/plans/2026-02-27-tui-integration-testing.md)
+- [OTEL JSONL runtime failure triage cookbook](./runtime-failure-otel-jsonl-cookbook.md)
 
 ## Third: reusable agent capabilities
 

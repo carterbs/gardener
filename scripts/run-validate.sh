@@ -10,6 +10,7 @@ CUSTOM_LINTERS=(
   "scripts/check-no-warnings.sh"
   "scripts/check-migrations-wired.sh"
   "scripts/check-binary-blobs.sh"
+  "scripts/run-script-lint-fixture-tests.sh"
 )
 
 for linter in "${CUSTOM_LINTERS[@]}"; do

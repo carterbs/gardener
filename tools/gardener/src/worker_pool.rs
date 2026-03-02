@@ -247,8 +247,6 @@ pub fn run_worker_pool_fsm(
                 store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
             let Some(task) = claimed_task else {
                 set_worker_idle(&mut workers[idx], "waiting for claim");
-                workers[idx].task_id = None;
-                workers[idx].last_state_line = last_worker_state_line;
                 continue;
             };
             claimed_any = true;
@@ -676,8 +674,6 @@ pub fn run_worker_pool_fsm(
                                 active_doing = active_doing.saturating_add(1);
                             } else {
                                 set_worker_idle(&mut workers[idx], "waiting for claim");
-                                workers[idx].task_id = None;
-                                workers[idx].last_state_line = last_worker_state_line;
                             }
                         }
                         // Signal merge worker to exit when all work is done
@@ -694,6 +690,31 @@ pub fn run_worker_pool_fsm(
                             request_interrupt();
                         } else {
                             match result {
+                                Err(GardenerError::Process(message))
+                                    if message.contains("user interrupt requested") =>
+                                {
+                                    // Graceful shutdown: restore to merge_pending so the next
+                                    // run picks this task up again. claim_merge_pending sets no
+                                    // lease_expires_at, so stale-lease recovery won't help here.
+                                    append_run_log(
+                                        "warn",
+                                        "merge_worker.task.interrupted",
+                                        json!({
+                                            "worker_id": MERGE_WORKER_ID,
+                                            "task_id": task_id
+                                        }),
+                                    );
+                                    let _ = store.mark_merge_pending(&task_id, MERGE_WORKER_ID);
+                                    workers[merge_row_idx].state = "interrupted".to_string();
+                                    let interrupted_msg =
+                                        format!("interrupted (merge_pending) {}", task_id);
+                                    workers[merge_row_idx].tool_line = interrupted_msg.clone();
+                                    append_worker_command(
+                                        &mut workers[merge_row_idx],
+                                        &interrupted_msg,
+                                    );
+                                    workers[merge_row_idx].last_state_line = last_worker_state_line;
+                                }
                                 Err(err) => {
                                     let msg = err.to_string();
                                     append_run_log(
@@ -779,8 +800,6 @@ pub fn run_worker_pool_fsm(
                         // Reset merge row to idle if no more merges pending
                         if active_merging == 0 {
                             set_worker_idle(&mut workers[merge_row_idx], "waiting for merge");
-                            workers[merge_row_idx].task_id = None;
-                            workers[merge_row_idx].last_state_line = last_worker_state_line;
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;

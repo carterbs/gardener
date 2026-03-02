@@ -574,6 +574,7 @@ impl<'a> GitClient<'a> {
             "git.pull_main.started",
             json!({ "cwd": self.cwd.display().to_string() }),
         );
+        self.ensure_non_bare_worktree()?;
         let fetch = self.run(["git", "fetch", "origin", "main"])?;
         if fetch.exit_code != 0 {
             append_run_log(
@@ -621,6 +622,7 @@ impl<'a> GitClient<'a> {
                 "command": command
             }),
         );
+        self.ensure_non_bare_worktree()?;
         let out = self.run(["sh", "-lc", command])?;
         if out.exit_code != 0 {
             append_run_log(
@@ -645,6 +647,60 @@ impl<'a> GitClient<'a> {
                 "command": command
             }),
         );
+        Ok(())
+    }
+
+    fn ensure_non_bare_worktree(&self) -> Result<(), GardenerError> {
+        let bare_config = self.run(["git", "config", "--bool", "--get", "core.bare"])?;
+        let bare_value = bare_config.stdout.trim().to_ascii_lowercase();
+        if bare_config.exit_code == 0 && bare_value == "true" {
+            append_run_log(
+                "warn",
+                "git.config.core_bare_true_detected",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                }),
+            );
+            let set_out = self.run(["git", "config", "--local", "core.bare", "false"])?;
+            if set_out.exit_code != 0 {
+                append_run_log(
+                    "error",
+                    "git.config.core_bare_correction_failed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "exit_code": set_out.exit_code,
+                        "stderr": set_out.stderr
+                    }),
+                );
+                return Err(GardenerError::Process(format!(
+                    "failed to enforce core.bare=false: {}",
+                    set_out.stderr
+                )));
+            }
+            append_run_log(
+                "info",
+                "git.config.core_bare_corrected",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                }),
+            );
+        }
+
+        let bare_check = self.run(["git", "rev-parse", "--is-bare-repository"])?;
+        let still_bare = bare_check.exit_code == 0 && bare_check.stdout.trim() == "true";
+        if still_bare {
+            append_run_log(
+                "error",
+                "git.config.core_bare_enforcement_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "stderr": bare_check.stderr
+                }),
+            );
+            return Err(GardenerError::Process(
+                "repository is bare after core.bare enforcement".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -1087,6 +1143,16 @@ mod tests {
     fn run_validation_command_reports_failure() {
         let runner = FakeProcessRunner::default();
         runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
             exit_code: 1,
             stdout: String::new(),
             stderr: "failed validation".to_string(),
@@ -1186,6 +1252,83 @@ mod tests {
             spawned[0].args,
             vec!["-lc".to_string(), "npm run validate".to_string()]
         );
+    }
+
+    #[test]
+    fn pull_main_corrects_core_bare_true_before_merge() {
+        let runner = FakeProcessRunner::default();
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "true\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git config --local core.bare false
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        GitClient::new(&runner, "/repo")
+            .pull_main()
+            .expect("pull_main should recover");
+
+        let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec!["config", "--bool", "--get", "core.bare"]
+        );
+        assert_eq!(
+            spawned[1].args,
+            vec!["config", "--local", "core.bare", "false"]
+        );
+        assert_eq!(spawned[2].args, vec!["rev-parse", "--is-bare-repository"]);
+        assert_eq!(spawned[3].args, vec!["fetch", "origin", "main"]);
+        assert_eq!(spawned[4].args, vec!["merge", "--ff-only", "origin/main"]);
+    }
+
+    #[test]
+    fn run_validation_command_fails_when_core_bare_correction_fails() {
+        let runner = FakeProcessRunner::default();
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "true\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git config --local core.bare false
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "permission denied".to_string(),
+        }));
+
+        let err = GitClient::new(&runner, "/repo")
+            .run_validation_command("npm run validate")
+            .expect_err("correction should fail");
+
+        assert!(err
+            .to_string()
+            .contains("failed to enforce core.bare=false"));
     }
 
     #[test]

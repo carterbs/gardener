@@ -4,4 +4,5 @@
 .claude/worktrees/
 .worktrees/
 target/
+otel-logs.jsonl
 docs/quality-grades.md.stamp

@@ -249,6 +249,63 @@ fn run_with_runtime_paths_and_errors() {
 }
 
 #[test]
+fn run_with_runtime_backlog_only_failure_triggers_startup_diagnostics_capture() {
+    let fs = FakeFileSystem::with_file(
+        "/config.toml",
+        r#"
+[execution]
+test_mode = false
+"#,
+    );
+    let process = FakeProcessRunner::default();
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "captured\n".to_string(),
+        stderr: String::new(),
+    }));
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process.clone()),
+        terminal: Arc::new(FakeTerminal::new(true)),
+    };
+
+    let args = vec![
+        "gardener".into(),
+        "--backlog-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime)
+        .expect_err("failed startup should surface an error");
+
+    assert!(
+        matches!(err, GardenerError::Cli(message) if message.contains("No repo intelligence profile found"))
+    );
+
+    let spawned = process.spawned();
+    assert_eq!(spawned.len(), 2);
+    assert_eq!(spawned[0].program, "git");
+    assert_eq!(spawned[1].program, "bash");
+    assert_eq!(
+        spawned[1].args[0],
+        "/repo/scripts/startup-diagnostics.sh".to_string()
+    );
+    assert_eq!(spawned[1].args[1], "--stage".to_string());
+    assert_eq!(spawned[1].args[2], "backlog-only".to_string());
+    assert_eq!(spawned[1].args[3], "--run-id".to_string());
+    assert_eq!(spawned[1].args[5], "--log-path".to_string());
+    assert!(spawned[1].args[6].ends_with(".jsonl"));
+    assert_eq!(spawned[1].args[7], "--error".to_string());
+    assert!(spawned[1].args[8].contains("No repo intelligence profile found"));
+}
+
+#[test]
 fn run_with_runtime_validate_flag_runs_configured_validation_command() {
     let fs = FakeFileSystem::with_file("/config.toml", "[execution]\ntest_mode = true\n");
     let process = FakeProcessRunner::default();

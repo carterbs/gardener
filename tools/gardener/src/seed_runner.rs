@@ -7,7 +7,8 @@ use crate::runtime::ProcessRunner;
 use crate::types::{AgentKind, RuntimeScope};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeedTask {
@@ -87,6 +88,10 @@ pub fn run_legacy_seed_runner_v1_with_events(
         .working_dir
         .join(".cache/gardener/seed-last-message.json");
     let output_schema = seed_output_schema_path(scope)?;
+    if let Some(parent) = output_file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| GardenerError::Io(format!("create_dir_all {}: {e}", parent.display())))?;
+    }
     let context = AdapterContext {
         worker_id: "seed-worker".to_string(),
         session_id: "seed-session".to_string(),
@@ -134,14 +139,56 @@ pub fn run_legacy_seed_runner_v1_with_events(
         }
     };
 
-    let payload = parse_seed_payload(exec_result.payload).map_err(|e| {
+    if exec_result.terminal == AgentTerminal::Failure {
+        let reason = if exec_result.payload.is_null() {
+            "agent reported failure".to_string()
+        } else {
+            exec_result.payload.to_string()
+        };
         append_run_log(
             "error",
-            "seed_runner.parse_failed",
-            json!({ "error": e.to_string() }),
+            "seed_runner.turn_failed",
+            json!({
+                "backend": format!("{:?}", backend),
+                "model": model,
+                "payload": exec_result.payload,
+                "diagnostics": exec_result.diagnostics,
+            }),
         );
-        GardenerError::OutputEnvelope(e.to_string())
-    })?;
+        return Err(GardenerError::Process(format!(
+            "seed turn failed: {reason}"
+        )));
+    }
+
+    let payload = match parse_seed_payload(exec_result.payload) {
+        Ok(payload) => payload,
+        Err(event_error) => {
+            append_run_log(
+                "warn",
+                "seed_runner.parse_from_event_failed",
+                json!({
+                    "backend": format!("{:?}", backend),
+                    "model": model,
+                    "error": event_error.to_string()
+                }),
+            );
+            parse_seed_payload_from_file(&output_file).map_err(|file_error| {
+                append_run_log(
+                    "error",
+                    "seed_runner.parse_failed",
+                    json!({
+                        "backend": format!("{:?}", backend),
+                        "model": model,
+                        "event_error": event_error.to_string(),
+                        "file_error": file_error.to_string()
+                    }),
+                );
+                GardenerError::OutputEnvelope(format!(
+                    "failed to parse seeding payload from event and file: event={event_error}; file={file_error}"
+                ))
+            })?
+        }
+    };
 
     append_run_log(
         "info",
@@ -250,6 +297,46 @@ fn parse_seed_payload(value: serde_json::Value) -> Result<SeedPayload, serde_jso
     Ok(envelope.payload)
 }
 
+fn parse_seed_payload_from_file(path: &Path) -> Result<SeedPayload, GardenerError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                return Err(GardenerError::OutputEnvelope(format!(
+                    "seed output file missing: {}",
+                    path.display()
+                )));
+            }
+            return Err(GardenerError::Io(format!(
+                "read seed output file {}: {err}",
+                path.display()
+            )));
+        }
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(GardenerError::OutputEnvelope(format!(
+            "seed output file was empty: {}",
+            path.display()
+        )));
+    }
+
+    let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|err| {
+        GardenerError::OutputEnvelope(format!(
+            "seed output file contained invalid JSON at {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    parse_seed_payload(value).map_err(|err| {
+        GardenerError::OutputEnvelope(format!(
+            "seed output file payload parse failed at {}: {err}",
+            path.display()
+        ))
+    })
+}
+
 fn seed_output_schema_path(scope: &RuntimeScope) -> Result<PathBuf, GardenerError> {
     append_run_log(
         "debug",
@@ -322,8 +409,8 @@ fn seed_output_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_seed_payload, run_legacy_seed_runner_v1, run_legacy_seed_runner_v1_with_events,
-        run_seed_agent_direct_v2_with_events, SeedTask,
+        parse_seed_payload, parse_seed_payload_from_file, run_legacy_seed_runner_v1,
+        run_legacy_seed_runner_v1_with_events, run_seed_agent_direct_v2_with_events, SeedTask,
     };
     use crate::errors::GardenerError;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
@@ -468,6 +555,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_uses_output_file_when_event_payload_is_unparseable() {
+        let runner = FakeProcessRunner::default();
+        let working_dir = tempdir().expect("tempdir");
+        let output_file = working_dir
+            .path()
+            .join(".cache/gardener/seed-last-message.json");
+        if let Some(parent) = output_file.parent() {
+            std::fs::create_dir_all(parent).expect("create output parent");
+        }
+        std::fs::write(
+            &output_file,
+            r#"{"schema_version":1,"state":"seeding","payload":{"tasks":[{"title":"t","details":"d","rationale":"rationale","domain":"backlog","priority":"P1"}]}}"#,
+        )
+        .expect("write seeded file");
+
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":null}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let tasks = run_legacy_seed_runner_v1(
+            &runner,
+            &RuntimeScope {
+                process_cwd: PathBuf::from("/cwd"),
+                repo_root: None,
+                working_dir: working_dir.path().to_path_buf(),
+            },
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "prompt",
+        )
+        .expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "t");
+        assert_eq!(tasks[0].domain, "backlog");
+        assert_eq!(tasks[0].priority, "P1");
+    }
+
+    #[test]
     fn legacy_v1_on_event_callback_is_invoked() {
         use crate::protocol::AgentEvent;
         let runner = FakeProcessRunner::default();
@@ -576,6 +702,17 @@ mod tests {
         let payload = serde_json::json!("not-an-object");
         let result = parse_seed_payload(payload);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_seed_payload_from_file_reads_and_parses_tasks() {
+        let working_dir = tempdir().expect("tempdir");
+        let path = working_dir.path().join("seed-last-message.json");
+        let content = r#"{"schema_version":1,"state":"seeding","payload":{"tasks":[{"title":"title","details":"details","rationale":"rationale here","domain":"backlog","priority":"P0"}]}}"#;
+        std::fs::write(&path, content).expect("seed output file");
+        let payload = parse_seed_payload_from_file(&path).expect("parsed file payload");
+        assert_eq!(payload.tasks.len(), 1);
+        assert_eq!(payload.tasks[0].title, "title");
     }
 
     #[test]

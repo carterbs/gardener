@@ -166,3 +166,201 @@ pub fn run_discovery(
 
     Ok(assessment)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{build_discovery_prompt, run_discovery, DimensionAssessment, DiscoveryAssessment};
+    use crate::errors::GardenerError;
+    use crate::runtime::{FakeProcessRunner, ProcessOutput};
+    use crate::types::{AgentKind, RuntimeScope, WorkerState};
+    use std::path::PathBuf;
+
+    fn discovery_with_grade(grade: &str) -> DiscoveryAssessment {
+        DiscoveryAssessment {
+            agent_steering: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "agent steering".to_string(),
+                issues: vec!["agent issue".to_string()],
+                strengths: vec!["agent strength".to_string()],
+            },
+            knowledge_accessible: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "knowledge".to_string(),
+                issues: Vec::new(),
+                strengths: vec!["knowledge source".to_string()],
+            },
+            mechanical_guardrails: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "guardrails".to_string(),
+                issues: vec!["guardrail issue".to_string()],
+                strengths: Vec::new(),
+            },
+            local_feedback_loop: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "feedback".to_string(),
+                issues: Vec::new(),
+                strengths: vec!["feedback loop".to_string()],
+            },
+            coverage_signal: DimensionAssessment {
+                grade: grade.to_string(),
+                summary: "coverage".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            overall_readiness_score: 76,
+            overall_readiness_grade: grade.to_string(),
+            primary_gap: "knowledge_accessible".to_string(),
+            notable_findings: "stable".to_string(),
+            scope_notes: "note".to_string(),
+        }
+    }
+
+    fn discovery_envelope(assessment: &DiscoveryAssessment) -> String {
+        let body = serde_json::json!({
+            "schema_version": 1,
+            "state": WorkerState::Seeding,
+            "payload": {
+                "gardener_output": assessment
+            },
+        });
+        format!(
+            "noise\n<<GARDENER_JSON_START>>{}<<GARDENER_JSON_END>>\n",
+            serde_json::to_string(&body).expect("serializable discovery envelope for test")
+        )
+    }
+
+    fn scope(workdir: &str, repo_root: Option<&str>) -> RuntimeScope {
+        RuntimeScope {
+            process_cwd: PathBuf::from(workdir),
+            repo_root: repo_root.map(PathBuf::from),
+            working_dir: PathBuf::from(workdir),
+        }
+    }
+
+    #[test]
+    fn build_discovery_prompt_includes_working_and_repo_root() {
+        let prompt = build_discovery_prompt(&scope("/tmp/repo", Some("/tmp/repo")));
+        assert!(prompt.contains("WORKING DIRECTORY: /tmp/repo"));
+        assert!(prompt.contains("REPOSITORY ROOT: /tmp/repo"));
+        assert!(!prompt.contains("scoped run; include root-level signals in scope_notes"));
+    }
+
+    #[test]
+    fn build_discovery_prompt_includes_scoped_note_when_root_differs() {
+        let prompt = build_discovery_prompt(&scope("/tmp/task", Some("/tmp/repo")));
+        assert!(prompt.contains("WORKING DIRECTORY: /tmp/task"));
+        assert!(prompt.contains("REPOSITORY ROOT: /tmp/repo"));
+        assert!(prompt.contains("Note: scoped run; include root-level signals in scope_notes"));
+    }
+
+    #[test]
+    fn run_discovery_success_for_codex() {
+        let runner = FakeProcessRunner::default();
+        let expected = discovery_with_grade("A");
+        let expected_prompt = build_discovery_prompt(&scope("/tmp/repo", Some("/tmp/repo")));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: discovery_envelope(&expected),
+            stderr: String::new(),
+        }));
+
+        let result = run_discovery(
+            &runner,
+            &scope("/tmp/repo", Some("/tmp/repo")),
+            AgentKind::Codex,
+            "gpt-4o",
+            3,
+        )
+        .expect("discovery");
+
+        let req = &runner.spawned()[0];
+        assert_eq!(req.program, "codex");
+        assert_eq!(
+            req.args,
+            vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "--model".to_string(),
+                "gpt-4o".to_string(),
+                "--max-turns".to_string(),
+                "3".to_string(),
+                expected_prompt
+            ]
+        );
+        assert_eq!(result.overall_readiness_grade, "A");
+    }
+
+    #[test]
+    fn run_discovery_success_for_claude() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: discovery_envelope(&discovery_with_grade("B")),
+            stderr: String::new(),
+        }));
+
+        let scope = RuntimeScope {
+            process_cwd: PathBuf::from("/tmp/repo/sub"),
+            repo_root: Some(PathBuf::from("/tmp/repo")),
+            working_dir: PathBuf::from("/tmp/repo/sub"),
+        };
+        let assessment =
+            run_discovery(&runner, &scope, AgentKind::Claude, "sonnet", 2).expect("discovery");
+
+        let req = &runner.spawned()[0];
+        assert_eq!(req.program, "claude");
+        assert_eq!(
+            req.args,
+            vec![
+                "-p".to_string(),
+                build_discovery_prompt(&scope),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string()
+            ]
+        );
+        assert_eq!(assessment.overall_readiness_grade, "B");
+    }
+
+    #[test]
+    fn run_discovery_returns_process_error_when_runner_fails() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "boom".to_string(),
+        }));
+
+        let error = run_discovery(
+            &runner,
+            &scope("/tmp/repo", Some("/tmp/repo")),
+            AgentKind::Codex,
+            "gpt-4o",
+            1,
+        )
+        .expect_err("expected failure");
+        assert!(matches!(error, GardenerError::Process(msg) if msg == "boom"));
+    }
+
+    #[test]
+    fn run_discovery_returns_output_error_on_invalid_envelope() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "not an envelope".to_string(),
+            stderr: String::new(),
+        }));
+
+        let error = run_discovery(
+            &runner,
+            &scope("/tmp/repo", Some("/tmp/repo")),
+            AgentKind::Codex,
+            "gpt-4o",
+            1,
+        )
+        .expect_err("invalid envelope should fail");
+
+        assert!(matches!(error, GardenerError::OutputEnvelope(_)));
+    }
+}

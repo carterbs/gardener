@@ -227,7 +227,7 @@ fn check_no_warnings_script_enforces_redundant_static_lifetimes_lint() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_try_fold_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_try_fold_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -246,7 +246,7 @@ fn workspace_clippy_lint_configuration_enables_manual_try_fold_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_try_fold is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]

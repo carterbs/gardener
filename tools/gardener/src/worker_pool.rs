@@ -348,6 +348,8 @@ pub fn run_worker_pool_fsm(
                 let merge_cfg = cfg.clone();
                 let merge_runner = runtime.process_runner.clone();
                 let merge_scope = runtime_scope.clone();
+                let merge_file_system = runtime.file_system.clone();
+                let merge_clock = runtime.clock.clone();
                 scope_guard.spawn(move || {
                     while let Ok(req) = merge_rx.recv() {
                         let task_id = req.task_id.clone();
@@ -355,6 +357,8 @@ pub fn run_worker_pool_fsm(
                             &req,
                             &merge_cfg,
                             merge_runner.as_ref(),
+                            merge_file_system.as_ref(),
+                            merge_clock.as_ref(),
                             &merge_scope,
                         );
                         let _ = merge_result_tx

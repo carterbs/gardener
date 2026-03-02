@@ -12,6 +12,7 @@ This directory is the canonical index for agent-oriented repository navigation. 
 
 - [Workflow conventions](./conventions/workflow.md)
 - [Repository reference essay](./references/codex-agent-team-article.md)
+- [Triage and worktree workflow docs](./conventions/workflow.md)
 - [OTEL JSONL runtime failure triage cookbook](./runtime-failure-otel-jsonl-cookbook.md)
 
 ## Third: reusable agent capabilities
@@ -23,6 +24,7 @@ This directory is the canonical index for agent-oriented repository navigation. 
 ## Fourth: agent runbooks
 
 - [Backlog operations runbook](./runbooks/backlog-operations.md)
+- [Agent bootstrap runbook (first run)](./runbooks/agent-bootstrap.md)
 - [Startup artifact map runbook](./runbooks/startup-artifact-map.md)
 
 ## Fifth: repository map

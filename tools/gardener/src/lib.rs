@@ -58,7 +58,7 @@ use agent::{probe_and_persist, validate_model};
 use backlog_snapshot::export_markdown_snapshot;
 use backlog_store::{BacklogStore, TaskStatus};
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
-use config::{load_config, resolve_validation_command, CliOverrides};
+use config::{effective_agent_for_state, load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use gh::GhClient;
 use logging::{
@@ -68,11 +68,11 @@ use logging::{
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
-use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
+use types::{AgentKind, RuntimeScope, ValidationCommandResolution, WorkerState};
 use worker::worktree_branch_for;
 use worker_pool::run_worker_pool_fsm;
 
@@ -447,13 +447,15 @@ pub fn run_with_runtime(
             if !cfg_for_startup.execution.test_mode {
                 let factory = AdapterFactory::with_defaults();
                 let mut active = Vec::new();
-                if let Some(adapter) = factory.get(cfg_for_startup.seeding.backend) {
-                    active.push(adapter);
-                } else {
-                    return Err(GardenerError::InvalidConfig(format!(
-                        "no adapter registered for backend {:?}",
-                        cfg_for_startup.seeding.backend
-                    )));
+                for backend in required_agent_backends(&cfg_for_startup)? {
+                    if let Some(adapter) = factory.get(backend) {
+                        active.push(adapter);
+                    } else {
+                        return Err(GardenerError::InvalidConfig(format!(
+                            "no adapter registered for backend {:?}",
+                            backend
+                        )));
+                    }
                 }
                 let refs = active
                     .iter()
@@ -617,6 +619,33 @@ where
             Err(error)
         }
     }
+}
+
+fn required_agent_backends(cfg: &config::AppConfig) -> Result<Vec<AgentKind>, GardenerError> {
+    append_run_log(
+        "debug",
+        "agent.prerequisites.resolve.started",
+        json!({
+            "states": ["understand", "planning", "doing", "gitting", "reviewing", "merging"],
+        }),
+    );
+    let mut adapters = BTreeSet::new();
+    let worker_states = [
+        WorkerState::Understand,
+        WorkerState::Planning,
+        WorkerState::Doing,
+        WorkerState::Gitting,
+        WorkerState::Reviewing,
+        WorkerState::Merging,
+    ];
+    for state in worker_states {
+        let backend = effective_agent_for_state(cfg, state).ok_or_else(|| {
+            GardenerError::InvalidConfig(format!("no backend configured for {state:?}"))
+        })?;
+        adapters.insert(backend);
+    }
+    adapters.insert(cfg.seeding.backend);
+    Ok(adapters.into_iter().collect())
 }
 
 fn capture_startup_diagnostics(
@@ -878,5 +907,49 @@ mod tests {
         let parse =
             super::Cli::try_parse_from(["gardener", "--record-session", "tmp/session.jsonl"]);
         assert!(parse.is_err());
+    }
+
+    #[test]
+    fn required_agent_backends_collects_unique_backends() {
+        let mut cfg = config::AppConfig::default();
+        cfg.states.insert(
+            "understand".to_string(),
+            config::StateConfig {
+                backend: Some(crate::types::AgentKind::Claude),
+                model: None,
+            },
+        );
+
+        let backends = super::required_agent_backends(&cfg).unwrap_or_default();
+        assert_eq!(
+            backends,
+            vec![
+                crate::types::AgentKind::Claude,
+                crate::types::AgentKind::Codex
+            ]
+        );
+    }
+
+    #[test]
+    fn required_agent_backends_requires_effective_backend_for_each_active_state() {
+        let mut cfg = config::AppConfig::default();
+        cfg.agent.default = None;
+        cfg.states.insert(
+            "planning".to_string(),
+            config::StateConfig {
+                backend: Some(crate::types::AgentKind::Claude),
+                model: None,
+            },
+        );
+        cfg.states.insert(
+            "doing".to_string(),
+            config::StateConfig {
+                backend: None,
+                model: None,
+            },
+        );
+
+        let error = super::required_agent_backends(&cfg).expect_err("expected missing backend");
+        assert!(error.to_string().contains("no backend configured for"));
     }
 }

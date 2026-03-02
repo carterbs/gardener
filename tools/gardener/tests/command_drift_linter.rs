@@ -112,6 +112,7 @@ fn collect_command_references() -> Vec<CommandReference> {
     const FILE_PATHS: &[&str] = &[
         "AGENTS.md",
         "README.md",
+        "docs/README.md",
         "docs/conventions/workflow.md",
         "tools/gardener/src/startup.rs",
         "tools/gardener/src/triage.rs",
@@ -301,4 +302,21 @@ fn help_contains_flag(help: &str, flag: &str) -> bool {
         let normalized = normalize_token(token);
         normalized == flag || normalized.starts_with(&flag_with_equals)
     })
+}
+
+#[test]
+fn linter_includes_root_readme_commands() {
+    let references = collect_command_references();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("crate lives under <repo_root>/tools/gardener");
+    let expected = repo_root.join("README.md");
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference.file == expected && reference.command == "gardener --help"),
+        "expected command-drift linter to include root README command references",
+    );
 }

@@ -648,8 +648,13 @@ fn apply_profile_runtime_preferences(
 pub fn render_help() -> String {
     let mut cmd = Cli::command();
     let mut buffer = Vec::new();
-    cmd.write_long_help(&mut buffer).expect("write help to vec");
-    String::from_utf8(buffer).expect("utf8")
+    if let Err(err) = cmd.write_long_help(&mut buffer) {
+        panic!("write help to vec: {err}");
+    }
+    match String::from_utf8(buffer) {
+        Ok(result) => result,
+        Err(err) => panic!("utf8: {err}"),
+    }
 }
 
 fn env_to_map(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> EnvMap {

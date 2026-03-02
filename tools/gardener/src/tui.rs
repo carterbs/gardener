@@ -856,12 +856,15 @@ fn render_dashboard_with_headline(
     startup_headline: StartupHeadlineView,
 ) -> String {
     let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
     terminal
         .draw(|frame| {
             draw_dashboard_frame(frame, workers, stats, backlog, 15, 900, startup_headline)
         })
-        .expect("draw");
+        .unwrap_or_else(|err| panic!("draw: {err}"));
 
     let mut out = String::new();
     let buffer = terminal.backend().buffer().clone();
@@ -876,10 +879,13 @@ fn render_dashboard_with_headline(
 
 pub fn render_triage(activity: &[String], artifacts: &[String], width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
     terminal
         .draw(|frame| draw_triage_frame(frame, activity, artifacts))
-        .expect("draw");
+        .unwrap_or_else(|err| panic!("draw: {err}"));
 
     let mut out = String::new();
     let buffer = terminal.backend().buffer().clone();
@@ -1495,7 +1501,10 @@ fn draw_triage_frame_from_state(frame: &mut ratatui::Frame<'_>, state: &AppState
 
 pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
-    let mut terminal = Terminal::new(backend).expect("terminal");
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
     let lines = report
         .lines()
         .take(height.saturating_sub(8) as usize)
@@ -1503,7 +1512,7 @@ pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> 
         .join("\n");
     terminal
         .draw(|frame| draw_report_frame(frame, path, &lines))
-        .expect("draw");
+        .unwrap_or_else(|err| panic!("draw: {err}"));
     let mut out = String::new();
     let buffer = terminal.backend().buffer().clone();
     for y in 0..height {
@@ -1809,7 +1818,9 @@ where
             *current = Some(size);
             changed
         });
-        let terminal = slot.as_mut().expect("live terminal initialized");
+        let terminal = slot
+            .as_mut()
+            .ok_or_else(|| GardenerError::Cli("live terminal initialized".to_string()))?;
         if resized {
             terminal
                 .autoresize()
@@ -1967,7 +1978,13 @@ fn command_stream_window(stream: &str, width: usize, offset: usize) -> String {
 }
 
 fn normalize_worker_state(state: &str) -> &str {
-    match state {
+    let normalized_state = state.trim().to_ascii_lowercase();
+    let normalized_state = normalized_state
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .rfind(|part| !part.is_empty())
+        .unwrap_or(normalized_state.as_str());
+
+    match normalized_state {
         "init" | "boot" | "backlog_sync" | "working" | "seeding" => "understand",
         "claimed" | "starting" | "worktree_preparing" | "worktree_ready" => "understand",
         "commit" | "gitting_remediation" | "pr_creating" => "gitting",
@@ -1977,8 +1994,17 @@ fn normalize_worker_state(state: &str) -> &str {
         | "merge_remediation"
         | "post_merge_validation"
         | "teardown" => "merging",
-        "understand" | "planning" | "doing" | "gitting" | "reviewing" | "merging" | "complete"
-        | "failed" | "unresolved" | "idle" | "parked" => state,
+        "understand" => "understand",
+        "planning" => "planning",
+        "doing" => "doing",
+        "gitting" => "gitting",
+        "reviewing" => "reviewing",
+        "merging" => "merging",
+        "complete" => "complete",
+        "failed" => "failed",
+        "unresolved" => "unresolved",
+        "idle" => "idle",
+        "parked" => "parked",
         _ => "unknown",
     }
 }
@@ -2284,9 +2310,9 @@ fn teardown_terminal(
 mod tests {
     use super::{
         format_breadcrumb, format_state_label, render_dashboard, render_dashboard_at_tick,
-        render_triage, reset_workers_scroll, scroll_workers_down, scroll_workers_up, AppState,
-        BacklogView, QueueStats, StageState, StartupHeadlineView, WorkerCard, WorkerMetrics,
-        WorkerRow, WorkerState,
+        render_triage, reset_workers_scroll, scroll_workers_down, scroll_workers_up,
+        worker_flow_chain_spans, AppState, BacklogView, QueueStats, StageState,
+        StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow, WorkerState,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -2567,6 +2593,75 @@ mod tests {
         assert!(frame.contains("task one"));
         assert!(frame.contains("task two"));
         assert!(frame.contains("Flow:"));
+    }
+
+    #[test]
+    fn worker_flow_chain_shows_full_chain_for_understand_state() {
+        let spans = worker_flow_chain_spans("understand");
+        let labels = spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .filter(|label| label != " → ")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Understand",
+                "Planning",
+                "Doing",
+                "Gitting",
+                "Reviewing",
+                "Merging",
+                "Complete"
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_flow_chain_normalizes_case_and_whitespace_before_display() {
+        let spans = worker_flow_chain_spans("  PLANNING ");
+        let labels = spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .filter(|label| label != " → ")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Understand",
+                "Planning",
+                "Doing",
+                "Gitting",
+                "Reviewing",
+                "Merging",
+                "Complete"
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_flow_chain_handles_state_prefixes_for_early_states() {
+        for state in ["state>planning", "state planning", "\"understand\""] {
+            let spans = worker_flow_chain_spans(state);
+            let labels = spans
+                .iter()
+                .map(|span| span.content.to_string())
+                .filter(|label| label != " → ")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                labels,
+                vec![
+                    "Understand",
+                    "Planning",
+                    "Doing",
+                    "Gitting",
+                    "Reviewing",
+                    "Merging",
+                    "Complete"
+                ],
+                "full flow chain not rendered for state '{state}'"
+            );
+        }
     }
 
     #[test]

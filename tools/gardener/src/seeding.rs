@@ -636,6 +636,6 @@ mod tests {
         );
 
         assert!(prompt.contains("Return either:"));
-        assert!(prompt.contains("details"));
+        assert!(prompt.contains("tasks"));
     }
 }

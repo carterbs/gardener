@@ -30,6 +30,26 @@ fn backlog_db_help_includes_runbook_command() {
 }
 
 #[test]
+fn backlog_db_help_shows_default_db_path() {
+    let output = Command::new("bash")
+        .arg(backlog_db_script())
+        .arg("help")
+        .output()
+        .expect("run backlog-db help");
+
+    assert!(
+        output.status.success(),
+        "help command should exit successfully"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(".cache/gardener/backlog.sqlite"),
+        "help output should mention canonical default db path"
+    );
+}
+
+#[test]
 fn backlog_db_runbook_command_prints_markdown() {
     let output = Command::new("bash")
         .arg(backlog_db_script())

@@ -716,6 +716,7 @@ mod tests {
         assert_eq!(payload.tasks[0].title, "title");
     }
 
+    #[test]
     fn seed_output_schema_is_strict() {
         let schema: serde_json::Value =
             serde_json::from_str(&super::seed_output_schema()).expect("valid JSON schema");

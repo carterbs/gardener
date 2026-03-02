@@ -9,6 +9,7 @@ use crate::task_identity::TaskKind;
 use crate::types::RuntimeScope;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,15 @@ pub struct FrictionFinding {
 pub struct FrictionAnalysisResponse {
     pub findings: Vec<FrictionFinding>,
     pub smooth_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FrictionOutputEnvelope {
+    #[serde(default)]
+    schema_version: Option<usize>,
+    #[serde(default)]
+    state: Option<String>,
+    payload: FrictionAnalysisResponse,
 }
 
 pub struct FrictionAnalysisInput<'a> {
@@ -380,6 +390,16 @@ pub fn run_friction_analysis(
         .unwrap_or(&scope.working_dir)
         .to_path_buf();
 
+    let output_schema = friction_output_schema_path(scope)?;
+    let output_file = scope
+        .working_dir
+        .join(".cache/gardener/friction-analysis-output.json");
+    if let Some(parent) = output_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::errors::GardenerError::Io(format!("create_dir_all {}: {e}", parent.display()))
+        })?;
+    }
+
     let ctx = AdapterContext {
         worker_id: "friction-analyzer".to_string(),
         session_id: format!("friction-{}", input.worker_id),
@@ -388,8 +408,8 @@ pub fn run_friction_analysis(
         cwd,
         prompt_version: "friction-v1".to_string(),
         context_manifest_hash: String::new(),
-        output_schema: None,
-        output_file: None,
+        output_schema: Some(output_schema),
+        output_file: Some(output_file.clone()),
         permissive_mode: false,
         max_turns: Some(1),
     };
@@ -406,22 +426,32 @@ pub fn run_friction_analysis(
 
     let result = adapter.execute(process_runner, &ctx, &prompt, None)?;
 
-    let response: FrictionAnalysisResponse = match serde_json::from_value(result.payload.clone()) {
+    let response = match parse_friction_payload(result.payload) {
         Ok(r) => r,
-        Err(e) => {
+        Err(event_error) => {
             append_run_log(
                 "warn",
-                "friction_analysis.parse_failed",
+                "friction_analysis.parse_from_event_failed",
                 json!({
                     "worker_id": input.worker_id,
-                    "error": e.to_string(),
-                    "raw_payload": result.payload.to_string().chars().take(500).collect::<String>()
+                    "error": event_error.to_string(),
                 }),
             );
-            FrictionAnalysisResponse {
-                findings: vec![],
-                smooth_run: false,
-            }
+            parse_friction_payload_from_file(&output_file).unwrap_or_else(|file_error| {
+                append_run_log(
+                    "warn",
+                    "friction_analysis.parse_failed",
+                    json!({
+                        "worker_id": input.worker_id,
+                        "event_error": event_error.to_string(),
+                        "file_error": file_error.to_string()
+                    }),
+                );
+                FrictionAnalysisResponse {
+                    findings: vec![],
+                    smooth_run: false,
+                }
+            })
         }
     };
 
@@ -479,6 +509,148 @@ pub fn default_log_path(scope: &RuntimeScope) -> PathBuf {
     scope.working_dir.join(".gardener/otel-logs.jsonl")
 }
 
+fn parse_friction_payload(
+    value: serde_json::Value,
+) -> Result<FrictionAnalysisResponse, serde_json::Error> {
+    if let Ok(payload) = serde_json::from_value::<FrictionAnalysisResponse>(value.clone()) {
+        return Ok(payload);
+    }
+    let envelope: FrictionOutputEnvelope = serde_json::from_value(value)?;
+    Ok(envelope.payload)
+}
+
+fn parse_friction_payload_from_file(
+    path: &Path,
+) -> Result<FrictionAnalysisResponse, crate::errors::GardenerError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            if err.kind() == ErrorKind::NotFound {
+                return Err(crate::errors::GardenerError::OutputEnvelope(format!(
+                    "friction output file missing: {}",
+                    path.display()
+                )));
+            }
+            return Err(crate::errors::GardenerError::Io(format!(
+                "read friction output file {}: {err}",
+                path.display()
+            )));
+        }
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(crate::errors::GardenerError::OutputEnvelope(format!(
+            "friction output file was empty: {}",
+            path.display()
+        )));
+    }
+
+    let value = serde_json::from_str::<Value>(trimmed).map_err(|err| {
+        crate::errors::GardenerError::OutputEnvelope(format!(
+            "friction output file contained invalid JSON at {}: {err}",
+            path.display()
+        ))
+    })?;
+
+    parse_friction_payload(value).map_err(|err| {
+        crate::errors::GardenerError::OutputEnvelope(format!(
+            "friction output file payload parse failed at {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+fn friction_output_schema_path(
+    scope: &RuntimeScope,
+) -> Result<PathBuf, crate::errors::GardenerError> {
+    append_run_log(
+        "debug",
+        "friction_analysis.schema_path",
+        json!({
+            "working_dir": scope.working_dir.display().to_string(),
+        }),
+    );
+    let path = scope
+        .working_dir
+        .join(".cache/gardener/schemas/friction_analysis_output_schema.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            crate::errors::GardenerError::Io(format!("create_dir_all {}: {e}", parent.display()))
+        })?;
+    }
+
+    let desired = friction_output_schema();
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing != desired {
+        std::fs::write(&path, desired).map_err(|e| {
+            crate::errors::GardenerError::Io(format!("write schema {}: {e}", path.display()))
+        })?;
+    }
+    Ok(path)
+}
+
+fn friction_output_schema() -> String {
+    r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "state": {
+      "type": "string",
+      "const": "friction_analysis"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["findings", "smooth_run"],
+      "properties": {
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["category", "title", "description", "severity", "evidence_events"],
+            "properties": {
+              "category": {
+                "type": "string",
+                "enum": ["missing_context", "tool_failure", "convention_gap", "documentation_gap", "config_issue", "flaky_infra"]
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "severity": {
+                "type": "string",
+                "enum": ["high", "medium", "low"]
+              },
+              "evidence_events": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "smooth_run": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "required": ["schema_version", "state", "payload"]
+}"#.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -486,6 +658,9 @@ pub fn default_log_path(scope: &RuntimeScope) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use crate::runtime::{FakeProcessRunner, ProcessOutput};
+    use crate::types::RuntimeScope;
     use std::io::Write;
 
     fn otel_line(
@@ -703,5 +878,103 @@ mod tests {
     fn findings_to_tasks_returns_empty_for_empty_findings() {
         let tasks = findings_to_tasks(&[]);
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn run_friction_analysis_recovers_from_null_payload_with_output_file() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let scope = RuntimeScope {
+            process_cwd: PathBuf::from("/cwd"),
+            repo_root: None,
+            working_dir: dir.path().to_path_buf(),
+        };
+        let output_file = scope
+            .working_dir
+            .join(".cache/gardener/friction-analysis-output.json");
+        if let Some(parent) = output_file.parent() {
+            std::fs::create_dir_all(parent).expect("create output dir");
+        }
+        std::fs::write(
+            &output_file,
+            r#"{"schema_version":1,"state":"friction_analysis","payload":{"findings":[{"category":"tool_failure","title":"Persisted output fallback","description":"Null payload from terminal event should be replaced by file output.","severity":"high","evidence_events":["adapter.payload.null"]}],"smooth_run":false}}"#,
+        )
+        .expect("write friction output file");
+
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":null}\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let log_path = write_log_file(
+            dir.path(),
+            &[otel_line("run-1", "worker-1", "worker.started", "INFO", 5)],
+        );
+        let input = FrictionAnalysisInput {
+            worker_id: "worker-1",
+            task_id: "task-1",
+            task_summary: "Test summary",
+            merge_sha: None,
+            run_id: "run-1",
+            log_path: &log_path,
+        };
+        let outcome = run_friction_analysis(&input, &AppConfig::default(), &runner, &scope)
+            .expect("run friction analysis");
+        let findings = match outcome {
+            FrictionAnalysisOutcome::Completed { findings } => findings,
+            FrictionAnalysisOutcome::Skipped { reason } => {
+                panic!("did not expect skip: {reason}")
+            }
+        };
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].title, "Persisted output fallback");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 1);
+        let args = &spawned[0].args;
+        let schema_index = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema arg missing");
+        let file_index = args
+            .iter()
+            .position(|arg| arg == "-o")
+            .expect("output file arg missing");
+        assert_eq!(
+            args[file_index + 1],
+            output_file.to_string_lossy().to_string()
+        );
+        assert!(args[schema_index + 1].ends_with("friction_analysis_output_schema.json"));
+    }
+
+    #[test]
+    fn parse_friction_payload_from_file_reads_and_parses_output() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("friction-analysis-output.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"state":"friction_analysis","payload":{"findings":[],"smooth_run":true}}"#,
+        )
+        .expect("write output file");
+        let payload = parse_friction_payload_from_file(&path).expect("payload from file");
+        assert!(payload.smooth_run);
+        assert!(payload.findings.is_empty());
+    }
+
+    #[test]
+    fn friction_output_schema_is_strict() {
+        let schema: serde_json::Value =
+            serde_json::from_str(&super::friction_output_schema()).expect("valid JSON schema");
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            schema["properties"]["payload"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            schema["properties"]["payload"]["properties"]["findings"]["items"]
+                ["additionalProperties"],
+            serde_json::json!(false)
+        );
     }
 }

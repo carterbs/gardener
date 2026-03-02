@@ -328,12 +328,12 @@ fn gitting_remediation_template() -> PromptTemplate {
         version: "v1-gitting-remediation",
         body: r#"Intent: remediate git publication failures after deterministic push handling failed.
 
-The deterministic gitting pipeline failed to publish this branch. Failure details are provided in [knowledge_context].
+The deterministic gitting pipeline failed to publish this branch. Read the evidence file in [knowledge_context] for failure details.
 This is remediation-only work. Keep changes minimal and strictly tied to the reported failure.
 
 ## Steps
 
-1. Read [knowledge_context] and identify the exact cause of the publication failure.
+1. Read the evidence file referenced in [knowledge_context] and identify the exact cause of the publication failure.
 2. Inspect and fix source files as needed (for example unresolved conflict markers, missing merged changes, or failing validation-related edits).
 3. Run the project validation command to confirm the worktree is publish-ready.
 4. Return a concise summary and changed files.
@@ -382,7 +382,7 @@ fn merge_remediation_template() -> PromptTemplate {
 
 ## Context
 
-The deterministic merge pipeline tried to merge your PR and failed. Information about the failure is provided in [knowledge_context].
+The deterministic merge pipeline tried to merge your PR and failed. Read the evidence file in [knowledge_context] for failure details.
 
 ## Possible fixes
 
@@ -410,7 +410,7 @@ pub fn merge_main_conflict_resolution_template() -> PromptTemplate {
 
 ## Context
 The pipeline ran `git merge origin/main` and there are conflicts in one or more files.
-Failure details are in [knowledge_context].
+Read the evidence file in [knowledge_context] for failure details.
 
 ## Steps
 1. Find all files with conflict markers (<<<<<<< / ======= / >>>>>>>).
@@ -431,27 +431,19 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 pub fn ci_failure_remediation_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-ci-failure-remediation",
-        body: r#"Intent: fix CI failures so this PR can be merged.
+        body: r#"Your goal is to get this PR mergeable.
 
-## Context
+Read the evidence file in [knowledge_context] and resolve the issues it describes.
 
-CI checks failed on this PR. The failure logs are provided in [knowledge_context].
+## Rules
 
-## Steps
-
-1. Read the CI failure logs in [knowledge_context] carefully.
-2. Identify the root cause of each failure (test failure, lint error, build error, etc.).
-3. Fix the source code to resolve the failures.
-4. Run the project's validation command locally to confirm your fixes pass.
-
-## Autonomy
-
-You have full autonomy. Fix the code, commit your changes, and push. The pipeline is the safety net.
-- Keep edits minimal and CI-fix-focused; avoid unrelated refactors.
-- Do NOT "fix" failures by weakening checks (for example changing coverage/lint/test ignore lists or lowering thresholds) unless explicitly requested.
+- You have full autonomy. Fix the code, commit your changes, and push.
+- Keep edits minimal and fix-focused; avoid unrelated refactors.
+- Do NOT "fix" failures by weakening checks (e.g. changing ignore lists or lowering thresholds).
+- Run the project's validation command locally to confirm your fixes pass before pushing.
 
 Output schema must be JSON envelope with payload fields: summary, files_changed.
-summary must include what CI failures were fixed and the validation command/result.
+summary must include what was fixed and the validation command/result.
 Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>>."#,
     }
 }
@@ -463,7 +455,7 @@ fn post_merge_fix_template() -> PromptTemplate {
         body: r#"Intent: fix a post-merge validation failure on main.
 
 The PR was merged successfully but validation on the combined main state fails.
-The validation error is provided in [knowledge_context].
+Read the evidence file in [knowledge_context] for the validation error details.
 
 ## Steps
 
@@ -540,7 +532,7 @@ mod tests {
         let tpl = ci_failure_remediation_template();
         assert_eq!(tpl.version, "v1-ci-failure-remediation");
         assert!(tpl.body.contains("[knowledge_context]"));
-        assert!(tpl.body.contains("full autonomy"));
+        assert!(tpl.body.contains("evidence file"));
         assert!(tpl.body.contains("<<GARDENER_JSON_START>>"));
     }
 

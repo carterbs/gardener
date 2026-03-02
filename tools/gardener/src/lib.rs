@@ -67,10 +67,7 @@ use logging::{
 };
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
-use startup::{
-    backlog_db_path, ensure_quality_report_fresh_for_validation, run_startup_audits,
-    run_startup_audits_with_progress,
-};
+use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
 use std::collections::{BTreeSet, HashMap};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
@@ -286,7 +283,6 @@ pub fn run_with_runtime(
                 "cli.validate.started",
                 json!({ "command": startup.validation.command }),
             );
-            ensure_quality_report_fresh_for_validation(runtime, &cfg, &startup.scope)?;
             let out = runtime.process_runner.run(ProcessRequest {
                 program: "sh".to_string(),
                 args: vec!["-lc".to_string(), startup.validation.command.clone()],

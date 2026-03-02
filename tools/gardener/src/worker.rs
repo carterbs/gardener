@@ -1151,36 +1151,75 @@ pub(crate) fn execute_merge_phase(
         match (&status.mergeable, &status.merge_state_status) {
             // Clean + Mergeable → attempt merge
             (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => {
-                if let Err(err) = run_repo_validation_with_quality_guard(
-                    &repo_root_git,
-                    runtime_file_system,
-                    runtime_clock,
-                    cfg,
-                    scope,
-                ) {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    append_run_log(
-                        "error",
-                        "worker.merging.pre_validation_failed",
-                        json!({
-                            "worker_id": worker_id,
-                            "task_id": task_id,
-                            "error": err.to_string()
-                        }),
-                    );
-                    return Ok(WorkerRunSummary {
-                        worker_id: req.worker_id.clone(),
-                        session_id: req.session_id.clone(),
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason: Some(format!("pre-merge validation failed: {err}")),
-                    });
+                let skip_pre_validation = match gh.required_checks_green(pr) {
+                    Ok(true) => {
+                        append_run_log(
+                            "info",
+                            "worker.merging.pre_validation.skipped",
+                            json!({
+                                "worker_id": worker_id,
+                                "pr_number": pr,
+                                "reason": "mergeable_clean_and_required_checks_green"
+                            }),
+                        );
+                        true
+                    }
+                    Ok(false) => {
+                        append_run_log(
+                            "debug",
+                            "worker.merging.pre_validation.required_checks_not_green",
+                            json!({
+                                "worker_id": worker_id,
+                                "pr_number": pr
+                            }),
+                        );
+                        false
+                    }
+                    Err(err) => {
+                        append_run_log(
+                            "warn",
+                            "worker.merging.pre_validation.gate_check_failed",
+                            json!({
+                                "worker_id": worker_id,
+                                "pr_number": pr,
+                                "error": err.to_string()
+                            }),
+                        );
+                        false
+                    }
+                };
+                if !skip_pre_validation {
+                    if let Err(err) = run_repo_validation_with_quality_guard(
+                        &repo_root_git,
+                        runtime_file_system,
+                        runtime_clock,
+                        cfg,
+                        scope,
+                    ) {
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Failed,
+                            on_event,
+                        );
+                        append_run_log(
+                            "error",
+                            "worker.merging.pre_validation_failed",
+                            json!({
+                                "worker_id": worker_id,
+                                "task_id": task_id,
+                                "error": err.to_string()
+                            }),
+                        );
+                        return Ok(WorkerRunSummary {
+                            worker_id: req.worker_id.clone(),
+                            session_id: req.session_id.clone(),
+                            final_state: WorkerState::Failed,
+                            logs,
+                            teardown: None,
+                            failure_reason: Some(format!("pre-merge validation failed: {err}")),
+                        });
+                    }
                 }
                 match gh.merge_pr(pr) {
                     Ok(()) => {

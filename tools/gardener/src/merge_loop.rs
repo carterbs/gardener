@@ -20,8 +20,8 @@ use std::path::Path;
 use std::time::Duration;
 
 pub const MAX_MERGE_REMEDIATION: u32 = 3;
-pub const MERGEABILITY_POLL_MAX: u32 = 10;
-pub const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(30);
+pub const MERGEABILITY_POLL_MAX: u32 = 12;
+pub const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct MergeLoopContext<'a> {
     pub cfg: &'a AppConfig,

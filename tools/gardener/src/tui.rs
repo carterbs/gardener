@@ -1961,7 +1961,12 @@ fn command_stream_window(stream: &str, width: usize, offset: usize) -> String {
 
 fn normalize_worker_state(state: &str) -> &str {
     let normalized_state = state.trim().to_ascii_lowercase();
-    match normalized_state.as_str() {
+    let normalized_state = normalized_state
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .rfind(|part| !part.is_empty())
+        .unwrap_or(normalized_state.as_str());
+
+    match normalized_state {
         "init" | "boot" | "backlog_sync" | "working" | "seeding" => "understand",
         "claimed" | "starting" | "worktree_preparing" | "worktree_ready" => "understand",
         "commit" | "gitting_remediation" | "pr_creating" => "gitting",
@@ -2548,6 +2553,31 @@ mod tests {
                 "Complete"
             ]
         );
+    }
+
+    #[test]
+    fn worker_flow_chain_handles_state_prefixes_for_early_states() {
+        for state in ["state>planning", "state planning", "\"understand\""] {
+            let spans = worker_flow_chain_spans(state);
+            let labels = spans
+                .iter()
+                .map(|span| span.content.to_string())
+                .filter(|label| label != " → ")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                labels,
+                vec![
+                    "Understand",
+                    "Planning",
+                    "Doing",
+                    "Gitting",
+                    "Reviewing",
+                    "Merging",
+                    "Complete"
+                ],
+                "full flow chain not rendered for state '{state}'"
+            );
+        }
     }
 
     #[test]

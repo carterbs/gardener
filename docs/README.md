@@ -21,6 +21,10 @@ This directory is the canonical index for agent-oriented repository navigation. 
 - [Debugging logs skill](../.codex/skills/log-debugging/SKILL.md)
 - [Session replay skill](../.codex/skills/session-replay/SKILL.md)
 
+## Fourth: agent runbooks
+
+- [Backlog operations runbook](./runbooks/backlog-operations.md)
+
 ## Before editing
 
 1. Read [`AGENTS.md`](../AGENTS.md) and the [root README](../README.md).

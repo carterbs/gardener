@@ -1,0 +1,7 @@
+{"event_type":"startup.phase","payload":{"phase":"seeded","step":1},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-123"}}]}}
+{"event_type":"boot.stage.init","payload":{"status":"ok","trace":"abc"},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-123"}}]}}
+{"event_type":"worker.started","payload":{"worker":"w1"},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-123"}}]}}
+{"event_type":"run.completed","payload":{"exit_code":0,"actor":"other-run"},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-999"}}]}}
+{"event_type":"run.failed","payload":{"error":"boom"},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-123"}}]}}
+{"event_type":"boot.finalized","payload":{"status":"done"},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-123"}}]}}
+{"event_type":"run.completed","payload":{"exit_code":0},"logRecord":{"attributes":[{"key":"run.id","value":{"stringValue":"run-123"}}]}}

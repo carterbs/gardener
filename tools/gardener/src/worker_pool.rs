@@ -9,8 +9,6 @@ use crate::logging::{
     recent_worker_tool_commands, structured_fallback_line,
 };
 use crate::priority::Priority;
-use crate::replay::recorder::{emit_record, next_seq, set_recording_worker_id, timestamp_ns};
-use crate::replay::recording::{BacklogMutationRecord, RecordEntry};
 use crate::runtime::Terminal;
 use crate::runtime::{
     clear_interrupt, request_interrupt, ProductionRuntime, INTERRUPT_SENTINEL_KEY,
@@ -47,7 +45,6 @@ enum PoolResultMessage {
     },
     MergeResult {
         task_id: String,
-        worker_id: String,
         result: Result<crate::worker::WorkerRunSummary, GardenerError>,
     },
 }
@@ -259,23 +256,7 @@ pub fn run_worker_pool_fsm(
                     "title": task.title
                 }),
             );
-            emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                seq: next_seq(),
-                timestamp_ns: timestamp_ns(),
-                worker_id: worker_id.clone(),
-                operation: "claim_next".to_string(),
-                task_id: task.task_id.clone(),
-                result_ok: true,
-            }));
             let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
-            emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                seq: next_seq(),
-                timestamp_ns: timestamp_ns(),
-                worker_id: worker_id.clone(),
-                operation: "mark_in_progress".to_string(),
-                task_id: task.task_id.clone(),
-                result_ok: true,
-            }));
 
             workers[idx].state = "claimed".to_string();
             workers[idx].task_title = task.title.clone();
@@ -332,7 +313,6 @@ pub fn run_worker_pool_fsm(
                 let process_runner = runtime.process_runner.clone();
                 let worker_scope = runtime_scope.clone();
                 scope_guard.spawn(move || {
-                    set_recording_worker_id(&worker_id);
                     let result = execute_task(
                         &cfg,
                         process_runner.as_ref(),
@@ -360,18 +340,14 @@ pub fn run_worker_pool_fsm(
                 scope_guard.spawn(move || {
                     while let Ok(req) = merge_rx.recv() {
                         let task_id = req.task_id.clone();
-                        let worker_id = req.worker_id.clone();
                         let result = execute_merge_phase(
                             &req,
                             &merge_cfg,
                             merge_runner.as_ref(),
                             &merge_scope,
                         );
-                        let _ = merge_result_tx.send(PoolResultMessage::MergeResult {
-                            task_id,
-                            worker_id,
-                            result,
-                        });
+                        let _ = merge_result_tx
+                            .send(PoolResultMessage::MergeResult { task_id, result });
                     }
                 });
             }
@@ -435,16 +411,6 @@ pub fn run_worker_pool_fsm(
                                         req.pr_number as i64,
                                         &req.branch,
                                     );
-                                    emit_record(RecordEntry::BacklogMutation(
-                                        BacklogMutationRecord {
-                                            seq: next_seq(),
-                                            timestamp_ns: timestamp_ns(),
-                                            worker_id: worker_id.clone(),
-                                            operation: "mark_merge_pending".to_string(),
-                                            task_id: task_id.clone(),
-                                            result_ok: true,
-                                        },
-                                    ));
                                     // Process doing worker logs for TUI
                                     for event in &req.logs {
                                         workers[idx].state = event.state.as_str().to_string();
@@ -520,16 +486,6 @@ pub fn run_worker_pool_fsm(
                                     }
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, &worker_id)?;
-                                        emit_record(RecordEntry::BacklogMutation(
-                                            BacklogMutationRecord {
-                                                seq: next_seq(),
-                                                timestamp_ns: timestamp_ns(),
-                                                worker_id: worker_id.clone(),
-                                                operation: "mark_complete".to_string(),
-                                                task_id: task_id.clone(),
-                                                result_ok: true,
-                                            },
-                                        ));
                                         completed = completed.saturating_add(1);
                                         workers[idx].state = "complete".to_string();
                                         let completed_message = format!("completed {}", task_id);
@@ -609,16 +565,6 @@ pub fn run_worker_pool_fsm(
                                             );
                                         } else {
                                             let _ = store.release_lease(&task_id, &worker_id)?;
-                                            emit_record(RecordEntry::BacklogMutation(
-                                                BacklogMutationRecord {
-                                                    seq: next_seq(),
-                                                    timestamp_ns: timestamp_ns(),
-                                                    worker_id: worker_id.clone(),
-                                                    operation: "release_lease".to_string(),
-                                                    task_id: task_id.clone(),
-                                                    result_ok: true,
-                                                },
-                                            ));
                                         }
                                     }
                                 }
@@ -648,23 +594,7 @@ pub fn run_worker_pool_fsm(
                                         "title": task.title
                                     }),
                                 );
-                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                    seq: next_seq(),
-                                    timestamp_ns: timestamp_ns(),
-                                    worker_id: worker_id.clone(),
-                                    operation: "claim_next".to_string(),
-                                    task_id: task.task_id.clone(),
-                                    result_ok: true,
-                                }));
                                 let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
-                                emit_record(RecordEntry::BacklogMutation(BacklogMutationRecord {
-                                    seq: next_seq(),
-                                    timestamp_ns: timestamp_ns(),
-                                    worker_id: worker_id.clone(),
-                                    operation: "mark_in_progress".to_string(),
-                                    task_id: task.task_id.clone(),
-                                    result_ok: true,
-                                }));
 
                                 workers[idx].state = "claimed".to_string();
                                 workers[idx].task_title = task.title.clone();
@@ -688,7 +618,6 @@ pub fn run_worker_pool_fsm(
                                 let process_runner = runtime.process_runner.clone();
                                 let worker_scope = runtime_scope.clone();
                                 scope_guard.spawn(move || {
-                                    set_recording_worker_id(&worker_id);
                                     let result = execute_task(
                                         &cfg,
                                         process_runner.as_ref(),
@@ -723,11 +652,7 @@ pub fn run_worker_pool_fsm(
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
                     }
-                    Ok(PoolResultMessage::MergeResult {
-                        task_id,
-                        worker_id,
-                        result,
-                    }) => {
+                    Ok(PoolResultMessage::MergeResult { task_id, result }) => {
                         active_merging = active_merging.saturating_sub(1);
                         if shutdown_error.is_some() {
                             request_interrupt();
@@ -756,16 +681,6 @@ pub fn run_worker_pool_fsm(
                                 Ok(summary) => {
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
-                                        emit_record(RecordEntry::BacklogMutation(
-                                            BacklogMutationRecord {
-                                                seq: next_seq(),
-                                                timestamp_ns: timestamp_ns(),
-                                                worker_id: worker_id.clone(),
-                                                operation: "mark_complete".to_string(),
-                                                task_id: task_id.clone(),
-                                                result_ok: true,
-                                            },
-                                        ));
                                         completed = completed.saturating_add(1);
                                         workers[merge_row_idx].state = "complete".to_string();
                                         let done_msg = format!("merged {}", task_id);

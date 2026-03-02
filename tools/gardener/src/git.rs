@@ -1,9 +1,6 @@
-use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner};
-use crate::startup::ensure_quality_report_fresh_for_validation_with_context;
-use crate::types::RuntimeScope;
+use crate::runtime::{ProcessRequest, ProcessRunner};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -704,24 +701,6 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
-    pub fn run_validation_command_with_quality_guard(
-        &self,
-        command: &str,
-        file_system: &dyn FileSystem,
-        clock: &dyn Clock,
-        cfg: &AppConfig,
-        scope: &RuntimeScope,
-    ) -> Result<(), GardenerError> {
-        ensure_quality_report_fresh_for_validation_with_context(
-            file_system,
-            self.runner,
-            clock,
-            cfg,
-            scope,
-        )?;
-        self.run_validation_command(command)
-    }
-
     fn run<I, S>(&self, args: I) -> Result<crate::runtime::ProcessOutput, GardenerError>
     where
         I: IntoIterator<Item = S>,
@@ -771,11 +750,7 @@ fn is_non_fast_forward_push(stderr: &str) -> bool {
 mod tests {
     use super::GitClient;
     use super::RebaseResult;
-    use crate::config::AppConfig;
-    use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
-    use crate::types::RuntimeScope;
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tempfile::tempdir;
+    use crate::runtime::{FakeProcessRunner, ProcessOutput};
 
     #[test]
     fn push_force_with_lease_recovery_path() {
@@ -1163,123 +1138,6 @@ mod tests {
         assert!(err
             .to_string()
             .contains("post-merge validation command failed"));
-    }
-
-    #[test]
-    fn run_validation_command_with_quality_guard_blocks_stale_reports() {
-        let _tmp_dir = tempdir().expect("tmpdir");
-        let repo_root = _tmp_dir.path().to_path_buf();
-        let mut cfg = AppConfig::default();
-        cfg.quality_report.path = "quality.md".to_string();
-        cfg.quality_report.stale_after_days = 0;
-        cfg.quality_report.stale_if_head_commit_differs = false;
-        std::fs::write(
-            repo_root.join(&cfg.quality_report.path),
-            "# Quality Grades\n",
-        )
-        .expect("seed quality doc");
-        let scope = RuntimeScope {
-            process_cwd: repo_root.clone(),
-            repo_root: Some(repo_root.clone()),
-            working_dir: repo_root.clone(),
-        };
-
-        let runner = FakeProcessRunner::default();
-        let clock = ProductionClock;
-        let fs = ProductionFileSystem;
-        let err = GitClient::new(&runner, repo_root.as_path())
-            .run_validation_command_with_quality_guard(
-                "npm run validate",
-                &fs,
-                &clock,
-                &cfg,
-                &scope,
-            )
-            .expect_err("guard should block stale reports");
-        assert!(matches!(
-            err,
-            crate::errors::GardenerError::Cli(message) if message.contains("quality-grade report is stale")
-        ));
-        assert_eq!(runner.spawned().len(), 0);
-    }
-
-    #[test]
-    fn run_validation_command_with_quality_guard_allows_fresh_reports() {
-        let _tmp_dir = tempdir().expect("tmpdir");
-        let repo_root = _tmp_dir.path().to_path_buf();
-        let mut cfg = AppConfig::default();
-        cfg.quality_report.path = "quality.md".to_string();
-        cfg.quality_report.stale_after_days = 1;
-        cfg.quality_report.stale_if_head_commit_differs = false;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("now")
-            .as_secs()
-            .to_string();
-        std::fs::write(
-            repo_root.join(&cfg.quality_report.path),
-            "# Quality Grades\n",
-        )
-        .expect("seed quality doc");
-        std::fs::write(repo_root.join("quality.md.stamp"), now).expect("seed stamp");
-
-        let scope = RuntimeScope {
-            process_cwd: repo_root.clone(),
-            repo_root: Some(repo_root.clone()),
-            working_dir: repo_root.clone(),
-        };
-        let runner = FakeProcessRunner::default();
-        // git config --bool --get core.bare
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: "false\n".to_string(),
-            stderr: String::new(),
-        }));
-        // git rev-parse --is-bare-repository
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: "false\n".to_string(),
-            stderr: String::new(),
-        }));
-        // sh -lc npm run validate
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        }));
-        let clock = ProductionClock;
-        let fs = ProductionFileSystem;
-        GitClient::new(&runner, repo_root.as_path())
-            .run_validation_command_with_quality_guard(
-                "npm run validate",
-                &fs,
-                &clock,
-                &cfg,
-                &scope,
-            )
-            .expect("validation should run");
-        let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 3);
-        assert_eq!(spawned[0].program, "git");
-        assert_eq!(
-            spawned[0].args,
-            vec![
-                "config".to_string(),
-                "--bool".to_string(),
-                "--get".to_string(),
-                "core.bare".to_string()
-            ]
-        );
-        assert_eq!(spawned[1].program, "git");
-        assert_eq!(
-            spawned[1].args,
-            vec!["rev-parse".to_string(), "--is-bare-repository".to_string()]
-        );
-        assert_eq!(spawned[2].program, "sh");
-        assert_eq!(
-            spawned[2].args,
-            vec!["-lc".to_string(), "npm run validate".to_string()]
-        );
     }
 
     #[test]

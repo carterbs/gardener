@@ -26,6 +26,14 @@ fn validation_pipeline_docs_match_live_validation_hook() {
         "README validation pipeline should list the binary-blob linter"
     );
     assert!(
+        readme.contains("scripts/run-script-lint-fixture-tests.sh"),
+        "README validation pipeline should list fixture-script lint command"
+    );
+    assert!(
+        workflow.contains("scripts/run-script-lint-fixture-tests.sh"),
+        "workflow doc should include fixture-script lint command"
+    );
+    assert!(
         readme.contains("./.githooks/pre-commit"),
         "README should document how to run pre-commit remediation directly"
     );

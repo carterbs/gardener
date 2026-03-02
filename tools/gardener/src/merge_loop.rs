@@ -283,7 +283,63 @@ pub fn run_merge_loop(ctx: &mut MergeLoopContext<'_>) -> Result<MergeLoopOutcome
                 }
                 continue;
             }
-            // Fallback: still Blocked after timeout or other unexpected state → try merge anyway
+            // Blocked → required checks failed; fetch logs and remediate if actionable
+            (_, MergeStateStatus::Blocked) => {
+                step(
+                    ctx,
+                    "REMEDIATE",
+                    "PR is blocked, checking for failed required checks",
+                );
+                let failed_checks = ctx.gh.fetch_failed_checks(pr).unwrap_or_default();
+                if failed_checks.is_empty() {
+                    // No failed checks — blocked by policy (reviews, etc.), not actionable
+                    step(
+                        ctx,
+                        "REMEDIATE",
+                        "no failed checks found; blocked by branch protection policy",
+                    );
+                    return Ok(MergeLoopOutcome::Failed {
+                        reason:
+                            "PR is blocked by branch protection rules (no failed CI checks found)"
+                                .to_string(),
+                    });
+                }
+                let evidence: Vec<String> = failed_checks
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "## CI check: {}\nLink: {}\n\n```\n{}\n```",
+                            c.name, c.link, c.log_snippet
+                        )
+                    })
+                    .collect();
+                ctx.learning_loop.ingest_failure(
+                    WorkerState::Merging,
+                    "required CI checks failed (Blocked)",
+                    evidence,
+                );
+                step(ctx, "REMEDIATE", "running agent CI failure remediation");
+                let ci_tpl = ci_failure_remediation_template();
+                let ci_result = run_agent_turn(agent_turn_from_ctx(ctx, Some(&ci_tpl)))?;
+                if ci_result.terminal == AgentTerminal::Failure {
+                    let reason = ci_result
+                        .payload
+                        .get("reason")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("agent CI remediation failed")
+                        .to_string();
+                    step(
+                        ctx,
+                        "REMEDIATE",
+                        &format!("agent CI remediation failed: {reason}"),
+                    );
+                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                        return Ok(MergeLoopOutcome::Failed { reason });
+                    }
+                }
+                continue;
+            }
+            // Fallback: unexpected state → try merge anyway
             _ => {
                 step(
                     ctx,

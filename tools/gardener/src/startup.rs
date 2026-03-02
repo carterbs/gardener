@@ -325,13 +325,6 @@ where
             .validation_command
             .clone()
             .unwrap_or_else(|| cfg.validation.command.clone());
-        ensure_quality_report_fresh_for_validation_with_context(
-            runtime.file_system.as_ref(),
-            runtime.process_runner.as_ref(),
-            runtime.clock.as_ref(),
-            cfg,
-            scope,
-        )?;
         append_run_log(
             "info",
             "startup.validation.running",

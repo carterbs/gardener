@@ -16,7 +16,7 @@ Usage:
     --kind feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision (default: feature)
     --source manual    (default: manual)
     --id TASK_ID       Optional custom task_id (default: manual:<scope>:auto-<unix_ms>)
-    --db PATH          Optional DB path (default: ~/.gardener/backlog.sqlite)
+    --db PATH          Optional DB path (default: .cache/gardener/backlog.sqlite)
   
   scripts/backlog-db.sh runbook
     Print the backlog operations runbook for agents.
@@ -29,10 +29,7 @@ Environment:
 USAGE
 }
 
-env_db_path="${GARDENER_DB_PATH:-${HOME:+$HOME/.gardener/backlog.sqlite}}"
-if [ -z "$env_db_path" ]; then
-  env_db_path=".cache/gardener/backlog.sqlite"
-fi
+env_db_path="${GARDENER_DB_PATH:-.cache/gardener/backlog.sqlite}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runbook_path="${script_dir}/../docs/runbooks/backlog-operations.md"
 
@@ -144,6 +141,33 @@ case "$cmd" in
       usage
       exit 1
     fi
+
+    case "$priority" in
+      P0|P1|P2)
+        ;;
+      *)
+        echo "invalid --priority: $priority (expected one of: P0|P1|P2)" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$status" in
+      ready|leased|in_progress|merge_pending|complete|failed|unresolved)
+        ;;
+      *)
+        echo "invalid --status: $status (expected one of: ready|leased|in_progress|merge_pending|complete|failed|unresolved)" >&2
+        exit 1
+        ;;
+    esac
+
+    case "$kind" in
+      feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision)
+        ;;
+      *)
+        echo "invalid --kind: $kind (expected one of: feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision)" >&2
+        exit 1
+        ;;
+    esac
 
     now=$(date +%s000)
     if [[ -z "$task_id" ]]; then

@@ -108,6 +108,152 @@ struct ReviewArtifact {
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
 
+#[derive(Debug, Clone)]
+pub(crate) enum WorkerStreamEvent {
+    ToolCommand {
+        task_id: String,
+        command: String,
+    },
+    StateChanged {
+        task_id: String,
+        state: String,
+        details: String,
+    },
+}
+
+const PROMPT_LINE_COMMAND_LIMIT: usize = 220;
+
+fn emit_adapter_tool_event(
+    task_id: &str,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
+    event: &crate::protocol::AgentEvent,
+) {
+    let Some(on_event) = on_event else {
+        return;
+    };
+
+    let raw_type = event.raw_type.as_str();
+    let Some(command) = format_adapter_event_command(raw_type, &event.payload) else {
+        return;
+    };
+    on_event(WorkerStreamEvent::ToolCommand {
+        task_id: task_id.to_string(),
+        command: truncate_utf8(&command, PROMPT_LINE_COMMAND_LIMIT),
+    });
+}
+
+fn extract_payload_command(payload: &serde_json::Value) -> Option<String> {
+    let extract_payload_command = |value: &serde_json::Value| {
+        if let Some(inputs) = value.get("inputs").or_else(|| value.get("input")) {
+            if let Some(command) = inputs.get("command").or_else(|| inputs.get("value")) {
+                return command.as_str().map(|command| command.replace('\n', "\\n"));
+            }
+        }
+        None
+    };
+    payload
+        .get("payload")
+        .and_then(extract_payload_command)
+        .or_else(|| {
+            payload
+                .get("message")
+                .and_then(|value| value.as_str())
+                .map(|message| message.replace('\n', "\\n"))
+        })
+        .or_else(|| {
+            payload
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(|text| text.replace('\n', "\\n"))
+        })
+        .or_else(|| {
+            payload
+                .get("content")
+                .and_then(|value| value.as_str())
+                .map(|content| content.replace('\n', "\\n"))
+        })
+}
+
+fn format_adapter_event_command(event_type: &str, payload: &serde_json::Value) -> Option<String> {
+    let message = extract_payload_command(payload)?;
+    let kind = payload
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let raw_type = payload
+        .get("raw_type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !kind.is_empty() {
+        Some(format!("{kind}: {message}"))
+    } else if !raw_type.is_empty() {
+        Some(format!("{raw_type}: {message}"))
+    } else if event_type == "adapter.call" {
+        Some(format!("call: {message}"))
+    } else {
+        Some(message)
+    }
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut cutoff = max_bytes.saturating_sub(3);
+    while !value.is_char_boundary(cutoff) {
+        cutoff = cutoff.saturating_sub(1);
+    }
+    format!("{}...", &value[..cutoff])
+}
+
+fn worker_state_details(state: &str, payload: Option<&serde_json::Value>) -> String {
+    let Some(payload) = payload else {
+        return String::new();
+    };
+    if state.is_empty() {
+        return String::new();
+    }
+    let mut details = Vec::new();
+    let mut push_detail = |name: &'static str, value: Option<&serde_json::Value>| {
+        let Some(value) = value else {
+            return;
+        };
+        if name == "next_check_in_secs" {
+            if let Some(seconds) = value.as_u64() {
+                details.push(format!("next_check_in={seconds}s"));
+                return;
+            }
+        }
+        let value = match value {
+            serde_json::Value::String(s) if !s.is_empty() => s.to_string(),
+            serde_json::Value::Null => String::new(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| String::new()),
+        };
+        if !value.is_empty() {
+            details.push(format!("{name}={value}"));
+        }
+    };
+    push_detail("attempt", payload.get("attempt"));
+    push_detail("pr_number", payload.get("pr_number"));
+    push_detail("block_reason", payload.get("block_reason"));
+    push_detail("mergeable", payload.get("mergeable"));
+    push_detail("merge_state_status", payload.get("merge_state_status"));
+    push_detail("next_check_in_secs", payload.get("next_check_in_secs"));
+    if details.is_empty() {
+        return String::new();
+    }
+    if state == "merge_polling" {
+        return details.join(", ");
+    }
+    if state == "ci_failure_remediation" && !state.is_empty() {
+        details.push(format!("state={state}"));
+        return details.join(", ");
+    }
+    details.join(", ")
+}
+
 fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
     let raw = payload
         .get("reason")
@@ -123,8 +269,13 @@ fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
     Some(raw.to_string())
 }
 
-fn emit_worker_activity_state(worker_id: &str, task_id: &str, state: WorkerActivityState) {
-    emit_worker_activity_state_with(worker_id, task_id, state, json!({}));
+fn emit_worker_activity_state(
+    worker_id: &str,
+    task_id: &str,
+    state: WorkerActivityState,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
+) {
+    emit_worker_activity_state_with(worker_id, task_id, state, json!({}), on_event);
 }
 
 fn emit_worker_activity_state_with(
@@ -132,6 +283,7 @@ fn emit_worker_activity_state_with(
     task_id: &str,
     state: WorkerActivityState,
     details: serde_json::Value,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
 ) {
     let mut payload = json!({
         "worker_id": worker_id,
@@ -139,11 +291,19 @@ fn emit_worker_activity_state_with(
         "state": state.as_str()
     });
     if let (serde_json::Value::Object(base), serde_json::Value::Object(extra)) =
-        (&mut payload, details)
+        (&mut payload, &details)
     {
         for (key, value) in extra {
-            base.insert(key, value);
+            base.insert(key.clone(), value.clone());
         }
+    }
+    let details_str = worker_state_details(state.as_str(), Some(&details));
+    if let Some(on_event) = on_event {
+        on_event(WorkerStreamEvent::StateChanged {
+            task_id: task_id.to_string(),
+            state: state.as_str().to_string(),
+            details: details_str,
+        });
     }
     append_run_log("info", "worker.activity.state_changed", payload);
 }
@@ -167,7 +327,7 @@ fn merge_polling_block_reason(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn execute_task(
+pub(crate) fn execute_task(
     cfg: &AppConfig,
     process_runner: &dyn ProcessRunner,
     scope: &RuntimeScope,
@@ -176,6 +336,7 @@ pub fn execute_task(
     task_id: &str,
     task_summary: &str,
     attempt_count: i64,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
 ) -> Result<WorkerOutcome, GardenerError> {
     append_run_log(
         "debug",
@@ -200,6 +361,7 @@ pub fn execute_task(
         task_id,
         task_summary,
         attempt_count,
+        on_event,
     )
 }
 
@@ -213,8 +375,12 @@ fn execute_task_live(
     task_id: &str,
     task_summary: &str,
     attempt_count: i64,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
 ) -> Result<WorkerOutcome, GardenerError> {
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Claimed);
+    let on_adapter_event = |agent_event: &crate::protocol::AgentEvent| {
+        emit_adapter_tool_event(task_id, on_event, agent_event);
+    };
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Claimed, on_event);
     append_run_log(
         "info",
         "worker.task.started",
@@ -224,7 +390,7 @@ fn execute_task_live(
             "task_summary": task_summary
         }),
     );
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Starting);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Starting, on_event);
     let registry = PromptRegistry::v1().with_retry_rebase(attempt_count);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
@@ -235,9 +401,19 @@ fn execute_task_live(
     let worktree_path = worktree_path_for(repo_root, task_id);
     let branch = worktree_branch_for(task_id);
     let worktree_client = WorktreeClient::new(process_runner, repo_root);
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::WorktreePreparing);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::WorktreePreparing,
+        on_event,
+    );
     worktree_client.create_or_resume(&worktree_path, &branch)?;
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::WorktreeReady);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::WorktreeReady,
+        on_event,
+    );
 
     if attempt_count > 1 {
         append_run_log(
@@ -252,7 +428,12 @@ fn execute_task_live(
         );
     }
 
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Understand);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::Understand,
+        on_event,
+    );
     let understand_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
@@ -266,11 +447,11 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: None,
-        on_event: None,
+        on_event: Some(&on_adapter_event),
     })?;
     logs.push(log_event_from(&understand_result, WorkerState::Understand));
     if understand_result.terminal == AgentTerminal::Failure {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
         let failure_reason = extract_failure_reason(&understand_result.payload);
         append_run_log(
             "error",
@@ -305,7 +486,7 @@ fn execute_task_live(
     fsm.apply_understand(&understand, attempt_count > 1)?;
 
     if fsm.state == WorkerState::Planning {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Planning);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Planning, on_event);
         let planning_result = run_agent_turn(AgentTurnInput {
             cfg,
             process_runner,
@@ -319,11 +500,11 @@ fn execute_task_live(
             task_summary,
             attempt_count,
             prompt_override: None,
-            on_event: None,
+            on_event: Some(&on_adapter_event),
         })?;
         logs.push(log_event_from(&planning_result, WorkerState::Planning));
         if planning_result.terminal == AgentTerminal::Failure {
-            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
             let failure_reason = extract_failure_reason(&planning_result.payload);
             append_run_log(
                 "error",
@@ -348,7 +529,7 @@ fn execute_task_live(
     let git = GitClient::new(process_runner, &worktree_path);
     let pre_doing_sha = git.head_sha()?.unwrap_or_default();
 
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing, on_event);
     let doing_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
@@ -362,11 +543,11 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: None,
-        on_event: None,
+        on_event: Some(&on_adapter_event),
     })?;
     logs.push(log_event_from(&doing_result, WorkerState::Doing));
     if doing_result.terminal == AgentTerminal::Failure {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
         let failure_reason = extract_failure_reason(&doing_result.payload);
         append_run_log(
             "error",
@@ -404,7 +585,12 @@ fn execute_task_live(
                 );
                 DoingOutput { summary: subject }
             } else {
-                emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                emit_worker_activity_state(
+                    worker_id,
+                    task_id,
+                    WorkerActivityState::Failed,
+                    on_event,
+                );
                 return Ok(WorkerOutcome::Completed(WorkerRunSummary {
                     worker_id: identity.worker_id,
                     session_id: identity.session.session_id,
@@ -419,7 +605,7 @@ fn execute_task_live(
     let _ = doing_output;
     fsm.on_doing_turn_completed()?;
     if fsm.state == WorkerState::Parked {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
         append_run_log(
             "info",
             "worker.task.parked",
@@ -439,12 +625,12 @@ fn execute_task_live(
     }
 
     // Safety-net: no-op if agent already committed (clean worktree)
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Commit);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Commit, on_event);
     git.commit_all(&fallback_commit_message(task_summary))?;
 
     // --- Deterministic Gitting ---
     fsm.transition(WorkerState::Gitting)?;
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Gitting);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Gitting, on_event);
     append_run_log(
         "info",
         "worker.gitting.deterministic.started",
@@ -472,7 +658,12 @@ fn execute_task_live(
             }
             Err(push_err) => {
                 if attempt + 1 >= MAX_GITTING_REMEDIATION {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     append_run_log(
                         "error",
                         "worker.gitting.deterministic.exhausted",
@@ -521,6 +712,7 @@ fn execute_task_live(
                     worker_id,
                     task_id,
                     WorkerActivityState::GittingRemediation,
+                    on_event,
                 );
                 let remediation_result = run_agent_turn(AgentTurnInput {
                     cfg,
@@ -535,11 +727,16 @@ fn execute_task_live(
                     task_summary,
                     attempt_count,
                     prompt_override: None,
-                    on_event: None,
+                    on_event: Some(&on_adapter_event),
                 })?;
                 logs.push(log_event_from(&remediation_result, WorkerState::Gitting));
                 if remediation_result.terminal == AgentTerminal::Failure {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     let failure_reason = extract_failure_reason(&remediation_result.payload);
                     return Ok(WorkerOutcome::Completed(WorkerRunSummary {
                         worker_id: identity.worker_id,
@@ -557,7 +754,12 @@ fn execute_task_live(
     }
 
     let gh = GhClient::new(process_runner, &worktree_path);
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PrCreating);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::PrCreating,
+        on_event,
+    );
     let pr_tpl = pr_creation_template();
     let pr_result = run_agent_turn(AgentTurnInput {
         cfg,
@@ -572,7 +774,7 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: Some(&pr_tpl),
-        on_event: None,
+        on_event: Some(&on_adapter_event),
     })?;
     if pr_result.terminal == AgentTerminal::Failure {
         return Err(GardenerError::Process(
@@ -593,7 +795,7 @@ fn execute_task_live(
 
     // --- Reviewing ---
     fsm.transition(WorkerState::Reviewing)?;
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Reviewing);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Reviewing, on_event);
     let reviewing_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
@@ -607,11 +809,11 @@ fn execute_task_live(
         task_summary,
         attempt_count,
         prompt_override: None,
-        on_event: None,
+        on_event: Some(&on_adapter_event),
     })?;
     logs.push(log_event_from(&reviewing_result, WorkerState::Reviewing));
     if reviewing_result.terminal == AgentTerminal::Failure {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
         let failure_reason = extract_failure_reason(&reviewing_result.payload);
         append_run_log(
             "error",
@@ -647,7 +849,7 @@ fn execute_task_live(
             }),
         );
         if fsm.review_loops >= MAX_REVIEW_LOOPS {
-            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked);
+            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
             append_run_log(
                 "warn",
                 "worker.review.loop_cap_reached",
@@ -669,7 +871,7 @@ fn execute_task_live(
         }
         fsm.on_review_loop_back()?;
         fsm.transition(WorkerState::Doing)?;
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing, on_event);
     } else {
         append_run_log(
             "info",
@@ -683,7 +885,7 @@ fn execute_task_live(
             }),
         );
         fsm.transition(WorkerState::Merging)?;
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging, on_event);
     }
 
     // --- Hand off to merge worker ---
@@ -824,18 +1026,22 @@ fn collect_handoff_evidence_bundle(
 /// Execute the merge-and-teardown phase for a task that passed review.
 /// Called by the merge worker thread — no mutex needed since the merge worker
 /// is single-threaded by construction.
-pub fn execute_merge_phase(
+pub(crate) fn execute_merge_phase(
     req: &MergeRequest,
     cfg: &AppConfig,
     process_runner: &dyn ProcessRunner,
     runtime_file_system: &dyn FileSystem,
     runtime_clock: &dyn Clock,
     scope: &RuntimeScope,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
 ) -> Result<WorkerRunSummary, GardenerError> {
     let worker_id = &req.worker_id;
     let task_id = &req.task_id;
+    let on_adapter_event = |agent_event: &crate::protocol::AgentEvent| {
+        emit_adapter_tool_event(task_id, on_event, agent_event);
+    };
 
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging, on_event);
 
     let factory = AdapterFactory::with_defaults();
     let registry = PromptRegistry::v1();
@@ -901,6 +1107,7 @@ pub fn execute_merge_phase(
             task_id,
             WorkerActivityState::MergePolling,
             poll_details,
+            on_event,
         );
 
         append_run_log(
@@ -926,7 +1133,12 @@ pub fn execute_merge_phase(
                     cfg,
                     scope,
                 ) {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     append_run_log(
                         "error",
                         "worker.merging.pre_validation_failed",
@@ -971,6 +1183,7 @@ pub fn execute_merge_phase(
                                 worker_id,
                                 task_id,
                                 WorkerActivityState::Failed,
+                                on_event,
                             );
                             return Ok(WorkerRunSummary {
                                 worker_id: req.worker_id.clone(),
@@ -994,6 +1207,7 @@ pub fn execute_merge_phase(
                     task_id,
                     WorkerActivityState::MergeFromMain,
                     json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    on_event,
                 );
                 if let Err(e) = worker_merge_main_and_push(
                     &gh,
@@ -1012,6 +1226,7 @@ pub fn execute_merge_phase(
                     worker_id,
                     task_id,
                     attempt,
+                    on_event,
                 ) {
                     // Git-level merge failed — let the agent fix it
                     emit_worker_activity_state_with(
@@ -1019,6 +1234,7 @@ pub fn execute_merge_phase(
                         task_id,
                         WorkerActivityState::MergeRemediation,
                         json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                        on_event,
                     );
                     learning_loop.ingest_failure(
                         WorkerState::Merging,
@@ -1038,13 +1254,18 @@ pub fn execute_merge_phase(
                         task_summary: &req.task_summary,
                         attempt_count: req.attempt_count,
                         prompt_override: None,
-                        on_event: None,
+                        on_event: Some(&on_adapter_event),
                     })?;
                     logs.push(log_event_from(&remediation_result, WorkerState::Merging));
                     if remediation_result.terminal == AgentTerminal::Failure
                         && attempt + 1 >= MAX_MERGE_REMEDIATION
                     {
-                        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Failed,
+                            on_event,
+                        );
                         let failure_reason = extract_failure_reason(&remediation_result.payload);
                         return Ok(WorkerRunSummary {
                             worker_id: req.worker_id.clone(),
@@ -1065,6 +1286,7 @@ pub fn execute_merge_phase(
                     task_id,
                     WorkerActivityState::MergeFromMain,
                     json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    on_event,
                 );
                 if let Err(e) = worker_merge_main_and_push(
                     &gh,
@@ -1083,6 +1305,7 @@ pub fn execute_merge_phase(
                     worker_id,
                     task_id,
                     attempt,
+                    on_event,
                 ) {
                     // Git-level merge failed — let the agent fix it
                     emit_worker_activity_state_with(
@@ -1090,6 +1313,7 @@ pub fn execute_merge_phase(
                         task_id,
                         WorkerActivityState::MergeRemediation,
                         json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                        on_event,
                     );
                     learning_loop.ingest_failure(
                         WorkerState::Merging,
@@ -1109,13 +1333,18 @@ pub fn execute_merge_phase(
                         task_summary: &req.task_summary,
                         attempt_count: req.attempt_count,
                         prompt_override: None,
-                        on_event: None,
+                        on_event: Some(&on_adapter_event),
                     })?;
                     logs.push(log_event_from(&remediation_result, WorkerState::Merging));
                     if remediation_result.terminal == AgentTerminal::Failure
                         && attempt + 1 >= MAX_MERGE_REMEDIATION
                     {
-                        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Failed,
+                            on_event,
+                        );
                         let failure_reason = extract_failure_reason(&remediation_result.payload);
                         return Ok(WorkerRunSummary {
                             worker_id: req.worker_id.clone(),
@@ -1136,6 +1365,7 @@ pub fn execute_merge_phase(
                     task_id,
                     WorkerActivityState::CiFailureRemediation,
                     json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    on_event,
                 );
                 let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
                 let evidence: Vec<String> = failed_checks
@@ -1162,13 +1392,18 @@ pub fn execute_merge_phase(
                     task_summary: &req.task_summary,
                     attempt_count: req.attempt_count,
                     prompt_override: Some(&ci_tpl),
-                    on_event: None,
+                    on_event: Some(&on_adapter_event),
                 })?;
                 logs.push(log_event_from(&ci_result, WorkerState::Merging));
                 if ci_result.terminal == AgentTerminal::Failure
                     && attempt + 1 >= MAX_MERGE_REMEDIATION
                 {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     let failure_reason = extract_failure_reason(&ci_result.payload);
                     return Ok(WorkerRunSummary {
                         worker_id: req.worker_id.clone(),
@@ -1196,7 +1431,12 @@ pub fn execute_merge_phase(
                 );
                 let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
                 if failed_checks.is_empty() {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     return Ok(WorkerRunSummary {
                         worker_id: req.worker_id.clone(),
                         session_id: req.session_id.clone(),
@@ -1214,6 +1454,7 @@ pub fn execute_merge_phase(
                     task_id,
                     WorkerActivityState::CiFailureRemediation,
                     json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    on_event,
                 );
                 let evidence: Vec<String> = failed_checks
                     .iter()
@@ -1243,13 +1484,18 @@ pub fn execute_merge_phase(
                     task_summary: &req.task_summary,
                     attempt_count: req.attempt_count,
                     prompt_override: Some(&ci_tpl),
-                    on_event: None,
+                    on_event: Some(&on_adapter_event),
                 })?;
                 logs.push(log_event_from(&ci_result, WorkerState::Merging));
                 if ci_result.terminal == AgentTerminal::Failure
                     && attempt + 1 >= MAX_MERGE_REMEDIATION
                 {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     let failure_reason = extract_failure_reason(&ci_result.payload);
                     return Ok(WorkerRunSummary {
                         worker_id: req.worker_id.clone(),
@@ -1282,7 +1528,12 @@ pub fn execute_merge_phase(
                     cfg,
                     scope,
                 ) {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     append_run_log(
                         "error",
                         "worker.merging.pre_validation_failed",
@@ -1317,6 +1568,7 @@ pub fn execute_merge_phase(
                                 worker_id,
                                 task_id,
                                 WorkerActivityState::Failed,
+                                on_event,
                             );
                             return Ok(WorkerRunSummary {
                                 worker_id: req.worker_id.clone(),
@@ -1337,7 +1589,12 @@ pub fn execute_merge_phase(
     }
 
     // --- Post-merge validation ---
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::PostMergeValidation,
+        on_event,
+    );
     if let Err(err) = run_repo_validation_with_quality_guard(
         &repo_root_git,
         runtime_file_system,
@@ -1345,7 +1602,7 @@ pub fn execute_merge_phase(
         cfg,
         scope,
     ) {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
         append_run_log(
             "error",
             "worker.merging.post_validation_failed",
@@ -1434,7 +1691,7 @@ pub fn execute_merge_phase(
         }
     }
 
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Teardown);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Teardown, on_event);
     let teardown = teardown_after_completion(
         &worktree_client,
         &req.worktree_path,
@@ -1453,7 +1710,7 @@ pub fn execute_merge_phase(
             "main_updated": teardown.main_updated
         }),
     );
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Complete);
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Complete, on_event);
 
     Ok(WorkerRunSummary {
         worker_id: req.worker_id.clone(),
@@ -1623,8 +1880,9 @@ fn worker_merge_main_and_push(
     pr: u64,
     branch: &str,
     worker_id: &str,
-    _task_id: &str,
+    task_id: &str,
     attempt: u32,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
 ) -> Result<(), GardenerError> {
     if git.abort_merge_if_in_progress()? {
         append_run_log(
@@ -1653,6 +1911,9 @@ fn worker_merge_main_and_push(
             Ok(())
         }
         Ok(RebaseResult::Conflict { stderr }) => {
+            let on_adapter_event = |agent_event: &crate::protocol::AgentEvent| {
+                emit_adapter_tool_event(task_id, on_event, agent_event);
+            };
             append_run_log(
                 "warn",
                 "worker.merging.merge_from_main.conflict",
@@ -1682,7 +1943,7 @@ fn worker_merge_main_and_push(
                 task_summary: &req.task_summary,
                 attempt_count: req.attempt_count,
                 prompt_override: Some(&conflict_tpl),
-                on_event: None,
+                on_event: Some(&on_adapter_event),
             })?;
             logs.push(log_event_from(&conflict_result, WorkerState::Merging));
             if conflict_result.terminal != AgentTerminal::Failure {
@@ -1943,6 +2204,7 @@ mod tests {
             "task-1",
             "feature: add prompt packet",
             1,
+            None,
         )
         .expect("ok");
         let summary = match outcome {
@@ -2135,7 +2397,7 @@ mod tests {
 
         let fs = ProductionFileSystem;
         let clock = ProductionClock;
-        let summary = super::execute_merge_phase(&req, &cfg, &runner, &fs, &clock, &scope)
+        let summary = super::execute_merge_phase(&req, &cfg, &runner, &fs, &clock, &scope, None)
             .expect("merge phase should return summary");
         assert_eq!(summary.final_state, WorkerState::Failed);
         assert!(

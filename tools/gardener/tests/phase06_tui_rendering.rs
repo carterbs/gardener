@@ -37,15 +37,16 @@ fn empty_backlog() -> BacklogView {
 
 fn worker_names_in_frame(frame: &str) -> usize {
     const WORKER_NAMES: &[&str] = &[
-        "Lawn Mower",
-        "Leaf Blower",
-        "Hedge Trimmer",
-        "Edger",
-        "String Trimmer",
-        "Wheelbarrow",
-        "Seed Spreader",
-        "Pruning Shears",
-        "Sprinkler",
+        "Worker 1",
+        "Worker 2",
+        "Worker 3",
+        "Worker 4",
+        "Worker 5",
+        "Worker 6",
+        "Worker 7",
+        "Worker 8",
+        "Worker 9",
+        "Worker 10",
     ];
     frame
         .lines()
@@ -144,15 +145,15 @@ fn dashboard_keeps_three_workers_visible_in_short_viewports_without_backlog() {
         19,
     );
     assert!(
-        frame.contains("Lawn Mower"),
+        frame.contains("Worker 1"),
         "first worker card should be visible"
     );
     assert!(
-        frame.contains("Leaf Blower"),
+        frame.contains("Worker 2"),
         "second worker card should be visible"
     );
     assert!(
-        frame.contains("Hedge Trimmer"),
+        frame.contains("Worker 3"),
         "third worker card should be visible"
     );
 }
@@ -185,15 +186,15 @@ fn dashboard_keeps_three_workers_visible_with_backlog() {
         24,
     );
     assert!(
-        frame.contains("Lawn Mower"),
+        frame.contains("Worker 1"),
         "first worker card should be visible"
     );
     assert!(
-        frame.contains("Leaf Blower"),
+        frame.contains("Worker 2"),
         "second worker card should be visible"
     );
     assert!(
-        frame.contains("Hedge Trimmer"),
+        frame.contains("Worker 3"),
         "third worker card should be visible"
     );
 }

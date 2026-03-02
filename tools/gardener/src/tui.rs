@@ -84,18 +84,6 @@ const TRIAGE_STAGE_LABELS: [&str; 4] = [
     "Seed prioritized backlog",
 ];
 const WIZARD_STEP_LABELS: [&str; 4] = ["Parallelism", "Validation", "Docs", "Notes"];
-const WORKER_EQUIPMENT_NAMES: [&str; 9] = [
-    "Lawn Mower",
-    "Leaf Blower",
-    "Hedge Trimmer",
-    "Edger",
-    "String Trimmer",
-    "Wheelbarrow",
-    "Seed Spreader",
-    "Pruning Shears",
-    "Sprinkler",
-];
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
     Triage,
@@ -751,18 +739,8 @@ fn run_context_summary() -> (String, String) {
     (truncate_right(&run_id, 28), run_log_path)
 }
 
-fn equipment_name_for_worker(index: usize, worker_id: &str) -> String {
-    if worker_id.is_empty() {
-        return WORKER_EQUIPMENT_NAMES[index % WORKER_EQUIPMENT_NAMES.len()].to_string();
-    }
-    if index < WORKER_EQUIPMENT_NAMES.len() {
-        return WORKER_EQUIPMENT_NAMES[index].to_string();
-    }
-    let mut acc = 0u64;
-    for ch in worker_id.bytes() {
-        acc = acc.wrapping_mul(31).wrapping_add(ch as u64);
-    }
-    WORKER_EQUIPMENT_NAMES[(acc as usize) % WORKER_EQUIPMENT_NAMES.len()].to_string()
+fn equipment_name_for_worker(index: usize, _worker_id: &str) -> String {
+    format!("Worker {}", index + 1)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2878,21 +2856,21 @@ mod tests {
         let initial = render_dashboard(&workers, &stats, &backlog, 80, 24);
         assert!(!initial.contains("Workers:"));
         assert!(!initial.contains("Workers ("));
-        assert!(initial.contains("> Lawn Mower"));
-        assert!(!initial.contains("w9 "));
+        assert!(initial.contains("> Worker 1"));
+        assert!(!initial.contains("Worker 9"));
 
         for _ in 0..10 {
             let _ = scroll_workers_down();
         }
         let scrolled = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(!scrolled.contains("Lawn Mower"));
+        assert!(!scrolled.contains("Worker 1"));
         assert!(!scroll_workers_down());
 
         for _ in 0..10 {
             let _ = scroll_workers_up();
         }
         let reset = render_dashboard(&workers, &stats, &backlog, 80, 24);
-        assert!(reset.contains("> Lawn Mower"));
+        assert!(reset.contains("> Worker 1"));
         assert!(!scroll_workers_up());
     }
 }

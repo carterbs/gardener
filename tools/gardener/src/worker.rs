@@ -1181,7 +1181,88 @@ pub fn execute_merge_phase(
                 }
                 continue;
             }
-            // Fallback: still Blocked after timeout or other unexpected state → try merge anyway
+            // Blocked → required checks failed; fetch logs and remediate if actionable
+            (_, MergeStateStatus::Blocked) => {
+                append_run_log(
+                    "warn",
+                    "worker.merging.fallback_attempt",
+                    json!({
+                        "worker_id": worker_id,
+                        "pr_number": pr,
+                        "attempt": attempt + 1,
+                        "mergeable": format!("{:?}", status.mergeable),
+                        "merge_state_status": format!("{:?}", status.merge_state_status)
+                    }),
+                );
+                let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
+                if failed_checks.is_empty() {
+                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    return Ok(WorkerRunSummary {
+                        worker_id: req.worker_id.clone(),
+                        session_id: req.session_id.clone(),
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason: Some(
+                            "PR is blocked by branch protection rules (no failed CI checks found)"
+                                .to_string(),
+                        ),
+                    });
+                }
+                emit_worker_activity_state_with(
+                    worker_id,
+                    task_id,
+                    WorkerActivityState::CiFailureRemediation,
+                    json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                );
+                let evidence: Vec<String> = failed_checks
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "## CI check: {}\nLink: {}\n\n```\n{}\n```",
+                            c.name, c.link, c.log_snippet
+                        )
+                    })
+                    .collect();
+                learning_loop.ingest_failure(
+                    WorkerState::Merging,
+                    "required CI checks failed (Blocked)",
+                    evidence,
+                );
+                let ci_tpl = ci_failure_remediation_template();
+                let ci_result = run_agent_turn(AgentTurnInput {
+                    cfg,
+                    process_runner,
+                    scope,
+                    worktree_path: &req.worktree_path,
+                    factory: &factory,
+                    registry: &registry,
+                    learning_loop: &learning_loop,
+                    identity: &identity,
+                    state: WorkerState::Merging,
+                    task_summary: &req.task_summary,
+                    attempt_count: req.attempt_count,
+                    prompt_override: Some(&ci_tpl),
+                    on_event: None,
+                })?;
+                logs.push(log_event_from(&ci_result, WorkerState::Merging));
+                if ci_result.terminal == AgentTerminal::Failure
+                    && attempt + 1 >= MAX_MERGE_REMEDIATION
+                {
+                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    let failure_reason = extract_failure_reason(&ci_result.payload);
+                    return Ok(WorkerRunSummary {
+                        worker_id: req.worker_id.clone(),
+                        session_id: req.session_id.clone(),
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason,
+                    });
+                }
+                continue;
+            }
+            // Fallback: unexpected state → try merge anyway
             _ => {
                 append_run_log(
                     "warn",

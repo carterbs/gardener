@@ -219,12 +219,13 @@ fn set_core_bare_false(
 if [ "$current" = "false" ]; then \
   exit 0; \
 fi; \
-if git -C "$0" config --worktree core.bare false; then \
-  exit 0; \
-fi; \
+git -C "$0" config --local extensions.worktreeConfig true; \
 for attempt in 1 2 3 4 5; do \
-  if git -C "$0" config --local core.bare false; then \
-    exit 0; \
+  if git -C "$0" config --worktree core.bare false; then \
+    current="$(git -C "$0" config --bool --get core.bare 2>/dev/null || true)"; \
+    if [ "$current" = "false" ]; then \
+      exit 0; \
+    fi; \
   fi; \
   sleep 0.1; \
 done; \

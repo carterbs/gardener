@@ -1959,8 +1959,8 @@ fn normalize_worker_state(state: &str) -> &str {
         | "merge_remediation"
         | "post_merge_validation"
         | "teardown" => "merging",
-        "doing" | "gitting" | "reviewing" | "merging" | "complete" | "failed" | "unresolved"
-        | "idle" | "parked" => state,
+        "understand" | "planning" | "doing" | "gitting" | "reviewing" | "merging" | "complete"
+        | "failed" | "unresolved" | "idle" | "parked" => state,
         _ => "unknown",
     }
 }

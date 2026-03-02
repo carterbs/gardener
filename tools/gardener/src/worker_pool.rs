@@ -34,6 +34,8 @@ const WORKER_POOL_ID: &str = "worker_pool";
 const MERGE_WORKER_ID: &str = "merge-worker";
 const WORKER_COMMAND_HISTORY_LIMIT: usize = 32;
 const COPY_SHORTCUT_KEY: char = 'c';
+const IDLE_WORKER_POLL_DELAY_MS: u64 = 250;
+const IDLE_WORKER_POLL_ATTEMPTS: usize = 4;
 
 /// Messages on the result channel. Doing workers send `DoingResult`, the merge
 /// worker sends `MergeResult`.
@@ -132,6 +134,50 @@ pub fn run_worker_pool_fsm(
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let command_poll_chunk = 32;
     let mut completed = 0usize;
+
+    let claim_tasks_for_available_workers =
+        |workers: &mut [WorkerRow],
+         claimed: &mut Vec<(usize, crate::backlog_store::BacklogTask)>,
+         completed: usize,
+         last_worker_state_line: usize,
+         last_activity_pulse: &mut Vec<Instant>|
+         -> Result<bool, GardenerError> {
+            let mut claimed_any = false;
+            claimed.clear();
+            let available_slots = parallelism.min(target.saturating_sub(completed));
+            for idx in 0..available_slots {
+                let worker_id = workers[idx].worker_id.clone();
+                let claimed_task =
+                    store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
+                let Some(task) = claimed_task else {
+                    set_worker_idle(&mut workers[idx], "waiting for claim");
+                    continue;
+                };
+                claimed_any = true;
+                append_run_log(
+                    "info",
+                    "worker.task.claimed",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task.task_id,
+                        "title": task.title
+                    }),
+                );
+                let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
+                workers[idx].state = "claimed".to_string();
+                workers[idx].task_title = task.title.clone();
+                workers[idx].tool_line = "claimed".to_string();
+                workers[idx].task_id = Some(task.task_id.clone());
+                workers[idx].last_state_line = last_worker_state_line;
+                workers[idx].breadcrumb = "claim>claimed".to_string();
+                workers[idx].lease_held = true;
+                append_worker_command(&mut workers[idx], "claimed");
+                refresh_worker_heartbeats(workers, last_activity_pulse);
+                render(terminal, workers, &dashboard_snapshot(store)?, hb, lt)?;
+                claimed.push((idx, task));
+            }
+            Ok(claimed_any)
+        };
 
     let mark_merge_worker_busy = |workers: &mut [WorkerRow],
                                   last_activity_pulse: &mut Vec<Instant>,
@@ -239,42 +285,13 @@ pub fn run_worker_pool_fsm(
             Ok(None)
         };
         let mut claimed = Vec::new();
-        let mut claimed_any = false;
-        let available_slots = parallelism.min(target.saturating_sub(completed));
-        for idx in 0..available_slots {
-            let worker_id = workers[idx].worker_id.clone();
-            let claimed_task =
-                store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
-            let Some(task) = claimed_task else {
-                set_worker_idle(&mut workers[idx], "waiting for claim");
-                workers[idx].task_id = None;
-                workers[idx].last_state_line = last_worker_state_line;
-                continue;
-            };
-            claimed_any = true;
-            append_run_log(
-                "info",
-                "worker.task.claimed",
-                json!({
-                    "worker_id": worker_id,
-                    "task_id": task.task_id,
-                    "title": task.title
-                }),
-            );
-            let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
-
-            workers[idx].state = "claimed".to_string();
-            workers[idx].task_title = task.title.clone();
-            workers[idx].tool_line = "claimed".to_string();
-            workers[idx].task_id = Some(task.task_id.clone());
-            workers[idx].last_state_line = last_worker_state_line;
-            workers[idx].breadcrumb = "claim>claimed".to_string();
-            workers[idx].lease_held = true;
-            append_worker_command(&mut workers[idx], "claimed");
-            refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
-            render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
-            claimed.push((idx, task));
-        }
+        let mut claimed_any = claim_tasks_for_available_workers(
+            &mut workers,
+            &mut claimed,
+            completed,
+            last_worker_state_line,
+            &mut last_activity_pulse,
+        )?;
 
         let mut active_merging = 0usize;
         let (tx, rx): (
@@ -302,7 +319,24 @@ pub fn run_worker_pool_fsm(
         }
 
         if !claimed_any && active_merging == 0 {
-            break;
+            let mut claimed_on_idle = false;
+            for _ in 0..IDLE_WORKER_POLL_ATTEMPTS {
+                std::thread::sleep(Duration::from_millis(IDLE_WORKER_POLL_DELAY_MS));
+                claimed_any = claim_tasks_for_available_workers(
+                    &mut workers,
+                    &mut claimed,
+                    completed,
+                    last_worker_state_line,
+                    &mut last_activity_pulse,
+                )?;
+                if claimed_any {
+                    claimed_on_idle = true;
+                    break;
+                }
+            }
+            if !claimed_on_idle {
+                break;
+            }
         }
 
         let mut active_doing = claimed.len();
@@ -1480,6 +1514,8 @@ mod tests {
     use crate::types::RuntimeScope;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     fn seed_task(store: &BacklogStore, title: &str) {
@@ -1696,6 +1732,74 @@ mod tests {
             .expect("read regenerated report");
         assert!(!report.contains("OLD_MARKER"));
         assert!(!terminal.report_draws().is_empty());
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_claims_tasks_inserted_while_idle() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "initial task");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let inserter_path = db_path;
+        let inserter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120));
+            let inserter_store = BacklogStore::open(&inserter_path).expect("open inserter store");
+            let _ = inserter_store
+                .upsert_task(NewTask {
+                    kind: TaskKind::Maintenance,
+                    title: "late task".to_string(),
+                    details: "inserted after start".to_string(),
+                    scope_key: "scope".to_string(),
+                    rationale: "inserted by runtime test thread".to_string(),
+                    priority: Priority::P1,
+                    source: "test".to_string(),
+                    related_pr: None,
+                    related_branch: None,
+                })
+                .expect("insert late task");
+        });
+
+        let terminal = FakeTerminal::new(true);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 2, None)
+            .expect("run fsm");
+        inserter.join().expect("inserter thread completed");
+
+        assert_eq!(completed, 2);
+
+        let tasks = store.list_tasks().expect("list tasks");
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.title == "late task")
+                .count(),
+            1
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .filter(|task| task.status == crate::backlog_store::TaskStatus::Complete)
+                .count(),
+            2
+        );
     }
 
     #[test]

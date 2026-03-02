@@ -3,7 +3,7 @@
 use clap::{Parser, ValueEnum};
 use gardener::config::{load_config, CliOverrides};
 use gardener::errors::GardenerError;
-use gardener::logging::append_run_log;
+use gardener::logging::{append_run_log, default_run_log_path, init_run_logger};
 use gardener::runtime::ProductionRuntime;
 use gardener::startup::run_startup_audits_with_progress;
 use std::path::PathBuf;
@@ -47,6 +47,16 @@ fn main() {
 
 fn run() -> Result<i32, GardenerError> {
     let args = Args::parse();
+    let cwd = std::env::current_dir().map_err(|e| GardenerError::Io(e.to_string()))?;
+    let log_path = default_run_log_path(&cwd);
+    init_run_logger(&log_path, &cwd);
+    append_run_log(
+        "info",
+        "run.started",
+        serde_json::json!({
+            "log_path": log_path.display().to_string(),
+        }),
+    );
     append_run_log(
         "info",
         "bin.seed_backlog.started",
@@ -57,7 +67,6 @@ fn run() -> Result<i32, GardenerError> {
             "force_seed_backlog": args.force_seed_backlog,
         }),
     );
-    let cwd = std::env::current_dir().map_err(|e| GardenerError::Io(e.to_string()))?;
     let runtime = ProductionRuntime::new();
 
     let overrides = CliOverrides {

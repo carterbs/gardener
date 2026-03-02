@@ -74,6 +74,24 @@ fn brad_gardener_delegates_to_cargo_from_worktree() {
 }
 
 #[test]
+fn brad_gardener_script_path_resolution_uses_portable_readlink() {
+    let script_text = fs::read_to_string(workspace_root().join("scripts").join("brad-gardener"))
+        .expect("read brad-gardener script");
+    assert!(
+        !script_text.contains("readlink -f"),
+        "script should not use GNU-only readlink -f"
+    );
+    assert!(
+        script_text.contains("while [[ -h \"$source_path\" ]]"),
+        "script should resolve symlink script paths"
+    );
+    assert!(
+        script_text.contains("cargo run --quiet -p gardener -- \"$@\""),
+        "script should invoke gardener cargo wrapper with positional args"
+    );
+}
+
+#[test]
 fn brad_gardener_rejects_wrong_worktree_context() {
     let temp = TempDir::new().expect("tempdir");
     StdCommand::new("git")

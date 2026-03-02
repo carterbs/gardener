@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+resolve_script_dir() {
+  local source_path=$1
+
+  while [[ -h "$source_path" ]]; do
+    local target
+    target="$(readlink "$source_path")"
+    local source_dir
+    source_dir="$(cd -P "$(dirname "$source_path")" && pwd)"
+    if [[ "$target" = /* ]]; then
+      source_path="$target"
+    else
+      source_path="$source_dir/$target"
+    fi
+  done
+
+  cd -P "$(dirname "$source_path")" && pwd
+}
+
 ensure_git_worktree() {
   local inside_worktree
   local bare_repo
@@ -27,7 +45,7 @@ ensure_git_worktree() {
     exit 1
   fi
 
-  if ! script_root=$(git -C "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." rev-parse --show-toplevel 2>/dev/null); then
+  if ! script_root=$(git -C "$(resolve_script_dir "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel 2>/dev/null); then
     echo "error: unable to determine git worktree context for scripts/brad-gardener" >&2
     exit 1
   fi

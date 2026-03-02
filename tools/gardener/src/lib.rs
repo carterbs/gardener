@@ -56,7 +56,7 @@ pub mod worktree_audit;
 use agent::factory::AdapterFactory;
 use agent::{probe_and_persist, validate_model};
 use backlog_snapshot::export_markdown_snapshot;
-use backlog_store::BacklogStore;
+use backlog_store::{BacklogStore, TaskStatus};
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
@@ -495,13 +495,27 @@ pub fn run_with_runtime(
                         .filter(|pr| pr.head_ref_name.starts_with("gardener/"))
                         .map(|pr| (pr.head_ref_name, pr.number))
                         .collect::<HashMap<_, _>>();
-                    for task in startup_backlog
-                        .iter()
-                        .filter(|task| task.related_pr.is_none())
-                    {
-                        let branch = worktree_branch_for(&task.task_id);
+                    for task in startup_backlog.iter() {
+                        let branch = if let Some(branch) = task.related_branch.as_deref() {
+                            branch.to_string()
+                        } else {
+                            worktree_branch_for(&task.task_id)
+                        };
                         if let Some(pr_number) = open_pr_map.get(&branch).copied() {
-                            let _ = store.set_related_pr(&task.task_id, pr_number as i64, &branch);
+                            if task.related_pr.is_none() {
+                                let _ =
+                                    store.set_related_pr(&task.task_id, pr_number as i64, &branch);
+                            }
+                            if task.status == TaskStatus::Unresolved {
+                                let _ = store.set_unresolved_to_merge_pending(&task.task_id);
+                            }
+                        } else {
+                            if task.status == TaskStatus::Unresolved {
+                                let _ = store.set_unresolved_to_ready(&task.task_id);
+                            }
+                            if task.related_pr.is_some() {
+                                let _ = store.clear_related_pr(&task.task_id);
+                            }
                         }
                     }
                     let _ = store.promote_ready_with_pr();

@@ -78,6 +78,7 @@ impl<'a> WorktreeClient<'a> {
                     }),
                 );
                 self.sync_git_hooks(path);
+                self.ensure_core_bare_false(path)?;
                 return Ok(());
             }
 
@@ -231,6 +232,7 @@ impl<'a> WorktreeClient<'a> {
                         }),
                     );
                     self.sync_git_hooks(path);
+                    self.ensure_core_bare_false(path)?;
                     return Ok(());
                 }
                 append_run_log(
@@ -268,6 +270,46 @@ impl<'a> WorktreeClient<'a> {
             }),
         );
         self.sync_git_hooks(path);
+        self.ensure_core_bare_false(path)?;
+        Ok(())
+    }
+
+    fn ensure_core_bare_false(&self, worktree_path: &Path) -> Result<(), GardenerError> {
+        let out = self.runner.run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec![
+                "-C".to_string(),
+                worktree_path.display().to_string(),
+                "config".to_string(),
+                "--local".to_string(),
+                "core.bare".to_string(),
+                "false".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "worktree.config.core_bare_false_failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "path": worktree_path.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(
+                "failed to enforce core.bare=false in worktree".to_string(),
+            ));
+        }
+        append_run_log(
+            "info",
+            "worktree.config.core_bare_false_set",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "path": worktree_path.display().to_string(),
+            }),
+        );
         Ok(())
     }
 
@@ -581,11 +623,36 @@ mod tests {
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("idempotent resume");
-        assert_eq!(runner.spawned().len(), 3);
+        assert_eq!(runner.spawned().len(), 4);
     }
 
     #[test]
@@ -621,13 +688,18 @@ mod tests {
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("reused branch");
 
         let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 6);
+        assert_eq!(spawned.len(), 7);
         assert_eq!(spawned[1].args[0], "worktree");
         assert_eq!(spawned[1].args[1], "add");
         assert_eq!(spawned[1].args[3], "-b");
@@ -661,12 +733,22 @@ mod tests {
         }));
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: ".githooks\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
             stderr: String::new(),
         }));
 
@@ -715,13 +797,18 @@ mod tests {
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, tmp.path())
             .create_or_resume(&path, "task-1")
             .expect("recreated after cleaning");
 
         assert!(!path.exists());
-        assert_eq!(runner.spawned().len(), 4);
+        assert_eq!(runner.spawned().len(), 5);
     }
 
     #[test]
@@ -755,6 +842,11 @@ mod tests {
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, tmp.path())
             .create_or_resume(&path, "task-1")
@@ -766,7 +858,7 @@ mod tests {
             fs::read_to_string(copied_hook).expect("read copied hook"),
             "#!/usr/bin/env bash\necho source\n"
         );
-        assert_eq!(runner.spawned().len(), 4);
+        assert_eq!(runner.spawned().len(), 5);
     }
 
     #[test]
@@ -827,14 +919,19 @@ mod tests {
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("should reclaim detached HEAD worktree");
 
         let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 5);
-        // [0] = list, [1] = remove --force, [2] = add -b, [3-4] = hook resolves
+        assert_eq!(spawned.len(), 6);
+        // [0] = list, [1] = remove --force, [2] = add -b, [3-4] = hook resolves, [5] = set core.bare
         assert_eq!(spawned[1].args[0], "worktree");
         assert_eq!(spawned[1].args[1], "remove");
         assert_eq!(spawned[1].args[2], "--force");
@@ -874,13 +971,23 @@ mod tests {
             stdout: ".githooks\n".to_string(),
             stderr: String::new(),
         }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
 
         WorktreeClient::new(&runner, "/repo")
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("should reclaim wrong-branch worktree");
 
         let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 5);
+        assert_eq!(spawned.len(), 6);
         assert_eq!(spawned[1].args[1], "remove");
         assert_eq!(spawned[2].args[1], "add");
     }

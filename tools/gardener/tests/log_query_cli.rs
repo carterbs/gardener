@@ -280,6 +280,87 @@ fn timeline_prints_empty_match_message() {
 }
 
 #[test]
+fn events_filter_by_payload_contains() {
+    let dir = must_ok(tempdir(), "failed to create tempdir");
+    let log_path = dir.path().join("otel-logs.jsonl");
+
+    let matching_payload = serde_json::json!({
+        "worker_id": "w1",
+        "run_id": "run-1",
+        "terminal": "failure",
+    });
+    let noisy_payload = serde_json::json!({
+        "worker_id": "w1",
+        "run_id": "run-1",
+        "terminal": "ok",
+    });
+    let matching_payload_json = must_ok(
+        serde_json::to_string(&matching_payload),
+        "encode matching payload json",
+    );
+    let noisy_payload_json = must_ok(
+        serde_json::to_string(&noisy_payload),
+        "encode noisy payload json",
+    );
+
+    let lines = vec![
+        serde_json::json!({
+            "logRecord": {
+                "severityText": "INFO",
+                "severityNumber": 9,
+                "attributes": [
+                    {"key": "run.id", "value": {"stringValue": "run-1"}},
+                    {"key": "event.type", "value": {"stringValue": "agent.turn.finished"}},
+                    {"key": "gardener.payload", "value": {"stringValue": matching_payload_json}},
+                ],
+            },
+            "event_type": "agent.turn.finished",
+            "payload": matching_payload,
+        })
+        .to_string(),
+        serde_json::json!({
+            "logRecord": {
+                "severityText": "INFO",
+                "severityNumber": 9,
+                "attributes": [
+                    {"key": "run.id", "value": {"stringValue": "run-1"}},
+                    {"key": "event.type", "value": {"stringValue": "agent.turn.finished"}},
+                    {"key": "gardener.payload", "value": {"stringValue": noisy_payload_json}},
+                ],
+            },
+            "event_type": "agent.turn.finished",
+            "payload": noisy_payload,
+        })
+        .to_string(),
+    ];
+    write_lines(&log_path, &lines);
+
+    let log_path = log_path.to_string_lossy().into_owned();
+    let output = cargo_bin_cmd!("log-query")
+        .args([
+            "events",
+            "--log-path",
+            log_path.as_str(),
+            "--run-id",
+            "run-1",
+            "--contains",
+            "\"terminal\":\"failure\"",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout =
+        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
+
+    assert_eq!(stdout.lines().count(), 1);
+    assert!(stdout.contains("agent.turn.finished"));
+    assert!(stdout.contains("run=run-1"));
+    assert!(!stdout.contains("terminal=\"ok\""));
+}
+
+#[test]
 fn stats_shows_unknown_for_missing_ids() {
     let dir = must_ok(tempdir(), "failed to create tempdir");
     let log_path = dir.path().join("otel-logs.jsonl");

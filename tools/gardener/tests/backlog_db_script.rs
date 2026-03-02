@@ -44,7 +44,7 @@ fn backlog_db_help_shows_default_db_path() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(".cache/gardener/backlog.sqlite"),
+        stdout.contains("~/.gardener/backlog.sqlite"),
         "help output should mention canonical default db path"
     );
 }

@@ -101,7 +101,7 @@ pub fn run_worker_pool_fsm(
             command_details: Vec::new(),
         })
         .map(|mut worker| {
-            append_worker_command(&mut worker, "waiting for claim");
+            set_worker_idle(&mut worker, "waiting for claim");
             worker
         })
         .collect::<Vec<_>>();
@@ -120,7 +120,7 @@ pub fn run_worker_pool_fsm(
             session_missing: false,
             command_details: Vec::new(),
         };
-        append_worker_command(&mut row, "waiting for merge");
+        set_worker_idle(&mut row, "waiting for merge");
         row
     });
     let mut last_worker_command_line = current_log_line_count();
@@ -237,13 +237,7 @@ pub fn run_worker_pool_fsm(
             let claimed_task =
                 store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
             let Some(task) = claimed_task else {
-                workers[idx].state = "idle".to_string();
-                workers[idx].task_title = "idle".to_string();
-                workers[idx].lease_held = false;
-                if workers[idx].tool_line != "waiting for claim" {
-                    append_worker_command(&mut workers[idx], "waiting for claim");
-                }
-                workers[idx].tool_line = "waiting for claim".to_string();
+                set_worker_idle(&mut workers[idx], "waiting for claim");
                 continue;
             };
             claimed_any = true;
@@ -654,13 +648,7 @@ pub fn run_worker_pool_fsm(
                                 });
                                 active_doing = active_doing.saturating_add(1);
                             } else {
-                                workers[idx].state = "idle".to_string();
-                                workers[idx].task_title = "idle".to_string();
-                                workers[idx].lease_held = false;
-                                if workers[idx].tool_line != "waiting for claim" {
-                                    append_worker_command(&mut workers[idx], "waiting for claim");
-                                }
-                                workers[idx].tool_line = "waiting for claim".to_string();
+                                set_worker_idle(&mut workers[idx], "waiting for claim");
                             }
                         }
                         // Signal merge worker to exit when all work is done
@@ -752,8 +740,7 @@ pub fn run_worker_pool_fsm(
                         }
                         // Reset merge row to idle if no more merges pending
                         if active_merging == 0 {
-                            workers[merge_row_idx].state = "idle".to_string();
-                            workers[merge_row_idx].task_title = "idle".to_string();
+                            set_worker_idle(&mut workers[merge_row_idx], "waiting for merge");
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
@@ -1102,6 +1089,19 @@ fn append_worker_command(worker: &mut WorkerRow, command: &str) {
     if worker.command_details.len() > WORKER_COMMAND_HISTORY_LIMIT {
         let overflow = worker.command_details.len() - WORKER_COMMAND_HISTORY_LIMIT;
         worker.command_details.drain(0..overflow);
+    }
+}
+
+fn set_worker_idle(worker: &mut WorkerRow, tool_line: &str) {
+    let should_log = worker.state != "idle" || worker.tool_line != tool_line;
+    worker.state = "idle".to_string();
+    worker.task_title = "idle".to_string();
+    worker.tool_line = tool_line.to_string();
+    worker.breadcrumb = "idle".to_string();
+    worker.lease_held = false;
+    worker.command_details.clear();
+    if should_log {
+        append_worker_command(worker, tool_line);
     }
 }
 

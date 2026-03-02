@@ -1199,6 +1199,7 @@ fn draw_dashboard_frame(
         .map(|(idx, row)| {
             let selected = idx == selected_worker;
             let marker = if selected { ">" } else { " " };
+            let current_state_line = format_current_state_line(&row.state);
             let worker_style = if selected {
                 Style::default()
                     .fg(Color::Rgb(126, 231, 135))
@@ -1215,9 +1216,17 @@ fn draw_dashboard_frame(
                 command_stream_max_width,
                 command_scroll_offset,
             );
-            let mut flow_spans = Vec::new();
-            flow_spans.push(Span::raw("    "));
-            flow_spans.push(Span::styled("Flow: ", Style::default().fg(Color::Blue)));
+            let mut flow_spans = vec![
+                Span::raw("    "),
+                Span::styled(
+                    current_state_line,
+                    Style::default()
+                        .fg(Color::Rgb(85, 198, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("Flow: ", Style::default().fg(Color::Blue)),
+            ];
             flow_spans.extend(flow_line);
             let lines = if compact_view || compact_worker_row {
                 vec![
@@ -1897,6 +1906,10 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
         .collect()
 }
 
+fn format_current_state_line(state: &str) -> String {
+    format!("State: {}", format_state_label(state))
+}
+
 fn worker_command_stream(commands: &[CommandEntry]) -> String {
     let recent = commands
         .iter()
@@ -2483,6 +2496,39 @@ mod tests {
         assert!(frame.contains("task one"));
         assert!(frame.contains("task two"));
         assert!(frame.contains("Flow:"));
+    }
+
+    #[test]
+    fn active_worker_displays_current_state_label() {
+        let frame = render_dashboard(
+            &[WorkerRow {
+                worker_id: "w1".to_string(),
+                state: "merge_polling".to_string(),
+                task_title: "merge worker".to_string(),
+                tool_line: "git merge".to_string(),
+                breadcrumb: "state>merge_polling".to_string(),
+                last_heartbeat_secs: 12,
+                session_age_secs: 33,
+                lease_held: true,
+                session_missing: false,
+                command_details: Vec::new(),
+            }],
+            &QueueStats {
+                ready: 0,
+                active: 1,
+                failed: 0,
+                unresolved: 0,
+                merge_pending: 0,
+                p0: 0,
+                p1: 1,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            120,
+            24,
+        );
+        assert!(frame.contains("State:"));
+        assert!(frame.contains("Checking mergeability"));
     }
 
     #[test]

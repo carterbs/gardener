@@ -66,11 +66,7 @@ pub fn refresh_quality_report(
 ) -> Result<(PathBuf, bool), GardenerError> {
     let profile_loc = profile_path(scope, cfg);
     let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
-    let quality_path = if PathBuf::from(&cfg.quality_report.path).is_absolute() {
-        PathBuf::from(&cfg.quality_report.path)
-    } else {
-        scope.working_dir.join(&cfg.quality_report.path)
-    };
+    let quality_path = quality_report_path(cfg, scope);
     let stamp_path = quality_stamp_path(&quality_path);
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
@@ -124,6 +120,48 @@ pub fn refresh_quality_report(
         );
     }
     Ok((quality_path, should_regen))
+}
+
+pub fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> PathBuf {
+    if PathBuf::from(&cfg.quality_report.path).is_absolute() {
+        PathBuf::from(&cfg.quality_report.path)
+    } else {
+        scope.working_dir.join(&cfg.quality_report.path)
+    }
+}
+
+pub fn ensure_quality_report_fresh_for_validation(
+    runtime: &ProductionRuntime,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> Result<(), GardenerError> {
+    let quality_path = quality_report_path(cfg, scope);
+    let stamp_path = quality_stamp_path(&quality_path);
+
+    if !runtime.file_system.exists(&quality_path) {
+        return Err(GardenerError::Cli(
+            "quality-grade report missing; run startup audits or `--quality-grades-only` before validation".to_string(),
+        ));
+    }
+
+    if !runtime.file_system.exists(&stamp_path)
+        || report_stamp_is_stale(runtime, cfg, &stamp_path, scope)?
+    {
+        return Err(GardenerError::Cli(
+            "quality-grade report is stale; regenerate the quality report before validation"
+                .to_string(),
+        ));
+    }
+
+    append_run_log(
+        "debug",
+        "startup.quality_report.validation_guard_passed",
+        json!({
+            "quality_path": quality_path.display().to_string(),
+            "stamp_path": stamp_path.display().to_string(),
+        }),
+    );
+    Ok(())
 }
 
 pub fn run_startup_audits(

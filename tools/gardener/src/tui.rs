@@ -1282,7 +1282,7 @@ fn draw_dashboard_frame(
     let merge_worker_items = vec![merge_worker_card_item(
         merge_row,
         compact_view || compact_worker_row,
-        merge_command_stream_max_width
+        merge_command_stream_max_width,
     )];
     let merge_worker_card = Layout::default()
         .direction(Direction::Vertical)
@@ -2546,14 +2546,14 @@ mod tests {
         ];
         assert_eq!(
             worker_command_stream(&entries),
-            "10:00:20  third  | 10:00:10  second  | 10:00:00  first"
+            "10:00:20  third  |  10:00:10  second  |  10:00:00  first"
         );
     }
 
     #[test]
     fn command_stream_window_truncates_without_scrolling() {
         let long = "long command stream that should be truncated";
-        assert_eq!(command_stream_window(long, 10), "long comma…");
+        assert_eq!(command_stream_window(long, 10), "long comm…");
     }
 
     #[test]

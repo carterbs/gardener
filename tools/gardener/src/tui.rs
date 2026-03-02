@@ -2389,6 +2389,32 @@ mod tests {
             120,
             30,
         );
+        let border_chars = |line: &str| {
+            line.chars().any(|ch| {
+                matches!(
+                    ch,
+                    '─' | '│'
+                        | '┌'
+                        | '┐'
+                        | '└'
+                        | '┘'
+                        | '╭'
+                        | '╮'
+                        | '╰'
+                        | '╯'
+                        | '+'
+                        | '┬'
+                        | '┴'
+                        | '├'
+                        | '┤'
+                )
+            })
+        };
+        let has_title_with_border = |frame: &str, title: &str| {
+            frame
+                .lines()
+                .any(|line| line.contains(title) && border_chars(line))
+        };
         let top_left_corners =
             frame.matches('┌').count() + frame.matches('╭').count() + frame.matches('+').count();
         let top_right_corners =
@@ -2401,6 +2427,9 @@ mod tests {
             top_right_corners >= 4,
             "expected worker/backlog/merge queue/nows borders"
         );
+        assert!(has_title_with_border(&frame, "Workers"));
+        assert!(has_title_with_border(&frame, "Backlog"));
+        assert!(has_title_with_border(&frame, "Merge Queue"));
         assert!(frame.contains("Backlog"));
         assert!(frame.contains("Merge Queue"));
     }

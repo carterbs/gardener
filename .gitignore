@@ -4,4 +4,5 @@
 .claude/worktrees/
 .worktrees/
 target/
+lint_order_demo
 docs/quality-grades.md.stamp

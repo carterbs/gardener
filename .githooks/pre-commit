@@ -2,4 +2,12 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
+
+# Run rustfmt on staged .rs files
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+if [[ -n "$staged_rs" ]]; then
+  echo "$staged_rs" | xargs rustfmt --edition 2021
+  echo "$staged_rs" | xargs git add
+fi
+
 scripts/run-validate.sh

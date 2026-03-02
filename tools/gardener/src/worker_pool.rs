@@ -133,6 +133,7 @@ pub fn run_worker_pool_fsm(
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let command_poll_chunk = 32;
     let mut completed = 0usize;
+    let run_started_at_ms = now_unix_millis();
 
     let claim_tasks_for_available_workers =
         |workers: &mut [WorkerRow],
@@ -153,13 +154,20 @@ pub fn run_worker_pool_fsm(
                     continue;
                 };
                 claimed_any = true;
+                let task_age_ms = run_started_at_ms.saturating_sub(task.created_at);
+                let inserted_after_run_start = task.created_at >= run_started_at_ms;
                 append_run_log(
                     "info",
                     "worker.task.claimed",
                     json!({
                         "worker_id": worker_id,
                         "task_id": task.task_id,
-                        "title": task.title
+                        "title": task.title,
+                        "task_created_at": task.created_at,
+                        "task_last_updated": task.last_updated,
+                        "run_started_at_ms": run_started_at_ms,
+                        "task_age_ms": task_age_ms,
+                        "inserted_after_run_start": inserted_after_run_start
                     }),
                 );
                 let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
@@ -355,6 +363,8 @@ pub fn run_worker_pool_fsm(
                 let task_id = task.task_id.clone();
                 let task_summary = task_override.unwrap_or(task.title.as_str()).to_string();
                 let attempt_count = task.attempt_count;
+                let task_created_at = task.created_at;
+                let task_last_updated = task.last_updated;
                 let cfg = cfg.clone();
                 let process_runner = runtime.process_runner.clone();
                 let worker_scope = runtime_scope.clone();
@@ -368,6 +378,9 @@ pub fn run_worker_pool_fsm(
                         &task_id,
                         &task_summary,
                         attempt_count,
+                        run_started_at_ms,
+                        task_created_at,
+                        task_last_updated,
                     );
                     let _ = tx.send(PoolResultMessage::DoingResult {
                         slot_idx: idx,
@@ -658,13 +671,20 @@ pub fn run_worker_pool_fsm(
                                 cfg.scheduler.lease_timeout_seconds as i64,
                             )?;
                             if let Some(task) = claimed_task {
+                                let task_age_ms = run_started_at_ms.saturating_sub(task.created_at);
+                                let inserted_after_run_start = task.created_at >= run_started_at_ms;
                                 append_run_log(
                                     "info",
                                     "worker.task.claimed",
                                     json!({
                                         "worker_id": worker_id,
                                         "task_id": task.task_id,
-                                        "title": task.title
+                                        "title": task.title,
+                                        "task_created_at": task.created_at,
+                                        "task_last_updated": task.last_updated,
+                                        "run_started_at_ms": run_started_at_ms,
+                                        "task_age_ms": task_age_ms,
+                                        "inserted_after_run_start": inserted_after_run_start
                                     }),
                                 );
                                 let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
@@ -690,6 +710,8 @@ pub fn run_worker_pool_fsm(
                                 let task_summary =
                                     task_override.unwrap_or(task.title.as_str()).to_string();
                                 let attempt_count = task.attempt_count;
+                                let task_created_at = task.created_at;
+                                let task_last_updated = task.last_updated;
                                 let cfg = cfg.clone();
                                 let process_runner = runtime.process_runner.clone();
                                 let worker_scope = runtime_scope.clone();
@@ -703,6 +725,9 @@ pub fn run_worker_pool_fsm(
                                         &task_id,
                                         &task_summary,
                                         attempt_count,
+                                        run_started_at_ms,
+                                        task_created_at,
+                                        task_last_updated,
                                     );
                                     let _ = tx.send(PoolResultMessage::DoingResult {
                                         slot_idx: idx,
@@ -1502,6 +1527,7 @@ mod tests {
     use crate::backlog_store::{BacklogStore, NewTask};
     use crate::config::AppConfig;
     use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
+    use crate::logging::{clear_run_logger, init_run_logger};
     use crate::priority::Priority;
     use crate::runtime::{
         FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
@@ -1971,5 +1997,66 @@ mod tests {
         assert!(writes.iter().any(|line| line.contains("worker-2")));
         assert!(writes.iter().any(|line| line.contains("worker-3")));
         assert!(!writes.iter().any(|line| line.contains("worker-4")));
+    }
+
+    #[test]
+    fn worker_execute_dispatch_includes_insert_awareness_metadata() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        seed_task(&store, "dispatch-metadata task");
+
+        let log_path = dir.path().join("otel-logs.jsonl");
+        clear_run_logger();
+        let _run_id = init_run_logger(&log_path, &scope.working_dir);
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let terminal = FakeTerminal::new(false);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+        let completed = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+        assert_eq!(completed, 1);
+
+        let events = std::fs::read_to_string(&log_path).expect("read logs");
+        let dispatch_event = events
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|entry| {
+                entry.get("event_type").and_then(|v| v.as_str()) == Some("worker.execute.dispatch")
+            })
+            .expect("found execute dispatch log event");
+        let payload = dispatch_event
+            .get("payload")
+            .and_then(|v| v.as_object())
+            .expect("dispatch payload object");
+
+        assert!(payload.contains_key("task_created_at"));
+        assert!(payload.contains_key("task_last_updated"));
+        assert!(payload.contains_key("run_started_at_ms"));
+        assert!(payload.contains_key("task_age_ms"));
+        assert!(payload.contains_key("inserted_after_run_start"));
+        assert!(payload
+            .get("task_age_ms")
+            .and_then(|value| value.as_i64())
+            .is_some());
+        assert!(payload
+            .get("inserted_after_run_start")
+            .and_then(|value| value.as_bool())
+            .is_some());
+        clear_run_logger();
     }
 }

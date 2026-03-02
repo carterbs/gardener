@@ -21,6 +21,7 @@ use crate::prompt_registry::{
 use crate::protocol::AgentTerminal;
 use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
+use crate::runtime::{Clock, FileSystem};
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::understand_phase::{classify_task, parse_understand_output};
 use crate::worker_identity::WorkerIdentity;
@@ -827,6 +828,8 @@ pub fn execute_merge_phase(
     req: &MergeRequest,
     cfg: &AppConfig,
     process_runner: &dyn ProcessRunner,
+    runtime_file_system: &dyn FileSystem,
+    runtime_clock: &dyn Clock,
     scope: &RuntimeScope,
 ) -> Result<WorkerRunSummary, GardenerError> {
     let worker_id = &req.worker_id;
@@ -1203,7 +1206,13 @@ pub fn execute_merge_phase(
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation);
     let repo_root_git = GitClient::new(process_runner, &scope.working_dir);
     repo_root_git.pull_main().ok();
-    if let Err(err) = repo_root_git.run_validation_command(&cfg.validation.command) {
+    if let Err(err) = repo_root_git.run_validation_command_with_quality_guard(
+        &cfg.validation.command,
+        runtime_file_system,
+        runtime_clock,
+        cfg,
+        scope,
+    ) {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
         append_run_log(
             "error",

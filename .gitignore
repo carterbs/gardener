@@ -4,5 +4,6 @@
 .claude/worktrees/
 .worktrees/
 target/
+lint_order_demo
 otel-logs.jsonl
 docs/quality-grades.md.stamp

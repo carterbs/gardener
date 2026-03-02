@@ -7,7 +7,7 @@ use crate::priority::Priority;
 use crate::protocol::{AgentEvent, AgentEventKind};
 use crate::quality_grades::render_quality_grade_document;
 use crate::repo_intelligence::read_profile;
-use crate::runtime::{ProcessRequest, ProductionRuntime};
+use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner, ProductionRuntime};
 use crate::seed_runner::SeedTask;
 use crate::seeding::{recommend_seed_tasks_with_events, seed_backlog_if_needed_with_events};
 use crate::task_identity::TaskKind;
@@ -66,11 +66,7 @@ pub fn refresh_quality_report(
 ) -> Result<(PathBuf, bool), GardenerError> {
     let profile_loc = profile_path(scope, cfg);
     let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
-    let quality_path = if PathBuf::from(&cfg.quality_report.path).is_absolute() {
-        PathBuf::from(&cfg.quality_report.path)
-    } else {
-        scope.working_dir.join(&cfg.quality_report.path)
-    };
+    let quality_path = quality_report_path(cfg, scope);
     let stamp_path = quality_stamp_path(&quality_path);
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
@@ -124,6 +120,71 @@ pub fn refresh_quality_report(
         );
     }
     Ok((quality_path, should_regen))
+}
+
+pub fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> PathBuf {
+    if PathBuf::from(&cfg.quality_report.path).is_absolute() {
+        PathBuf::from(&cfg.quality_report.path)
+    } else {
+        scope.working_dir.join(&cfg.quality_report.path)
+    }
+}
+
+pub fn ensure_quality_report_fresh_for_validation(
+    runtime: &ProductionRuntime,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> Result<(), GardenerError> {
+    ensure_quality_report_fresh_for_validation_with_context(
+        runtime.file_system.as_ref(),
+        runtime.process_runner.as_ref(),
+        runtime.clock.as_ref(),
+        cfg,
+        scope,
+    )
+}
+
+pub(crate) fn ensure_quality_report_fresh_for_validation_with_context(
+    file_system: &dyn FileSystem,
+    process_runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> Result<(), GardenerError> {
+    let quality_path = quality_report_path(cfg, scope);
+    let stamp_path = quality_stamp_path(&quality_path);
+
+    if !file_system.exists(&quality_path) {
+        return Err(GardenerError::Cli(
+            "quality-grade report missing; run startup audits or `--quality-grades-only` before validation".to_string(),
+        ));
+    }
+
+    if !file_system.exists(&stamp_path)
+        || report_stamp_is_stale_with_context(
+            file_system,
+            process_runner,
+            clock,
+            cfg,
+            &stamp_path,
+            scope,
+        )?
+    {
+        return Err(GardenerError::Cli(
+            "quality-grade report is stale; regenerate the quality report before validation"
+                .to_string(),
+        ));
+    }
+
+    append_run_log(
+        "debug",
+        "startup.quality_report.validation_guard_passed",
+        json!({
+            "quality_path": quality_path.display().to_string(),
+            "stamp_path": stamp_path.display().to_string(),
+        }),
+    );
+    Ok(())
 }
 
 pub fn run_startup_audits(
@@ -264,6 +325,13 @@ where
             .validation_command
             .clone()
             .unwrap_or_else(|| cfg.validation.command.clone());
+        ensure_quality_report_fresh_for_validation_with_context(
+            runtime.file_system.as_ref(),
+            runtime.process_runner.as_ref(),
+            runtime.clock.as_ref(),
+            cfg,
+            scope,
+        )?;
         append_run_log(
             "info",
             "startup.validation.running",
@@ -854,7 +922,7 @@ fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerErro
         json!({}),
     );
     let mut lines = Vec::new();
-    for task in store.list_tasks()?.into_iter() {
+    for task in store.list_backlog_tasks()?.into_iter() {
         if matches!(
             task.status,
             crate::backlog_store::TaskStatus::Complete | crate::backlog_store::TaskStatus::Failed
@@ -1132,13 +1200,30 @@ fn report_stamp_is_stale(
     stamp_path: &std::path::Path,
     scope: &RuntimeScope,
 ) -> Result<bool, GardenerError> {
-    if !runtime.file_system.exists(stamp_path) {
+    report_stamp_is_stale_with_context(
+        runtime.file_system.as_ref(),
+        runtime.process_runner.as_ref(),
+        runtime.clock.as_ref(),
+        cfg,
+        stamp_path,
+        scope,
+    )
+}
+
+fn report_stamp_is_stale_with_context(
+    file_system: &dyn FileSystem,
+    process_runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    cfg: &AppConfig,
+    stamp_path: &std::path::Path,
+    scope: &RuntimeScope,
+) -> Result<bool, GardenerError> {
+    if !file_system.exists(stamp_path) {
         return Ok(true);
     }
-    let raw = runtime.file_system.read_to_string(stamp_path)?;
+    let raw = file_system.read_to_string(stamp_path)?;
     let stamp = raw.trim().parse::<u64>().unwrap_or(0);
-    let now = runtime
-        .clock
+    let now = clock
         .now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1153,11 +1238,10 @@ fn report_stamp_is_stale(
     }
     if cfg.quality_report.stale_if_head_commit_differs {
         let profile_loc = crate::triage::profile_path(scope, cfg);
-        if let Ok(profile) = read_profile(runtime.file_system.as_ref(), &profile_loc) {
-            if let Ok(current_head) = crate::repo_intelligence::current_head_sha(
-                runtime.process_runner.as_ref(),
-                &scope.working_dir,
-            ) {
+        if let Ok(profile) = read_profile(file_system, &profile_loc) {
+            if let Ok(current_head) =
+                crate::repo_intelligence::current_head_sha(process_runner, &scope.working_dir)
+            {
                 if current_head != profile.meta.head_sha {
                     return Ok(true);
                 }

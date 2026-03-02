@@ -384,6 +384,8 @@ pub fn run_worker_pool_fsm(
                 let merge_cfg = cfg.clone();
                 let merge_runner = runtime.process_runner.clone();
                 let merge_scope = runtime_scope.clone();
+                let merge_file_system = runtime.file_system.clone();
+                let merge_clock = runtime.clock.clone();
                 scope_guard.spawn(move || {
                     while let Ok(req) = merge_rx.recv() {
                         let task_id = req.task_id.clone();
@@ -391,6 +393,8 @@ pub fn run_worker_pool_fsm(
                             &req,
                             &merge_cfg,
                             merge_runner.as_ref(),
+                            merge_file_system.as_ref(),
+                            merge_clock.as_ref(),
                             &merge_scope,
                         );
                         let _ = merge_result_tx
@@ -710,6 +714,8 @@ pub fn run_worker_pool_fsm(
                                 active_doing = active_doing.saturating_add(1);
                             } else {
                                 set_worker_idle(&mut workers[idx], "waiting for claim");
+                                workers[idx].task_id = None;
+                                workers[idx].last_state_line = last_worker_state_line;
                             }
                         }
                         // Signal merge worker to exit when all work is done
@@ -836,6 +842,8 @@ pub fn run_worker_pool_fsm(
                         // Reset merge row to idle if no more merges pending
                         if active_merging == 0 {
                             set_worker_idle(&mut workers[merge_row_idx], "waiting for merge");
+                            workers[merge_row_idx].task_id = None;
+                            workers[merge_row_idx].last_state_line = last_worker_state_line;
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;

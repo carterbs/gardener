@@ -10,7 +10,7 @@ use crate::runtime::{ProcessRequest, ProcessRunner, ProductionProcessRunner};
 use crate::types::RuntimeScope;
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub struct PhaseRuntime {
@@ -201,7 +201,48 @@ pub fn resolve_worktree_from_branch(
             )));
         }
     }
+    set_core_bare_false(runner, scope, &wt_dir)?;
     Ok(wt_dir)
+}
+
+fn set_core_bare_false(
+    runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    wt_dir: &Path,
+) -> Result<(), GardenerError> {
+    let out = runner.run(ProcessRequest {
+        program: "sh".to_string(),
+        args: vec![
+            "-eu".to_string(),
+            "-c".to_string(),
+            r#"current="$(git -C "$0" config --bool --get core.bare 2>/dev/null || true)"; \
+if [ "$current" = "false" ]; then \
+  exit 0; \
+fi; \
+git -C "$0" config --local extensions.worktreeConfig true; \
+for attempt in 1 2 3 4 5; do \
+  if git -C "$0" config --worktree core.bare false; then \
+    current="$(git -C "$0" config --bool --get core.bare 2>/dev/null || true)"; \
+    if [ "$current" = "false" ]; then \
+      exit 0; \
+    fi; \
+  fi; \
+  sleep 0.1; \
+done; \
+exit 1"#
+                .to_string(),
+            wt_dir.display().to_string(),
+        ],
+        cwd: Some(scope.working_dir.clone()),
+    })?;
+
+    if out.exit_code != 0 {
+        return Err(GardenerError::Process(
+            "failed to enforce core.bare=false in worktree".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn ts() -> String {

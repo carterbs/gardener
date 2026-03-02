@@ -33,6 +33,7 @@ Quality-grade document ownership is in Gardener runtime startup audits. External
     - `scripts/check-no-warnings.sh`
     - `scripts/check-migrations-wired.sh`
     - `scripts/check-binary-blobs.sh`
+    - `scripts/run-script-lint-fixture-tests.sh`
   - It ensures `cargo-llvm-cov` is available before running:
     - `./scripts/test-gardener-coverage.sh`
   - It fails fast and exits on first failed stage.
@@ -51,5 +52,6 @@ Pre-commit remediation playbook:
    - clippy warnings: fix warnings and re-run `./scripts/check-no-warnings.sh`
    - migration wiring failures: add include(s) in `tools/gardener/src/backlog_store.rs`
    - binary blob failures: drop binary artifacts from staged changes
+   - fixture-script test failures: rerun `./scripts/run-script-lint-fixture-tests.sh` after updating script docs or fixtures
    - coverage/test failures: inspect `./scripts/test-gardener-coverage.sh` output and harden code paths
 4. Stage updates (`git add`), then retry commit.

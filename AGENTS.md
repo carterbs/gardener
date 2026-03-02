@@ -3,8 +3,8 @@
 Gardener orchestration is Rust-first.
 
 - Runtime entrypoint: `cargo run -p gardener --bin gardener --`
-- Run workers: `npm run gardener:run -- --quit-after 1 --config <path>`
-- Reconciliation only: `npm run gardener:sync`
+- Run workers: `cargo run -p gardener --bin gardener -- --quit-after 1 --config <path>`
+- Reconciliation only: `cargo run -p gardener --bin gardener -- --sync-only --config <path>`
 
 Legacy TypeScript orchestration entrypoints are not part of active runtime execution.
 

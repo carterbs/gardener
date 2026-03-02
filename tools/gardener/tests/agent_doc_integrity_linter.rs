@@ -77,8 +77,10 @@ fn agent_doc_paths(repo_root: &Path) -> Vec<PathBuf> {
         repo_root.join("CLAUDE.md"),
         repo_root.join("docs/README.md"),
         repo_root.join("docs/conventions/workflow.md"),
-        repo_root.join("docs/runbooks/backlog-operations.md"),
     ];
+
+    paths.extend(collect_runbook_docs(repo_root.join("docs/runbooks")));
+    paths.extend(collect_cookbook_docs(repo_root.join("docs")));
 
     paths.extend(collect_skill_docs(repo_root.join(".codex/skills")));
     paths.extend(collect_skill_docs(repo_root.join(".claude/skills")));
@@ -112,6 +114,56 @@ fn collect_skill_docs(root: PathBuf) -> Vec<PathBuf> {
 
             if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
                 docs.push(path);
+            }
+        }
+    }
+
+    docs
+}
+
+fn collect_runbook_docs(root: PathBuf) -> Vec<PathBuf> {
+    collect_markdown_with_suffix(root, ".md")
+}
+
+fn collect_cookbook_docs(root: PathBuf) -> Vec<PathBuf> {
+    collect_markdown_with_suffix(root, "-cookbook.md")
+}
+
+fn collect_markdown_with_suffix(root: PathBuf, suffix: &str) -> Vec<PathBuf> {
+    let mut docs = Vec::new();
+    let mut stack = vec![root];
+
+    while let Some(directory) = stack.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            let extension_is_md = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+
+            if !extension_is_md {
+                continue;
+            }
+
+            if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+                if file_name.ends_with(suffix) {
+                    docs.push(path);
+                }
             }
         }
     }
@@ -375,6 +427,31 @@ fn parses_inline_code_references() {
         snippets,
         vec!["scripts/backlog-db.sh", "LOG_QUERY_BIN stats"]
     );
+}
+
+#[test]
+fn agent_doc_paths_includes_runbooks_and_cookbooks() {
+    let repo_root = repo_root_path();
+    let paths = agent_doc_paths(&repo_root);
+
+    let runbooks = collect_runbook_docs(repo_root.join("docs/runbooks"));
+    let cookbooks = collect_cookbook_docs(repo_root.join("docs"));
+
+    for runbook in runbooks {
+        assert!(
+            paths.contains(&runbook),
+            "{} should be included in agent-doc integrity targets",
+            runbook.display()
+        );
+    }
+
+    for cookbook in cookbooks {
+        assert!(
+            paths.contains(&cookbook),
+            "{} should be included in agent-doc integrity targets",
+            cookbook.display()
+        );
+    }
 }
 
 #[test]

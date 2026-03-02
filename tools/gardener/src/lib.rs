@@ -62,8 +62,8 @@ use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
 use gh::GhClient;
 use logging::{
-    append_run_log, clear_run_logger, default_run_log_path, init_run_logger, set_run_working_dir,
-    structured_fallback_line,
+    append_run_log, clear_run_logger, current_run_id, current_run_log_path, default_run_log_path,
+    init_run_logger, set_run_working_dir, structured_fallback_line,
 };
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
@@ -328,42 +328,49 @@ pub fn run_with_runtime(
         if cli.backlog_only {
             runtime.terminal.write_line("phase3 backlog-only")?;
             let mut cfg_for_startup = cfg;
-            let _ = run_startup_audits(
-                runtime,
-                &mut cfg_for_startup,
-                &startup.scope,
-                true,
-                cli.force_seed_backlog,
-                cli.seed_dry_run,
-            )?;
+            let _ = run_with_startup_capture(runtime, &startup.scope, "backlog-only", || {
+                run_startup_audits(
+                    runtime,
+                    &mut cfg_for_startup,
+                    &startup.scope,
+                    true,
+                    cli.force_seed_backlog,
+                    cli.seed_dry_run,
+                )
+            })?;
             return Ok(0);
         }
 
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
             let mut cfg_for_startup = cfg;
-            let _ = run_startup_audits(
-                runtime,
-                &mut cfg_for_startup,
-                &startup.scope,
-                false,
-                false,
-                false,
-            )?;
+            let _ =
+                run_with_startup_capture(runtime, &startup.scope, "quality-grades-only", || {
+                    run_startup_audits(
+                        runtime,
+                        &mut cfg_for_startup,
+                        &startup.scope,
+                        false,
+                        false,
+                        false,
+                    )
+                })?;
             return Ok(0);
         }
 
         if cli.sync_only {
             let mut cfg_for_startup = cfg;
             if !cfg_for_startup.execution.test_mode {
-                let _ = run_startup_audits(
-                    runtime,
-                    &mut cfg_for_startup,
-                    &startup.scope,
-                    false,
-                    false,
-                    false,
-                )?;
+                run_with_startup_capture(runtime, &startup.scope, "sync-only", || {
+                    run_startup_audits(
+                        runtime,
+                        &mut cfg_for_startup,
+                        &startup.scope,
+                        false,
+                        false,
+                        false,
+                    )
+                })?;
             }
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let snapshot_path = startup
@@ -466,15 +473,17 @@ pub fn run_with_runtime(
                 "Seeding and reconciling backlog before worker assignment",
             )?;
             if !cfg_for_startup.execution.test_mode {
-                let _ = run_startup_audits_with_progress(
-                    runtime,
-                    &mut cfg_for_startup,
-                    &startup.scope,
-                    true,
-                    cli.force_seed_backlog,
-                    cli.seed_dry_run,
-                    |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
-                )?;
+                run_with_startup_capture(runtime, &startup.scope, "worker-startup", || {
+                    run_startup_audits_with_progress(
+                        runtime,
+                        &mut cfg_for_startup,
+                        &startup.scope,
+                        true,
+                        cli.force_seed_backlog,
+                        cli.seed_dry_run,
+                        |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
+                    )
+                })?;
             }
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
@@ -576,6 +585,95 @@ pub fn run_with_runtime(
         Err(error) => append_run_log("error", "run.failed", json!({ "error": error.to_string() })),
     }
     result
+}
+
+fn run_with_startup_capture<T, F>(
+    runtime: &ProductionRuntime,
+    scope: &crate::types::RuntimeScope,
+    stage: &str,
+    mut run_startup: F,
+) -> Result<T, GardenerError>
+where
+    F: FnMut() -> Result<T, GardenerError>,
+{
+    match run_startup() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            capture_startup_diagnostics(runtime, scope, stage, &error);
+            Err(error)
+        }
+    }
+}
+
+fn capture_startup_diagnostics(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
+    stage: &str,
+    error: &GardenerError,
+) {
+    let run_id = current_run_id().unwrap_or_else(|| "unknown".to_string());
+    let script_path = scope
+        .repo_root
+        .as_ref()
+        .unwrap_or(&scope.working_dir)
+        .join("scripts/startup-diagnostics.sh")
+        .display()
+        .to_string();
+
+    let mut args = vec![
+        script_path,
+        "--stage".to_string(),
+        stage.to_string(),
+        "--run-id".to_string(),
+        run_id.clone(),
+    ];
+    let log_path =
+        current_run_log_path().unwrap_or_else(|| default_run_log_path(&scope.working_dir));
+    args.push("--log-path".to_string());
+    args.push(log_path.display().to_string());
+    args.push("--error".to_string());
+    args.push(error.to_string());
+
+    append_run_log(
+        "warn",
+        "startup.diagnostics.capture.requested",
+        json!({
+            "stage": stage,
+            "run_id": run_id,
+            "script": args.first().cloned().unwrap_or_default()
+        }),
+    );
+
+    let request = ProcessRequest {
+        program: "bash".to_string(),
+        args,
+        cwd: Some(scope.working_dir.clone()),
+    };
+
+    match runtime.process_runner.run(request) {
+        Ok(output) => {
+            append_run_log(
+                "info",
+                "startup.diagnostics.capture.completed",
+                json!({
+                    "stage": stage,
+                    "exit_code": output.exit_code,
+                    "stdout_size": output.stdout.len(),
+                    "stderr_size": output.stderr.len(),
+                }),
+            );
+        }
+        Err(error) => {
+            append_run_log(
+                "warn",
+                "startup.diagnostics.capture.failed",
+                json!({
+                    "stage": stage,
+                    "error": error.to_string(),
+                }),
+            );
+        }
+    }
 }
 
 fn draw_boot_stage(

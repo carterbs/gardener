@@ -70,6 +70,9 @@ COVERAGE_MIN_LINE=95 ./scripts/test-gardener-coverage.sh
 # Override ignored source files (optional):
 COVERAGE_IGNORE_REGEX="/tools/gardener/src/(agent/mod\.rs|agent/factory\.rs)" \
   ./scripts/test-gardener-coverage.sh
+
+# Override the ignore manifest (optional, reviewed list format):
+COVERAGE_IGNORE_MANIFEST=./scripts/coverage-ignore-manifest.txt ./scripts/test-gardener-coverage.sh
 ```
 
 ## Git Hooks

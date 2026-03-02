@@ -1,11 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
-COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-"/tools/gardener/src/(worker\.rs|startup\.rs|tui\.rs|worker_pool\.rs|runtime/mod\.rs|backlog_store\.rs|git\.rs|worktree\.rs|lib\.rs|replay/replayer\.rs|seeding\.rs|triage\.rs|pr_audit\.rs|agent_turn\.rs|do_phase\.rs|git_phase\.rs|merge_loop\.rs|phase_cli\.rs|plan_phase\.rs|review_phase\.rs|understand_phase\.rs|bin/do_task\.rs|bin/git_push\.rs|bin/plan\.rs|bin/review_pr\.rs|bin/understand\.rs|bin/friction_analysis\.rs)"}"
+build_ignore_regex_from_manifest() {
+  local manifest_path=$1
+  local patterns=()
 
-if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
-  report="$(cargo llvm-cov -p gardener --all-targets --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX")"
+  if [[ ! -f "$manifest_path" ]]; then
+    echo "coverage gate: missing coverage ignore manifest: ${manifest_path}" >&2
+    return 1
+  fi
+
+  while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
+    local line
+    line="${raw_line%%#*}"
+    line="${line#/}"
+    line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [[ -z "$line" ]]; then
+      continue
+    fi
+    patterns+=("$line")
+  done < "$manifest_path"
+
+  if [[ "${#patterns[@]}" -eq 0 ]]; then
+    echo ""
+    return 0
+  fi
+
+  printf "/("
+  printf "%s" "${patterns[0]}"
+  for pattern in "${patterns[@]:1}"; do
+    printf "|%s" "$pattern"
+  done
+  printf ")"
+}
+
+MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
+if [[ -n "${COVERAGE_IGNORE_REGEX:-}" ]]; then
+  COVERAGE_IGNORE_REGEX_EFFECTIVE="$COVERAGE_IGNORE_REGEX"
+else
+  COVERAGE_IGNORE_MANIFEST="${COVERAGE_IGNORE_MANIFEST:-scripts/coverage-ignore-manifest.txt}"
+  COVERAGE_IGNORE_REGEX_EFFECTIVE="$(build_ignore_regex_from_manifest "$COVERAGE_IGNORE_MANIFEST")"
+fi
+
+if [[ "${COVERAGE_DRY_RUN:-}" == "1" ]]; then
+  if [[ -n "$COVERAGE_IGNORE_REGEX_EFFECTIVE" ]]; then
+    echo "coverage gate dry-run: cargo llvm-cov -p gardener --all-targets --summary-only --ignore-filename-regex $COVERAGE_IGNORE_REGEX_EFFECTIVE"
+  else
+    echo "coverage gate dry-run: cargo llvm-cov -p gardener --all-targets --summary-only"
+  fi
+  exit 0
+fi
+
+if [[ -n "$COVERAGE_IGNORE_REGEX_EFFECTIVE" ]]; then
+  report="$(cargo llvm-cov -p gardener --all-targets --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX_EFFECTIVE")"
 else
   report="$(cargo llvm-cov -p gardener --all-targets --summary-only)"
 fi

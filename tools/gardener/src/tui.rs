@@ -1151,18 +1151,13 @@ fn draw_dashboard_frame(
         ),
         body[0],
     );
-    let workers_panel = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(body[1]);
-    let viewport_cap = if compact_view {
-        frame.area().height.saturating_sub(11)
-    } else {
-        frame.area().height.saturating_sub(12)
-    };
-    let viewport_height = workers_panel[1].height.min(viewport_cap.max(1));
     let worker_row_height = worker_row_height_for_layout;
-    let worker_row_capacity = (viewport_height as usize / worker_row_height).max(1);
+    let provisional_workers_frame = Block::default()
+        .borders(Borders::ALL)
+        .title("Workers")
+        .border_style(Style::default().fg(Color::Rgb(82, 88, 126)));
+    let workers_area = provisional_workers_frame.inner(body[1]);
+    let worker_row_capacity = (workers_area.height as usize / worker_row_height).max(1);
     let max_worker_offset = visible_worker_count.saturating_sub(worker_row_capacity);
     WORKERS_VIEWPORT_CAPACITY.with(|cell| {
         *cell.borrow_mut() = worker_row_capacity;
@@ -1193,7 +1188,7 @@ fn draw_dashboard_frame(
     });
     let worker_end = (worker_offset + worker_row_capacity).min(visible_worker_count);
 
-    let command_stream_max_width = workers_panel[1]
+    let command_stream_max_width = workers_area
         .width
         .saturating_sub(8 + "Commands: ".len() as u16) as usize;
     let command_scroll_offset = current_command_scroll_offset();
@@ -1205,6 +1200,7 @@ fn draw_dashboard_frame(
         .map(|(idx, row)| {
             let selected = idx == selected_worker;
             let marker = if selected { ">" } else { " " };
+            let current_state_line = format_current_state_line(&row.state);
             let worker_style = if selected {
                 Style::default()
                     .fg(Color::Rgb(126, 231, 135))
@@ -1221,9 +1217,17 @@ fn draw_dashboard_frame(
                 command_stream_max_width,
                 command_scroll_offset,
             );
-            let mut flow_spans = Vec::new();
-            flow_spans.push(Span::raw("    "));
-            flow_spans.push(Span::styled("Flow: ", Style::default().fg(Color::Blue)));
+            let mut flow_spans = vec![
+                Span::raw("    "),
+                Span::styled(
+                    current_state_line,
+                    Style::default()
+                        .fg(Color::Rgb(85, 198, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled("Flow: ", Style::default().fg(Color::Blue)),
+            ];
             flow_spans.extend(flow_line);
             let lines = if compact_view || compact_worker_row {
                 vec![
@@ -1253,25 +1257,23 @@ fn draw_dashboard_frame(
         })
         .collect::<Vec<_>>();
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(
-            if visible_worker_count > worker_row_capacity {
-                format!(
-                    "Workers ({:02}-{:02}/{:02})",
-                    worker_offset + 1,
-                    worker_end,
-                    visible_worker_count
-                )
-            } else {
-                "Workers".to_string()
-            },
-            Style::default()
-                .fg(Color::Rgb(126, 231, 135))
-                .add_modifier(Modifier::BOLD),
-        )])),
-        workers_panel[0],
-    );
-    frame.render_widget(List::new(worker_items), workers_panel[1]);
+    let workers_frame_title = if visible_worker_count > worker_row_capacity {
+        format!(
+            "Workers ({:02}-{:02}/{:02})",
+            worker_offset + 1,
+            worker_end,
+            visible_worker_count
+        )
+    } else {
+        "Workers".to_string()
+    };
+    let workers_frame = Block::default()
+        .borders(Borders::ALL)
+        .title(workers_frame_title)
+        .border_style(Style::default().fg(Color::Rgb(82, 88, 126)));
+    frame.render_widget(workers_frame.clone(), body[1]);
+    let workers_area = workers_frame.inner(body[1]);
+    frame.render_widget(List::new(worker_items), workers_area);
 
     let ordered_backlog = app_state.backlog;
     let ordered_merge_queue = ordered_merge_queue_items(&backlog.in_progress)
@@ -1289,7 +1291,13 @@ fn draw_dashboard_frame(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(body[2]);
-    let backlog_list_capacity = merge_queue_panel[0].height.saturating_sub(2) as usize;
+    let backlog_panel_frame = Block::default()
+        .borders(Borders::ALL)
+        .title("Backlog")
+        .border_style(Style::default().fg(Color::Rgb(245, 196, 95)));
+    frame.render_widget(backlog_panel_frame.clone(), merge_queue_panel[0]);
+    let backlog_panel_area = backlog_panel_frame.inner(merge_queue_panel[0]);
+    let backlog_list_capacity = backlog_panel_area.height.saturating_sub(2) as usize;
     let merge_row = workers.iter().find(|row| row.worker_id == "merge-worker");
     let merge_command_stream_max_width = merge_queue_panel[1]
         .width
@@ -1298,6 +1306,10 @@ fn draw_dashboard_frame(
 
     let backlog_items =
         backlog_items_with_capacity(&ordered_backlog, backlog_list_capacity, "No backlog items");
+    let backlog_panel = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(backlog_panel_area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
             "BACKLOG (PRIORITY ORDER)",
@@ -1305,14 +1317,16 @@ fn draw_dashboard_frame(
                 .fg(Color::Rgb(245, 196, 95))
                 .add_modifier(Modifier::BOLD),
         )])),
-        merge_queue_panel[0],
+        backlog_panel[0],
     );
-    let backlog_panel = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(merge_queue_panel[0]);
     frame.render_widget(List::new(backlog_items), backlog_panel[1]);
 
+    let merge_queue_border = Block::default()
+        .borders(Borders::ALL)
+        .title("Merge Queue")
+        .border_style(Style::default().fg(Color::Rgb(85, 198, 255)));
+    frame.render_widget(merge_queue_border.clone(), merge_queue_panel[1]);
+    let merge_queue_panel_area = merge_queue_border.inner(merge_queue_panel[1]);
     let merge_right_panel = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1321,7 +1335,7 @@ fn draw_dashboard_frame(
             Constraint::Length(1),
             Constraint::Min(1),
         ])
-        .split(merge_queue_panel[1]);
+        .split(merge_queue_panel_area);
     let merge_queue_list_capacity = merge_right_panel[3].height.saturating_sub(2) as usize;
     frame.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
@@ -1908,6 +1922,10 @@ fn worker_flow_chain_spans(state: &str) -> Vec<Span<'static>> {
         .collect()
 }
 
+fn format_current_state_line(state: &str) -> String {
+    format!("State: {}", format_state_label(state))
+}
+
 fn worker_command_stream(commands: &[CommandEntry]) -> String {
     let recent = commands
         .iter()
@@ -2390,6 +2408,72 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_panes_render_with_borders() {
+        let frame = render_dashboard(
+            &[worker(10, false)],
+            &QueueStats {
+                ready: 1,
+                active: 1,
+                failed: 0,
+                unresolved: 0,
+                merge_pending: 0,
+                p0: 1,
+                p1: 0,
+                p2: 0,
+            },
+            &BacklogView {
+                in_progress: vec!["P1 abc123 fix queue".to_string()],
+                queued: vec!["P2 def456 tune logs".to_string()],
+            },
+            120,
+            30,
+        );
+        let border_chars = |line: &str| {
+            line.chars().any(|ch| {
+                matches!(
+                    ch,
+                    '─' | '│'
+                        | '┌'
+                        | '┐'
+                        | '└'
+                        | '┘'
+                        | '╭'
+                        | '╮'
+                        | '╰'
+                        | '╯'
+                        | '+'
+                        | '┬'
+                        | '┴'
+                        | '├'
+                        | '┤'
+                )
+            })
+        };
+        let has_title_with_border = |frame: &str, title: &str| {
+            frame
+                .lines()
+                .any(|line| line.contains(title) && border_chars(line))
+        };
+        let top_left_corners =
+            frame.matches('┌').count() + frame.matches('╭').count() + frame.matches('+').count();
+        let top_right_corners =
+            frame.matches('┐').count() + frame.matches('╮').count() + frame.matches('+').count();
+        assert!(
+            top_left_corners >= 4,
+            "expected worker/backlog/merge queue/nows borders"
+        );
+        assert!(
+            top_right_corners >= 4,
+            "expected worker/backlog/merge queue/nows borders"
+        );
+        assert!(has_title_with_border(&frame, "Workers"));
+        assert!(has_title_with_border(&frame, "Backlog"));
+        assert!(has_title_with_border(&frame, "Merge Queue"));
+        assert!(frame.contains("Backlog"));
+        assert!(frame.contains("Merge Queue"));
+    }
+
+    #[test]
     fn work_now_card_freezes_spinner_after_startup() {
         let active_frame = render_dashboard_at_tick(
             &[worker(10, false)],
@@ -2578,6 +2662,39 @@ mod tests {
                 "full flow chain not rendered for state '{state}'"
             );
         }
+    }
+
+    #[test]
+    fn active_worker_displays_current_state_label() {
+        let frame = render_dashboard(
+            &[WorkerRow {
+                worker_id: "w1".to_string(),
+                state: "merge_polling".to_string(),
+                task_title: "merge worker".to_string(),
+                tool_line: "git merge".to_string(),
+                breadcrumb: "state>merge_polling".to_string(),
+                last_heartbeat_secs: 12,
+                session_age_secs: 33,
+                lease_held: true,
+                session_missing: false,
+                command_details: Vec::new(),
+            }],
+            &QueueStats {
+                ready: 0,
+                active: 1,
+                failed: 0,
+                unresolved: 0,
+                merge_pending: 0,
+                p0: 0,
+                p1: 1,
+                p2: 0,
+            },
+            &BacklogView::default(),
+            120,
+            24,
+        );
+        assert!(frame.contains("State:"));
+        assert!(frame.contains("Checking mergeability"));
     }
 
     #[test]

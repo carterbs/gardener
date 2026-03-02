@@ -570,7 +570,11 @@ mod tests {
         let repo_root = dir.path().to_path_buf();
         fs::create_dir_all(repo_root.join("docs")).expect("mkdir docs");
         fs::write(repo_root.join("AGENTS.md"), "# AGENTS").expect("write");
-        fs::write(repo_root.join("CLAUDE.md"), "## CLAUDE").expect("write");
+        fs::write(
+            repo_root.join("CLAUDE.md"),
+            "# CLAUDE compatibility\n\nPlease read [AGENTS.md](./AGENTS.md).",
+        )
+        .expect("write");
         fs::write(repo_root.join("docs").join("guide.md"), "- guide").expect("write");
 
         let scope = RuntimeScope {
@@ -588,7 +592,10 @@ mod tests {
 
         assert_eq!(context.primary_gap, "coverage_signal");
         assert_eq!(context.agents_md, "# AGENTS");
-        assert_eq!(context.claude_md, "## CLAUDE");
+        assert_eq!(
+            context.claude_md,
+            "# CLAUDE compatibility\n\nPlease read [AGENTS.md](./AGENTS.md)."
+        );
         assert_eq!(context.docs_listing, "- docs/guide.md\n");
         assert!(context.quality_risks.is_empty());
         assert!(context.backlog_skill_md.is_empty());
@@ -596,7 +603,8 @@ mod tests {
 
         let prompt = build_seed_prompt_v2(&context);
         assert!(prompt.contains("# AGENTS"));
-        assert!(prompt.contains("## CLAUDE"));
+        assert!(prompt.contains("# CLAUDE compatibility"));
+        assert!(prompt.contains("[AGENTS.md](./AGENTS.md)"));
     }
 
     #[test]

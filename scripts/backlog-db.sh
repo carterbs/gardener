@@ -16,7 +16,7 @@ Usage:
     --kind feature|maintenance|quality_gap|bugfix|infra|merge_conflict|pr_collision (default: feature)
     --source manual    (default: manual)
     --id TASK_ID       Optional custom task_id (default: manual:<scope>:auto-<unix_ms>)
-    --db PATH          Optional DB path (default: .cache/gardener/backlog.sqlite)
+    --db PATH          Optional DB path (default: ~/.gardener/backlog.sqlite)
   
   scripts/backlog-db.sh runbook
     Print the backlog operations runbook for agents.
@@ -29,7 +29,7 @@ Environment:
 USAGE
 }
 
-env_db_path="${GARDENER_DB_PATH:-.cache/gardener/backlog.sqlite}"
+env_db_path="${GARDENER_DB_PATH:-${HOME}/.gardener/backlog.sqlite}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runbook_path="${script_dir}/../docs/runbooks/backlog-operations.md"
 

@@ -6,7 +6,7 @@ This runbook documents manual backlog actions for agents.
 
 - Run commands from the repository root.
 - For database operations, use the backlog database for the repo under
-  `.cache/gardener/backlog.sqlite` by default.
+  `~/.gardener/backlog.sqlite` by default.
 - Confirm `GARDENER_DB_PATH` if you need to target a different database.
 
 ## Core entrypoint: `scripts/backlog-db.sh`
@@ -27,7 +27,7 @@ The backlog helper script supports two supported operations:
 Example:
 
 ```bash
-GARDENER_DB_PATH=.cache/gardener/backlog.sqlite ./scripts/backlog-db.sh list
+GARDENER_DB_PATH=~/.gardener/backlog.sqlite ./scripts/backlog-db.sh list
 ```
 
 ## Create tasks
@@ -57,7 +57,7 @@ Optional fields:
 - `--status` (`ready|leased|in_progress|merge_pending|complete|failed|unresolved`, default `ready`)
 - `--source` (default `manual`)
 - `--id` (default `manual:<scope>:auto-<unix_ms>`)
-- `--db` (defaults to `.cache/gardener/backlog.sqlite`)
+- `--db` (defaults to `~/.gardener/backlog.sqlite`)
 
 ## State glossary
 

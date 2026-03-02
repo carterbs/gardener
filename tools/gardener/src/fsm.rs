@@ -20,7 +20,7 @@ pub enum TaskCategory {
 
 impl TaskCategory {
     pub fn requires_planning(self) -> bool {
-        matches!(self, Self::Feature | Self::Bugfix | Self::Refactor)
+        true
     }
 }
 
@@ -93,7 +93,11 @@ impl FsmSnapshot {
         Ok(())
     }
 
-    pub fn apply_understand(&mut self, output: &UnderstandOutput) -> Result<(), GardenerError> {
+    pub fn apply_understand(
+        &mut self,
+        output: &UnderstandOutput,
+        retrying_previously_started_work: bool,
+    ) -> Result<(), GardenerError> {
         if self.state != WorkerState::Understand {
             append_run_log(
                 "error",
@@ -107,7 +111,7 @@ impl FsmSnapshot {
             ));
         }
         self.category = Some(output.task_type);
-        let requires_planning = output.task_type.requires_planning();
+        let requires_planning = !retrying_previously_started_work;
         let next = if requires_planning {
             WorkerState::Planning
         } else {
@@ -118,6 +122,7 @@ impl FsmSnapshot {
             "fsm.understand.applied",
             json!({
                 "task_type": format!("{:?}", output.task_type),
+                "retrying_previously_started_work": retrying_previously_started_work,
                 "requires_planning": requires_planning,
                 "next_state": next.as_str()
             }),
@@ -216,28 +221,44 @@ mod tests {
 
     #[test]
     fn planning_skip_mapping_is_deterministic() {
-        for category in [TaskCategory::Task, TaskCategory::Chore, TaskCategory::Infra] {
-            let mut fsm = FsmSnapshot::default();
-            fsm.apply_understand(&UnderstandOutput {
-                task_type: category,
-                reasoning: "x".to_string(),
-            })
-            .expect("skip planning");
-            assert_eq!(fsm.state, WorkerState::Doing);
-        }
-
         for category in [
+            TaskCategory::Task,
+            TaskCategory::Chore,
+            TaskCategory::Infra,
             TaskCategory::Feature,
             TaskCategory::Bugfix,
             TaskCategory::Refactor,
         ] {
             let mut fsm = FsmSnapshot::default();
-            fsm.apply_understand(&UnderstandOutput {
-                task_type: category,
-                reasoning: "x".to_string(),
-            })
-            .expect("requires planning");
+            fsm.apply_understand(
+                &UnderstandOutput {
+                    task_type: category,
+                    reasoning: "x".to_string(),
+                },
+                false,
+            )
+            .expect("skip planning");
             assert_eq!(fsm.state, WorkerState::Planning);
+        }
+
+        for category in [
+            TaskCategory::Task,
+            TaskCategory::Chore,
+            TaskCategory::Infra,
+            TaskCategory::Feature,
+            TaskCategory::Bugfix,
+            TaskCategory::Refactor,
+        ] {
+            let mut fsm = FsmSnapshot::default();
+            fsm.apply_understand(
+                &UnderstandOutput {
+                    task_type: category,
+                    reasoning: "x".to_string(),
+                },
+                true,
+            )
+            .expect("requires planning");
+            assert_eq!(fsm.state, WorkerState::Doing);
         }
     }
 

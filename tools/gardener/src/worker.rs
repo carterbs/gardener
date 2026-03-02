@@ -282,7 +282,7 @@ fn execute_task_live(
             "branch": branch
         }),
     );
-    fsm.apply_understand(&understand)?;
+    fsm.apply_understand(&understand, attempt_count > 1)?;
 
     if fsm.state == WorkerState::Planning {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Planning);
@@ -1172,7 +1172,7 @@ fn execute_task_simulated(
         task_type: classify_task(task_summary),
         reasoning: "deterministic keyword classifier".to_string(),
     };
-    fsm.apply_understand(&understand)?;
+    fsm.apply_understand(&understand, false)?;
 
     if fsm.state == WorkerState::Planning {
         fsm.transition(WorkerState::Doing)?;

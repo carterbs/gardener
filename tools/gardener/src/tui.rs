@@ -35,6 +35,8 @@ const WORKER_FLOW_STATES: [&str; 7] = [
 pub struct WorkerRow {
     pub worker_id: String,
     pub state: String,
+    pub task_id: Option<String>,
+    pub last_state_line: usize,
     pub task_title: String,
     pub tool_line: String,
     pub breadcrumb: String,
@@ -1848,6 +1850,7 @@ pub(crate) fn format_state_label(state: &str) -> String {
         "gitting" => "Gitting".to_string(),
         "gitting_remediation" => "Gitting Remediation".to_string(),
         "pr_creating" => "PR Creating".to_string(),
+        "handoff" => "Merging".to_string(),
         "reviewing" => "Reviewing".to_string(),
         "merging" => "Merging".to_string(),
         "merge_lock_waiting" => "Merge Lock Wait".to_string(),
@@ -1989,8 +1992,11 @@ fn normalize_worker_state(state: &str) -> &str {
         "claimed" | "starting" | "worktree_preparing" | "worktree_ready" => "understand",
         "commit" | "gitting_remediation" | "pr_creating" => "gitting",
         "merge_lock_waiting"
+        | "ci_failure_remediation"
+        | "merge_from_main"
         | "merge_lock_held"
         | "merge_polling"
+        | "handoff"
         | "merge_remediation"
         | "post_merge_validation"
         | "teardown" => "merging",
@@ -2319,6 +2325,8 @@ mod tests {
         WorkerRow {
             worker_id: "w1".to_string(),
             state: "doing".to_string(),
+            task_id: None,
+            last_state_line: 0,
             task_title: "task: demo".to_string(),
             tool_line: "rg --files".to_string(),
             breadcrumb: "understand>doing".to_string(),
@@ -2547,6 +2555,8 @@ mod tests {
                 WorkerRow {
                     worker_id: "w1".to_string(),
                     state: "backlog_sync".to_string(),
+                    task_id: None,
+                    last_state_line: 0,
                     task_title: "task one".to_string(),
                     tool_line: "tool".to_string(),
                     breadcrumb: "boot>backlog_sync".to_string(),
@@ -2559,6 +2569,8 @@ mod tests {
                 WorkerRow {
                     worker_id: "w2".to_string(),
                     state: "merging".to_string(),
+                    task_id: Some("task-two".to_string()),
+                    last_state_line: 0,
                     task_title: "task two".to_string(),
                     tool_line: "prompt 12".to_string(),
                     breadcrumb: "state>merging".to_string(),
@@ -2640,6 +2652,29 @@ mod tests {
     }
 
     #[test]
+    fn worker_flow_chain_treats_handoff_as_merging_state() {
+        let spans = worker_flow_chain_spans("handoff");
+        let labels = spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .filter(|label| label != " → ")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            vec![
+                "Understand",
+                "Planning",
+                "Doing",
+                "Gitting",
+                "Reviewing",
+                "Merging",
+                "Complete"
+            ]
+        );
+        assert_eq!(format_state_label("handoff"), "Merging");
+    }
+
+    #[test]
     fn worker_flow_chain_handles_state_prefixes_for_early_states() {
         for state in ["state>planning", "state planning", "\"understand\""] {
             let spans = worker_flow_chain_spans(state);
@@ -2670,6 +2705,8 @@ mod tests {
             &[WorkerRow {
                 worker_id: "w1".to_string(),
                 state: "merge_polling".to_string(),
+                task_id: Some("task-merge".to_string()),
+                last_state_line: 0,
                 task_title: "merge worker".to_string(),
                 tool_line: "git merge".to_string(),
                 breadcrumb: "state>merge_polling".to_string(),
@@ -2740,6 +2777,8 @@ mod tests {
                 WorkerRow {
                     worker_id: "w1".to_string(),
                     state: "doing".to_string(),
+                    task_id: Some("task-1".to_string()),
+                    last_state_line: 0,
                     task_title: "task one".to_string(),
                     tool_line: "tool".to_string(),
                     breadcrumb: "understand>doing".to_string(),
@@ -2752,6 +2791,8 @@ mod tests {
                 WorkerRow {
                     worker_id: "w2".to_string(),
                     state: "reviewing".to_string(),
+                    task_id: Some("task-2".to_string()),
+                    last_state_line: 0,
                     task_title: "task two".to_string(),
                     tool_line: "tool".to_string(),
                     breadcrumb: "reviewing".to_string(),
@@ -2847,6 +2888,8 @@ mod tests {
             .map(|idx| WorkerRow {
                 worker_id: format!("w{idx}"),
                 state: "doing".to_string(),
+                task_id: None,
+                last_state_line: 0,
                 task_title: format!("task {idx}"),
                 tool_line: "tool".to_string(),
                 breadcrumb: "understand>doing".to_string(),

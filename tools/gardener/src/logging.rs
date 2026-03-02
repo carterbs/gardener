@@ -414,7 +414,7 @@ fn recent_worker_tool_commands_nolock(
 pub fn recent_worker_state_events(
     from_line: usize,
     max_lines: usize,
-) -> Vec<(usize, String, String, String)> {
+) -> Vec<(usize, String, String, String, String)> {
     let _guard = run_log_activity_lock()
         .lock()
         .expect("run log activity lock");
@@ -424,7 +424,7 @@ pub fn recent_worker_state_events(
 fn recent_worker_state_events_nolock(
     from_line: usize,
     max_lines: usize,
-) -> Vec<(usize, String, String, String)> {
+) -> Vec<(usize, String, String, String, String)> {
     let _ = structured_fallback_line("logging", "recent_worker_state_events_nolock", "starting");
     if max_lines == 0 {
         return Vec::new();
@@ -472,8 +472,16 @@ fn recent_worker_state_events_nolock(
             Some(state) if !state.is_empty() => state.to_string(),
             _ => continue,
         };
+        let task_id = match value
+            .get("payload")
+            .and_then(|p| p.get("task_id"))
+            .and_then(Value::as_str)
+        {
+            Some(task_id) if !task_id.is_empty() => task_id.to_string(),
+            _ => continue,
+        };
         let details = worker_state_details(&state, value.get("payload"));
-        events.push((idx, worker_id, state, details));
+        events.push((idx, worker_id, state, task_id, details));
     }
 
     if events.len() <= max_lines {
@@ -907,9 +915,9 @@ mod tests {
         let path = dir.path().join("run.jsonl");
         init_run_logger_nolock(&path, dir.path());
         let log_lines = [
-            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-1","state":"understand"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-1","task_id":"task-a","state":"understand"}}"#,
             r#"{"event_type":"adapter.tool","payload":{"worker_id":"worker-1","kind":"ToolCall","command":"ignored"}}"#,
-            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-2","state":"merge_lock_waiting"}}"#,
+            r#"{"event_type":"worker.activity.state_changed","payload":{"worker_id":"worker-2","task_id":"task-b","state":"merge_lock_waiting"}}"#,
         ];
         std::fs::write(&path, log_lines.join("\n")).expect("seed log");
 
@@ -918,11 +926,13 @@ mod tests {
         assert_eq!(lines[0].0, 0);
         assert_eq!(lines[0].1, "worker-1");
         assert_eq!(lines[0].2, "understand");
-        assert_eq!(lines[0].3, "");
+        assert_eq!(lines[0].3, "task-a");
+        assert_eq!(lines[0].4, "");
         assert_eq!(lines[1].0, 2);
         assert_eq!(lines[1].1, "worker-2");
         assert_eq!(lines[1].2, "merge_lock_waiting");
-        assert_eq!(lines[1].3, "");
+        assert_eq!(lines[1].3, "task-b");
+        assert_eq!(lines[1].4, "");
         clear_run_logger_nolock();
     }
 

@@ -577,6 +577,8 @@ fn draw_boot_stage(
     let workers = vec![WorkerRow {
         worker_id: "sys".to_string(),
         state: stage.to_ascii_lowercase(),
+        task_id: None,
+        last_state_line: 0,
         task_title: detail.to_string(),
         tool_line: "orchestrator".to_string(),
         breadcrumb: format!("boot>{}", stage.to_ascii_lowercase()),

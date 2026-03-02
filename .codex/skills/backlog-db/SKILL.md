@@ -23,11 +23,17 @@ Use this skill when you need to inspect Gardener backlog rows or create new back
 - Provide overrides:
   - `--kind`, `--status`, `--source`, `--id`, `--db`
 
+## Runbook
+
+- `./scripts/backlog-db.sh runbook` prints `docs/runbooks/backlog-operations.md`.
+- Use this runbook for common manual operations, state glossary, and recovery guidance.
+
 ## Required fields
 
 - `--title` and `--details` are required for `add`.
 - `priority` should be one of `P0`, `P1`, `P2`.
 - `--kind` must be one of: `feature`, `maintenance`, `quality_gap`, `bugfix`, `infra`, `merge_conflict`, `pr_collision`. **Always use snake_case** — the Rust parser rejects PascalCase (e.g. `QualityGap` will cause a database conversion error).
+- `--status` should be one of: `ready`, `leased`, `in_progress`, `merge_pending`, `complete`, `failed`, `unresolved`.
 - If `--id` is omitted, generated task id is `manual:<scope>:auto-<unix_ms>`.
 
 ## Notes

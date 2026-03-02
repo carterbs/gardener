@@ -843,6 +843,7 @@ pub fn execute_merge_phase(
     let identity = WorkerIdentity::new(worker_id);
     let gh = GhClient::new(process_runner, &req.worktree_path);
     let git = GitClient::new(process_runner, &req.worktree_path);
+    let repo_root_git = GitClient::new(process_runner, &scope.working_dir);
     let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
     let worktree_client = WorktreeClient::new(process_runner, repo_root);
 
@@ -918,6 +919,32 @@ pub fn execute_merge_phase(
         match (&status.mergeable, &status.merge_state_status) {
             // Clean + Mergeable → attempt merge
             (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => {
+                if let Err(err) = run_repo_validation_with_quality_guard(
+                    &repo_root_git,
+                    runtime_file_system,
+                    runtime_clock,
+                    cfg,
+                    scope,
+                ) {
+                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    append_run_log(
+                        "error",
+                        "worker.merging.pre_validation_failed",
+                        json!({
+                            "worker_id": worker_id,
+                            "task_id": task_id,
+                            "error": err.to_string()
+                        }),
+                    );
+                    return Ok(WorkerRunSummary {
+                        worker_id: req.worker_id.clone(),
+                        session_id: req.session_id.clone(),
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason: Some(format!("pre-merge validation failed: {err}")),
+                    });
+                }
                 match gh.merge_pr(pr) {
                     Ok(()) => {
                         let view = gh.view_pr(pr)?;
@@ -1167,6 +1194,32 @@ pub fn execute_merge_phase(
                         "merge_state_status": format!("{:?}", status.merge_state_status)
                     }),
                 );
+                if let Err(err) = run_repo_validation_with_quality_guard(
+                    &repo_root_git,
+                    runtime_file_system,
+                    runtime_clock,
+                    cfg,
+                    scope,
+                ) {
+                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
+                    append_run_log(
+                        "error",
+                        "worker.merging.pre_validation_failed",
+                        json!({
+                            "worker_id": worker_id,
+                            "task_id": task_id,
+                            "error": err.to_string()
+                        }),
+                    );
+                    return Ok(WorkerRunSummary {
+                        worker_id: req.worker_id.clone(),
+                        session_id: req.session_id.clone(),
+                        final_state: WorkerState::Failed,
+                        logs,
+                        teardown: None,
+                        failure_reason: Some(format!("pre-merge validation failed: {err}")),
+                    });
+                }
                 match gh.merge_pr(pr) {
                     Ok(()) => {
                         let view = gh.view_pr(pr)?;
@@ -1204,10 +1257,8 @@ pub fn execute_merge_phase(
 
     // --- Post-merge validation ---
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation);
-    let repo_root_git = GitClient::new(process_runner, &scope.working_dir);
-    repo_root_git.pull_main().ok();
-    if let Err(err) = repo_root_git.run_validation_command_with_quality_guard(
-        &cfg.validation.command,
+    if let Err(err) = run_repo_validation_with_quality_guard(
+        &repo_root_git,
         runtime_file_system,
         runtime_clock,
         cfg,
@@ -1579,6 +1630,23 @@ fn worker_merge_main_and_push(
     }
 }
 
+fn run_repo_validation_with_quality_guard(
+    repo_root_git: &GitClient<'_>,
+    runtime_file_system: &dyn FileSystem,
+    runtime_clock: &dyn Clock,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> Result<(), GardenerError> {
+    repo_root_git.pull_main().ok();
+    repo_root_git.run_validation_command_with_quality_guard(
+        &cfg.validation.command,
+        runtime_file_system,
+        runtime_clock,
+        cfg,
+        scope,
+    )
+}
+
 fn log_event_from(output: &AgentTurnOutput, state: WorkerState) -> WorkerLogEvent {
     WorkerLogEvent {
         state,
@@ -1775,7 +1843,7 @@ mod tests {
     use crate::do_phase::{fallback_commit_message, parse_doing_output};
     use crate::logging;
     use crate::review_phase::parse_reviewing_output;
-    use crate::runtime::FakeProcessRunner;
+    use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
     use crate::types::{RuntimeScope, WorkerState};
     use crate::understand_phase::parse_understand_output;
     use serde_json::json;
@@ -1918,6 +1986,102 @@ mod tests {
                 "/repo/.cache/gardener/reviews/{}.json",
                 worktree_slug_for_task("manual:tui:GARD-01")
             )
+        );
+    }
+
+    #[test]
+    fn execute_merge_phase_blocks_merge_when_pre_merge_validation_fails() {
+        let runner = FakeProcessRunner::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+        let mut cfg = AppConfig::default();
+        cfg.validation.command = "npm run validate".to_string();
+        cfg.quality_report.path = "quality.md".to_string();
+        cfg.quality_report.stale_after_days = 0;
+        cfg.quality_report.stale_if_head_commit_differs = false;
+
+        std::fs::write(scope.working_dir.join("quality.md"), "# Quality Grades\n")
+            .expect("seed quality report");
+        std::fs::write(scope.working_dir.join("quality.md.stamp"), "0").expect("seed stale stamp");
+
+        // gh pr view <pr> --json mergeable,mergeStateStatus
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        // gh pr view <pr> --json mergedAt,mergeCommit,headRefName,state
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergedAt":null,"mergeCommit":null,"headRefName":"gardener/manual-test","state":"OPEN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let req = super::MergeRequest {
+            slot_idx: 0,
+            task_id: "manual:test:pre-merge-guard".to_string(),
+            task_summary: "test".to_string(),
+            attempt_count: 1,
+            worker_id: "merge-worker".to_string(),
+            session_id: "session-1".to_string(),
+            worktree_path: dir.path().join("worktree"),
+            branch: "gardener/manual-test".to_string(),
+            pr_number: 42,
+            logs: Vec::new(),
+            handoff_evidence_bundle: None,
+        };
+
+        let fs = ProductionFileSystem;
+        let clock = ProductionClock;
+        let summary = super::execute_merge_phase(&req, &cfg, &runner, &fs, &clock, &scope)
+            .expect("merge phase should return summary");
+        assert_eq!(summary.final_state, WorkerState::Failed);
+        assert!(
+            summary
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("pre-merge validation failed"),
+            "expected pre-merge validation failure reason"
+        );
+
+        let spawned = runner.spawned();
+        assert!(
+            !spawned.iter().any(|request| {
+                request.program == "gh"
+                    && request.args.len() >= 2
+                    && request.args[0] == "pr"
+                    && request.args[1] == "merge"
+            }),
+            "pre-merge validation failure must block gh pr merge"
         );
     }
 

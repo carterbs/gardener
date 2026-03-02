@@ -59,3 +59,18 @@ fn docs_readme_links_runtime_failure_triage_cookbook() {
         "runtime failure cookbook should include the one-command run audit"
     );
 }
+
+#[test]
+fn docs_readme_disallows_ephemeral_plan_links() {
+    let readme_path = repo_root_path("../../docs/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("unable to read docs/README.md: {err}"));
+    let banned_fragments = ["thoughts/shared/plans/", "../thoughts/shared/plans/"];
+    assert!(
+        banned_fragments
+            .iter()
+            .all(|fragment| !readme.contains(fragment)),
+        "docs/README.md must not contain ephemeral plan links, including {fragment:?}",
+        fragment = banned_fragments.join(", "),
+    );
+}

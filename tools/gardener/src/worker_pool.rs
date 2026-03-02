@@ -674,7 +674,7 @@ pub fn run_worker_pool_fsm(
                                     });
                                 });
                                 active_doing = active_doing.saturating_add(1);
-                                } else {
+                            } else {
                                 set_worker_idle(&mut workers[idx], "waiting for claim");
                                 workers[idx].task_id = None;
                                 workers[idx].last_state_line = last_worker_state_line;

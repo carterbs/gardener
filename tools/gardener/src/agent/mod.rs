@@ -70,7 +70,7 @@ pub fn probe_and_persist(
 ) -> Result<CapabilitySnapshot, GardenerError> {
     append_run_log(
         "info",
-        "agent.probe.started",
+        "agent.prerequisites.check.started",
         json!({
             "adapter_count": adapters.len(),
             "cache_root": cache_root.display().to_string()
@@ -81,7 +81,7 @@ pub fn probe_and_persist(
         let backend = adapter.backend();
         append_run_log(
             "debug",
-            "agent.probe.adapter",
+            "agent.prerequisites.adapter",
             json!({
                 "backend": backend.as_str()
             }),
@@ -90,7 +90,7 @@ pub fn probe_and_persist(
             Ok(cap) => {
                 append_run_log(
                     "info",
-                    "agent.probe.adapter.ok",
+                    "agent.prerequisites.adapter.ok",
                     json!({
                         "backend": backend.as_str(),
                         "version": cap.version,
@@ -104,13 +104,16 @@ pub fn probe_and_persist(
             Err(err) => {
                 append_run_log(
                     "warn",
-                    "agent.probe.adapter.failed",
+                    "agent.prerequisites.adapter.failed",
                     json!({
                         "backend": backend.as_str(),
                         "error": err.to_string()
                     }),
                 );
-                return Err(err);
+                let backend_name = backend.as_str();
+                return Err(GardenerError::Cli(format!(
+                    "agent prerequisite check failed for '{backend_name}'; install the '{backend_name}' CLI on PATH"
+                )));
             }
         }
     }
@@ -167,8 +170,9 @@ mod tests {
     use super::{
         probe_and_persist, validate_model, AdapterCapabilities, AdapterContext, AgentAdapter,
     };
+    use crate::agent::{claude::ClaudeAdapter, codex::CodexAdapter};
     use crate::protocol::{AgentTerminal, StepResult};
-    use crate::runtime::{FakeClock, FakeFileSystem, FakeProcessRunner, FileSystem};
+    use crate::runtime::{FakeClock, FakeFileSystem, FakeProcessRunner, FileSystem, ProcessOutput};
     use crate::types::AgentKind;
     use serde_json::json;
     use std::path::Path;
@@ -217,6 +221,79 @@ mod tests {
             .expect("snapshot");
         assert_eq!(snapshot.adapters.len(), 1);
         assert!(fs.exists(Path::new("/repo/.cache/gardener/adapter-capabilities.json")));
+    }
+
+    #[test]
+    fn probe_persists_capability_snapshot_for_multiple_adapters() {
+        let fs = FakeFileSystem::default();
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "codex usage".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "codex 1.0.0".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "claude --output-format".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "claude 2.0.0".to_string(),
+            stderr: String::new(),
+        }));
+        let clock = FakeClock::default();
+        let claude = ClaudeAdapter;
+        let codex = CodexAdapter;
+        let snapshot =
+            probe_and_persist(&[&claude, &codex], &runner, &fs, &clock, Path::new("/repo"))
+                .expect("snapshot");
+        assert_eq!(snapshot.adapters.len(), 2);
+        assert_eq!(runner.spawned().len(), 4);
+    }
+
+    #[test]
+    fn probe_and_persist_reports_missing_cli_binary_as_cli_error() {
+        struct FailingAdapter;
+
+        impl AgentAdapter for FailingAdapter {
+            fn backend(&self) -> AgentKind {
+                AgentKind::Claude
+            }
+
+            fn probe_capabilities(
+                &self,
+                _process_runner: &dyn crate::runtime::ProcessRunner,
+            ) -> Result<AdapterCapabilities, crate::errors::GardenerError> {
+                Err(crate::errors::GardenerError::Process(
+                    "process missing".to_string(),
+                ))
+            }
+
+            fn execute(
+                &self,
+                _process_runner: &dyn crate::runtime::ProcessRunner,
+                _context: &crate::agent::AdapterContext,
+                _prompt: &str,
+                _on_event: Option<&mut dyn FnMut(&crate::protocol::AgentEvent)>,
+            ) -> Result<StepResult, crate::errors::GardenerError> {
+                unreachable!()
+            }
+        }
+
+        let fs = FakeFileSystem::default();
+        let runner = FakeProcessRunner::default();
+        let clock = FakeClock::default();
+        let adapter = FailingAdapter;
+        let err = probe_and_persist(&[&adapter], &runner, &fs, &clock, Path::new("/repo"))
+            .expect_err("should fail");
+        let message = format!("{err}");
+        assert!(message.contains("agent prerequisite check failed for 'claude'"));
     }
 
     #[test]

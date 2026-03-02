@@ -1,4 +1,4 @@
-#![deny(clippy::needless_update, clippy::redundant_clone)]
+#![deny(clippy::manual_strip, clippy::needless_update, clippy::redundant_clone)]
 
 pub mod agent;
 pub mod backlog_snapshot;
@@ -58,6 +58,7 @@ use agent::factory::AdapterFactory;
 use agent::{probe_and_persist, validate_model};
 use backlog_snapshot::export_markdown_snapshot;
 use backlog_store::BacklogStore;
+use std::collections::HashMap;
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
@@ -67,6 +68,7 @@ use logging::{
 };
 use replay::recorder::emit_record;
 use replay::recording::{BacklogSnapshotRecord, BacklogTaskRecord, RecordEntry};
+use gh::GhClient;
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
@@ -74,6 +76,7 @@ use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
 use tui::{BacklogView, QueueStats, WorkerRow};
 use types::{AgentKind, RuntimeScope, ValidationCommandResolution};
+use worker::worktree_branch_for;
 use worker_pool::run_worker_pool_fsm;
 
 #[derive(Debug, Clone, Parser)]
@@ -478,7 +481,38 @@ pub fn run_with_runtime(
             }
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
-            let startup_backlog = store.list_tasks()?;
+            let mut startup_backlog = store.list_tasks()?;
+            if !cfg_for_startup.execution.test_mode {
+                if let Ok(open_prs) = GhClient::new(
+                    runtime.process_runner.as_ref(),
+                    startup.scope.repo_root.as_ref().unwrap_or(&startup.scope.working_dir),
+                )
+                .list_open_prs()
+                {
+                    let open_pr_map = open_prs
+                        .into_iter()
+                        .filter(|pr| pr.head_ref_name.starts_with("gardener/"))
+                        .map(|pr| (pr.head_ref_name, pr.number))
+                    .collect::<HashMap<_, _>>();
+                for task in startup_backlog
+                    .iter()
+                    .filter(|task| task.related_pr.is_none())
+                {
+                    let branch = worktree_branch_for(&task.task_id);
+                    if let Some(pr_number) = open_pr_map.get(&branch).copied() {
+                        let _ = store.set_related_pr(&task.task_id, pr_number as i64, &branch);
+                    }
+                }
+                let _ = store.promote_ready_with_pr();
+            } else {
+                append_run_log(
+                    "warn",
+                    "backlog.startup.open_prs_skipped",
+                    json!({ "cwd": startup.scope.working_dir.display().to_string() }),
+                );
+            }
+            startup_backlog = store.list_tasks()?;
+            }
             emit_record(RecordEntry::BacklogSnapshot(BacklogSnapshotRecord {
                 tasks: startup_backlog
                     .iter()

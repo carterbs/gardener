@@ -26,6 +26,29 @@ fn workspace_clippy_lint_configuration_enforces_identity_op_deny() {
 }
 
 #[test]
+fn workspace_clippy_lint_configuration_enforces_expect_used_deny() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path))
+        .unwrap_or_else(|_| panic!("failed to read workspace manifest: {}", manifest_path.display()));
+
+    let manifest: Value = toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("expect_used"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.expect_used is not configured");
+
+    assert_eq!(level, "deny");
+}
+
+#[test]
 fn workspace_clippy_lint_configuration_enforces_manual_clamp_warn() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
@@ -49,7 +72,7 @@ fn workspace_clippy_lint_configuration_enforces_manual_clamp_warn() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_find_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_find_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -68,11 +91,11 @@ fn workspace_clippy_lint_configuration_enables_manual_find_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_find is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_memcpy_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_memcpy_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -91,7 +114,7 @@ fn workspace_clippy_lint_configuration_enables_manual_memcpy_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_memcpy is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
@@ -118,7 +141,7 @@ fn workspace_clippy_lint_configuration_enables_manual_filter_warn() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enforces_manual_flatten_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_flatten_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -137,11 +160,11 @@ fn workspace_clippy_lint_configuration_enforces_manual_flatten_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_flatten is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_map_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_map_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -160,7 +183,7 @@ fn workspace_clippy_lint_configuration_enables_manual_map_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_map is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
@@ -250,7 +273,7 @@ fn workspace_clippy_lint_configuration_enables_manual_unwrap_or_warn() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_range_contains_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_range_contains_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -269,11 +292,11 @@ fn workspace_clippy_lint_configuration_enables_manual_range_contains_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_range_contains is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_non_exhaustive_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_non_exhaustive_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -292,11 +315,11 @@ fn workspace_clippy_lint_configuration_enables_manual_non_exhaustive_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_non_exhaustive is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_ok_or_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_ok_or_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -315,11 +338,11 @@ fn workspace_clippy_lint_configuration_enables_manual_ok_or_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_ok_or is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_retain_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_retain_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -338,11 +361,11 @@ fn workspace_clippy_lint_configuration_enables_manual_retain_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_retain is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_manual_strip_warn() {
+fn workspace_clippy_lint_configuration_enforces_manual_strip_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -361,7 +384,7 @@ fn workspace_clippy_lint_configuration_enables_manual_strip_warn() {
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.manual_strip is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }
 
 #[test]
@@ -480,7 +503,7 @@ fn workspace_clippy_lint_configuration_enforces_needless_late_init_deny() {
 }
 
 #[test]
-fn workspace_clippy_lint_configuration_enables_unnecessary_lazy_evaluations_warn() {
+fn workspace_clippy_lint_configuration_enables_unnecessary_lazy_evaluations_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();
     manifest_path.pop();
@@ -499,5 +522,5 @@ fn workspace_clippy_lint_configuration_enables_unnecessary_lazy_evaluations_warn
         .and_then(Value::as_str)
         .expect("workspace.lints.clippy.unnecessary_lazy_evaluations is not configured");
 
-    assert_eq!(level, "warn");
+    assert_eq!(level, "deny");
 }

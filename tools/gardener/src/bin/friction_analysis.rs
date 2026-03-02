@@ -1,4 +1,4 @@
-#![deny(clippy::unwrap_used, clippy::expect_used, clippy::redundant_clone)]
+#![deny(clippy::manual_strip, clippy::unwrap_used, clippy::expect_used, clippy::redundant_clone)]
 
 use gardener::config::load_config;
 use gardener::config::CliOverrides;

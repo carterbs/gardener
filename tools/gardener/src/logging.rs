@@ -693,8 +693,45 @@ mod tests {
         local_time_for_next_check, structured_fallback_line, JsonlLogger,
     };
     use serde_json::json;
+    use std::env;
+    use std::ffi::OsString;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_guard_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_GUARD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_GUARD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env guard lock")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = env::var_os(key);
+            match value {
+                Some(value) => env::set_var(key, value),
+                None => env::remove_var(key),
+            }
+
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => env::set_var(self.key, value),
+                None => env::remove_var(self.key),
+            }
+        }
+    }
 
     fn with_test_lock() -> std::sync::MutexGuard<'static, ()> {
         super::run_log_activity_lock()
@@ -830,6 +867,16 @@ mod tests {
         init_run_logger_nolock(&path, dir.path());
         assert_eq!(super::current_log_line_count_nolock(), 0);
         clear_run_logger_nolock();
+    }
+
+    #[test]
+    fn default_path_prefers_explicit_log_path_env() {
+        let _lock = env_guard_lock();
+        let _guard = EnvVarGuard::set("GARDENER_LOG_PATH", Some("/tmp/runtime-otel.jsonl"));
+
+        let path = default_run_log_path(Path::new("/repo"));
+
+        assert_eq!(path, PathBuf::from("/tmp/runtime-otel.jsonl"));
     }
 
     #[test]

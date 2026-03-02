@@ -32,6 +32,10 @@ fn docs_readme_is_navigation_index() {
         "docs/README.md must link to the backlog operations runbook"
     );
     assert!(
+        readme.contains("[Startup artifact map runbook](./runbooks/startup-artifact-map.md)"),
+        "docs/README.md must link to the startup artifact map runbook"
+    );
+    assert!(
         readme.contains("[Workflow conventions](./conventions/workflow.md)"),
         "docs/README.md must link to workflow conventions"
     );
@@ -47,6 +51,7 @@ fn docs_readme_is_navigation_index() {
         "../../docs/conventions/workflow.md",
         "../../docs/repository-map.md",
         "../../docs/runbooks/backlog-operations.md",
+        "../../docs/runbooks/startup-artifact-map.md",
     ] {
         assert!(
             repo_root_path(required).exists(),
@@ -85,6 +90,30 @@ fn docs_readme_is_navigation_index() {
     assert!(
         readme_dir_listing >= 8,
         "docs/README.md should provide a minimum set of agent navigation links"
+    );
+}
+
+#[test]
+fn startup_artifact_map_runbook_has_steering_focus() {
+    let runbook_path = repo_root_path("../../docs/runbooks/startup-artifact-map.md");
+    let runbook = std::fs::read_to_string(&runbook_path)
+        .unwrap_or_else(|err| panic!("unable to read startup artifact map runbook: {err}"));
+
+    assert!(
+        runbook.contains("# Startup Artifact Map Runbook for Agent Steering"),
+        "startup artifact map runbook must include the expected heading"
+    );
+    assert!(
+        runbook.contains("## Startup artifact map"),
+        "startup artifact map runbook must include artifact table section"
+    );
+    assert!(
+        runbook.contains("## Steering-specific interpretation"),
+        "startup artifact map runbook must include steering interpretation"
+    );
+    assert!(
+        runbook.contains("agent_steering"),
+        "startup artifact map runbook should describe agent_steering signals"
     );
 }
 

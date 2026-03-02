@@ -1,24 +1,28 @@
-# Documentation Index for Agent Navigation
+# Agent Navigation Index
 
-This directory is the canonical documentation index for agent workflows. Start here before deeper investigation.
+This directory is the canonical index for agent-oriented repository navigation. Start here before deeper exploration.
 
-## Primary entry points
+## First: repository constraints
 
-- [Root AGENTS instructions](../AGENTS.md)
-- [Project README](../README.md)
-- [Quality assessment snapshot](./quality-grades.md)
+- [`AGENTS.md`](../AGENTS.md)
+- [`README.md`](../README.md)
+- [Quality Grades](./quality-grades.md)
 
-## Operational guidance
+## Second: execution and workflow
 
 - [Workflow conventions](./conventions/workflow.md)
+- [Repository reference essay](./references/codex-agent-team-article.md)
+- [Triage and worktree workflow docs](../thoughts/shared/plans/2026-02-27-tui-integration-testing.md)
+
+## Third: reusable agent capabilities
+
 - [Backlog DB skill](../.codex/skills/backlog-db/SKILL.md)
+- [Commit workflow skill](../.codex/skills/commit/SKILL.md)
+- [Debugging logs skill](../.codex/skills/log-debugging/SKILL.md)
+- [Session replay skill](../.codex/skills/session-replay/SKILL.md)
 
-## Contextual references
+## Before editing
 
-- [Repository reference article](./references/codex-agent-team-article.md)
-
-## Contribution workflow
-
-1. Consult [`../AGENTS.md`](../AGENTS.md) for runtime and commit constraints.
-2. Read the applicable section in this index.
-3. Use existing docs and plan files as the source of truth before making changes.
+1. Read [`AGENTS.md`](../AGENTS.md) and the [root README](../README.md).
+2. Read the relevant docs in this index.
+3. Use this repository as your source of truth and verify behavior with tests before committing.

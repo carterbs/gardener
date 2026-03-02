@@ -247,6 +247,8 @@ pub fn run_worker_pool_fsm(
                 store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
             let Some(task) = claimed_task else {
                 set_worker_idle(&mut workers[idx], "waiting for claim");
+                workers[idx].task_id = None;
+                workers[idx].last_state_line = last_worker_state_line;
                 continue;
             };
             claimed_any = true;
@@ -672,8 +674,10 @@ pub fn run_worker_pool_fsm(
                                     });
                                 });
                                 active_doing = active_doing.saturating_add(1);
-                            } else {
+                                } else {
                                 set_worker_idle(&mut workers[idx], "waiting for claim");
+                                workers[idx].task_id = None;
+                                workers[idx].last_state_line = last_worker_state_line;
                             }
                         }
                         // Signal merge worker to exit when all work is done
@@ -800,6 +804,8 @@ pub fn run_worker_pool_fsm(
                         // Reset merge row to idle if no more merges pending
                         if active_merging == 0 {
                             set_worker_idle(&mut workers[merge_row_idx], "waiting for merge");
+                            workers[merge_row_idx].task_id = None;
+                            workers[merge_row_idx].last_state_line = last_worker_state_line;
                         }
                         refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
                         render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;

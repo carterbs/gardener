@@ -70,6 +70,9 @@ COVERAGE_MIN_LINE=95 ./scripts/test-gardener-coverage.sh
 # Override ignored source files (optional):
 COVERAGE_IGNORE_REGEX="/tools/gardener/src/(agent/mod\.rs|agent/factory\.rs)" \
   ./scripts/test-gardener-coverage.sh
+
+# Override the ignore manifest (optional, reviewed list format):
+COVERAGE_IGNORE_MANIFEST=./scripts/coverage-ignore-manifest.txt ./scripts/test-gardener-coverage.sh
 ```
 
 ### Validation pipeline
@@ -132,10 +135,9 @@ When commit is blocked by hooks:
      - Add each missing migration include to `tools/gardener/src/backlog_store.rs`.
    - Binary blob failures:
      - Remove blocked files listed by `scripts/check-binary-blobs.sh` from the commit or move them outside git history.
-   - Coverage gate failure:
-     - Re-run `./scripts/test-gardener-coverage.sh`, inspect the reported `TOTAL` and failing areas, then tighten/fix uncovered paths in `tools/gardener/src`.
+  - Coverage gate failure:
+    - Re-run `./scripts/test-gardener-coverage.sh`, inspect the reported `TOTAL` and failing areas, then tighten/fix uncovered paths in `tools/gardener/src`.
 4. Re-stage any files changed by the remediation command (`git add`) and commit again.
-
 
 ## Vision
 

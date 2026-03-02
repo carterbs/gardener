@@ -66,7 +66,7 @@ fn rejects_runtime_artifacts_by_name() {
 
     let default_profraw = temp.path().join("default_9876543210_0_12345.profraw");
     let startup_diagnostics_dir = temp.path().join("startup-diagnostics");
-    let startup_diag = startup_diagnostics_dir.join("test-startup-failure.md");
+    let startup_diag = startup_diagnostics_dir.join("startup-notes.md");
 
     fs::write(&default_profraw, b"not-a-real-binary payload\n").expect("write profiling artifact");
     fs::create_dir_all(&startup_diagnostics_dir).expect("startup diagnostics fixture dir");
@@ -86,5 +86,5 @@ fn rejects_runtime_artifacts_by_name() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("blocked artifact(s)"));
     assert!(stderr.contains("default_9876543210_0_12345.profraw"));
-    assert!(stderr.contains("test-startup-failure.md"));
+    assert!(stderr.contains("startup-notes.md"));
 }

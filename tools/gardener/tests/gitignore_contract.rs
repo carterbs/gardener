@@ -20,6 +20,7 @@ fn gitignore_covers_runtime_leftovers() {
         "*.profraw",
         "default_*.profraw",
         "otel-logs.jsonl",
+        "startup-diagnostics/",
         "startup-diagnostics/*.md",
     ];
     for pattern in expected {

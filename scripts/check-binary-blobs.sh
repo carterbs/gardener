@@ -27,7 +27,7 @@ for target in "${targets[@]}"; do
   [[ -f "$target" ]] || continue
 
   case "$target" in
-    *.profraw|default_*.profraw|*/startup-diagnostics/*-startup-failure.md|startup-diagnostics/*-startup-failure.md)
+    *.profraw|default_*.profraw|*/startup-diagnostics/*|startup-diagnostics/*)
       blocked+=("$target (known runtime artifact)")
       continue
       ;;

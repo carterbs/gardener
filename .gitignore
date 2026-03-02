@@ -10,4 +10,5 @@ otel-logs.jsonl
 docs/quality-grades.md.stamp
 *.profraw
 default_*.profraw
+startup-diagnostics/
 startup-diagnostics/*.md

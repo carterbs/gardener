@@ -28,6 +28,7 @@ use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
+use std::cell::RefCell;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -107,6 +108,22 @@ struct ReviewArtifact {
 }
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
+
+thread_local! {
+    static STATE_SINK: RefCell<Option<Box<dyn Fn(&str, &str, &str)>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn install_state_sink(sink: Box<dyn Fn(&str, &str, &str)>) {
+    STATE_SINK.with(|cell| {
+        *cell.borrow_mut() = Some(sink);
+    });
+}
+
+pub(crate) fn clear_state_sink() {
+    STATE_SINK.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerStreamEvent {
@@ -305,6 +322,11 @@ fn emit_worker_activity_state_with(
             details: details_str,
         });
     }
+    STATE_SINK.with(|cell| {
+        if let Some(sink) = cell.borrow().as_ref() {
+            sink(state.as_str(), task_id, &details_str);
+        }
+    });
     append_run_log("info", "worker.activity.state_changed", payload);
 }
 

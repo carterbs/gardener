@@ -1,9 +1,7 @@
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{
-    seeding_prompt_template, SEEDING_ACTION_CONTRACT_DRY_RUN, SEEDING_ACTION_CONTRACT_WRITE,
-};
+use crate::prompt_registry::{seeding_prompt_template, SEEDING_ACTION_CONTRACT_WRITE};
 use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
@@ -57,11 +55,32 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
 }
 
 fn build_seed_dry_run_prompt_v1(context: &SeedPromptContext) -> String {
-    render_seed_prompt_template(
-        seeding_prompt_template().body,
-        context,
-        SEEDING_ACTION_CONTRACT_DRY_RUN,
-    )
+    let mut quality_risks = context.quality_risks.clone();
+    if quality_risks.is_empty() {
+        quality_risks.push_str(
+            "No parseable coverage rows found in quality report; infer risk from repository signals.",
+        );
+    }
+
+    let mut out = String::new();
+    out.push_str("You are the Gardener backlog seeding worker.\n");
+    out.push_str("Goal: research the repository and recommend 10 actionable backlog tasks.\n");
+    out.push_str("Do not write to the backlog database.\n");
+    out.push_str("Do not implement code changes.\n");
+    out.push_str("Return a JSON envelope that matches the task schema.\n\n");
+
+    out.push_str("Quality risks extracted from report\n");
+    out.push_str(&quality_risks);
+    out.push('\n');
+
+    out.push_str("\nExisting active backlog snapshot\n");
+    out.push_str(&context.existing_backlog);
+    out.push('\n');
+
+    out.push_str("\nQuality doc\n");
+    out.push_str(&context.quality_doc);
+
+    out
 }
 
 fn render_seed_prompt_template(
@@ -107,83 +126,6 @@ fn render_seed_prompt_template(
         .replace("{BACKLOG_SKILL_MD}", &backlog_skill_md)
         .replace("{EXISTING_BACKLOG}", &context.existing_backlog)
         .replace("{QUALITY_DOC}", &context.quality_doc)
-}
-
-fn build_seed_dry_run_prompt_v1(context: &SeedPromptContext) -> String {
-    let mut out = String::new();
-    let mut quality_risks = context.quality_risks.clone();
-    if quality_risks.is_empty() {
-        quality_risks.push_str(
-            "No parseable coverage rows found in quality report; infer risk from repository signals.",
-        );
-    }
-
-    out.push_str("You are the Gardener backlog seeding worker.\n");
-    out.push_str("Goal: research the repository and recommend 10 actionable backlog tasks.\n");
-    out.push_str("Do not write to the backlog database.\n");
-    out.push_str("Do not implement code changes.\n");
-    out.push_str("Return a JSON envelope that matches the task schema.\n\n");
-
-    out.push_str("System framing\n");
-    out.push_str("- Do not invent nonexistent files, architecture, or conventions.\n");
-    out.push_str(
-        "- Use AGENTS.md, CLAUDE.md, docs listing, and quality grades as source of truth.\n",
-    );
-    out.push_str(
-        "- Recommend work that improves repository legibility, automation, and reliability.\n\n",
-    );
-
-    out.push_str("Inputs\n");
-    out.push_str(&format!(
-        "- primary_gap: {}\n- readiness_score: {}\n- readiness_grade: {}\n\n",
-        context.primary_gap, context.readiness_score, context.readiness_grade
-    ));
-    out.push_str("Quality risks extracted from report\n");
-    out.push_str(&quality_risks);
-    out.push('\n');
-    out.push_str("Relevant repo anchors\n");
-    out.push_str("1) AGENTS.md\n");
-    if context.agents_md.is_empty() {
-        out.push_str("No AGENTS.md found.\n");
-    } else {
-        out.push_str(&context.agents_md);
-        out.push('\n');
-    }
-    out.push_str("2) CLAUDE.md\n");
-    if context.claude_md.is_empty() {
-        out.push_str("No CLAUDE.md found.\n");
-    } else {
-        out.push_str(&context.claude_md);
-        out.push('\n');
-    }
-    out.push_str("3) docs/\n");
-    if context.docs_listing.is_empty() {
-        out.push_str("No docs directory found or readable.\n");
-    } else {
-        out.push_str(&context.docs_listing);
-    }
-    out.push('\n');
-    out.push_str("4) docs/references/codex-agent-team-article.md\n");
-    out.push_str("Read this file directly before writing recommendations.\n\n");
-
-    out.push_str("Existing active backlog snapshot\n");
-    out.push_str(&context.existing_backlog);
-    out.push_str("\n\n");
-
-    out.push_str("Recommendation contract\n");
-    out.push_str("Generate exactly 10 recommended tasks.\n");
-    out.push_str("- At least 2 tasks should map to primary_gap.\n");
-    out.push_str("- At least 2 tasks should be cleanup/debt reduction tasks.\n");
-    out.push_str("- priority must be one of P0, P1, P2.\n");
-    out.push_str("- domain should be concrete and align to discovered file families.\n");
-    out.push_str("- rationale should state the immediate quality signal and why now.\n");
-    out.push_str("- details should be concise and implementation-ready.\n");
-    out.push_str("- Output only schema-compliant JSON.\n\n");
-
-    out.push_str("Quality doc (truncated for prompt budget)\n");
-    out.push_str(&context.quality_doc);
-
-    out
 }
 
 pub fn seed_backlog_if_needed(

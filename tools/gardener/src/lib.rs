@@ -14,6 +14,7 @@ pub mod git;
 pub mod git_phase;
 pub mod hotkeys;
 pub mod learning_loop;
+pub mod log_query;
 pub mod log_retention;
 pub mod logging;
 pub mod merge_loop;

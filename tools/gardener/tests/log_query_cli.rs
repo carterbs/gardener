@@ -3,22 +3,10 @@ use serde_json::Value;
 use std::io::Write;
 use tempfile::tempdir;
 
-fn must_ok<T, E: std::fmt::Display>(value: Result<T, E>, label: &str) -> T {
-    match value {
-        Ok(value) => value,
-        Err(error) => panic!("{label}: {error}"),
-    }
-}
-
 fn write_lines(path: &std::path::Path, lines: &[String]) {
-    let mut file = must_ok(
-        std::fs::File::create(path),
-        "failed to create otel log fixture",
-    );
+    let mut file = std::fs::File::create(path).expect("create log fixture");
     for line in lines {
-        if let Err(error) = writeln!(file, "{line}") {
-            panic!("failed to write line: {error}");
-        }
+        writeln!(file, "{line}").expect("write line");
     }
 }
 
@@ -26,382 +14,333 @@ fn otel_line(
     run_id: &str,
     worker_id: &str,
     event_type: &str,
-    severity: &str,
-    severity_num: u8,
+    time_unix_nano: u64,
+    state: Option<&str>,
+    severity_number: u64,
 ) -> String {
-    let payload = serde_json::json!({
-        "worker_id": worker_id,
-        "run_id": run_id,
-        "task_id": "task-1"
-    });
-    let payload_json = must_ok(serde_json::to_string(&payload), "encode payload json");
-    let line = serde_json::json!({
+    let mut payload = serde_json::json!({"run_id": run_id, "worker_id": worker_id});
+    if let Some(state) = state {
+        payload["state"] = serde_json::Value::String(state.to_string());
+    }
+
+    let payload_json = serde_json::to_string(&payload).expect("payload json");
+
+    serde_json::json!({
         "logRecord": {
-            "severityText": severity,
-            "severityNumber": severity_num,
+            "timeUnixNano": time_unix_nano,
+            "severityNumber": severity_number,
+            "severityText": if severity_number >= 17 { "ERROR" } else { "INFO" },
             "attributes": [
-                { "key": "run.id", "value": { "stringValue": run_id } },
-                { "key": "payload.worker_id", "value": { "stringValue": worker_id } },
-                { "key": "event.type", "value": { "stringValue": event_type } },
-                { "key": "gardener.payload", "value": { "stringValue": payload_json } }
+                {"key": "run.id", "value": {"stringValue": run_id}},
+                {"key": "payload.worker_id", "value": {"stringValue": worker_id}},
+                {"key": "event.type", "value": {"stringValue": event_type}},
+                {"key": "gardener.payload", "value": {"stringValue": payload_json}},
             ]
         },
         "event_type": event_type,
         "payload": payload,
-        "payload_json": payload_json
-    });
-    line.to_string()
+    })
+    .to_string()
 }
 
 #[test]
-fn events_filter_by_run_worker_and_event_type() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![
-        otel_line("run-1", "w1", "worker.started", "INFO", 9),
-        otel_line("run-1", "w2", "worker.started", "INFO", 9),
-        otel_line("run-1", "w1", "agent.turn.started", "INFO", 9),
-        otel_line("run-2", "w1", "worker.started", "INFO", 9),
-    ];
-    write_lines(&log_path, &lines);
-    let log_path = log_path.to_string_lossy().into_owned();
+fn index_lists_metadata_for_rotated_files() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("otel-logs.jsonl");
+    let rotated = dir.path().join("otel-logs.1.jsonl");
 
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "events",
-            "--log-path",
-            log_path.as_str(),
-            "--run-id",
-            "run-1",
-            "--worker-id",
-            "w1",
-            "--event-type",
-            "worker.",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-    assert!(
-        stdout.contains("worker.started"),
-        "expected worker.started event"
-    );
-    assert!(
-        !stdout.contains("agent.turn"),
-        "did not expect agent.turn event"
-    );
-}
-
-#[test]
-fn timeline_omits_noise_events() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![
-        otel_line("run-1", "w1", "boot.stage.init", "INFO", 5),
-        otel_line("run-1", "w1", "worker.started", "INFO", 9),
-        otel_line("run-1", "w1", "boring.debug", "DEBUG", 1),
-    ];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "timeline",
-            "--log-path",
-            &log_path,
-            "--run-id",
-            "run-1",
-            "--worker-id",
-            "w1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-    assert!(stdout.contains("worker.started"));
-    assert!(!stdout.contains("boot.stage.init"));
-    assert!(!stdout.contains("boring.debug"));
-}
-
-#[test]
-fn stats_aggregates_matching_events() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![
-        otel_line("run-1", "w1", "worker.started", "INFO", 9),
-        otel_line("run-1", "w1", "worker.started", "INFO", 9),
-        otel_line("run-1", "w2", "agent.turn.started", "INFO", 9),
-    ];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args(["stats", "--log-path", &log_path, "--run-id", "run-1"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-    let parsed: Value = match serde_json::from_str(&stdout) {
-        Ok(value) => value,
-        Err(error) => panic!("stats json parse failed: {error}"),
-    };
-    assert_eq!(parsed["total"].as_u64(), Some(3));
-    assert_eq!(parsed["workers"]["w1"].as_u64(), Some(2));
-    assert_eq!(parsed["workers"]["w2"].as_u64(), Some(1));
-    assert_eq!(parsed["event_types"]["worker.started"].as_u64(), Some(2));
-}
-
-#[test]
-fn events_raw_output_respects_limit() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![
-        otel_line("run-1", "w1", "worker.started", "INFO", 9),
-        otel_line("run-1", "w1", "agent.turn.started", "INFO", 9),
-    ];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "events",
-            "--log-path",
-            log_path.as_str(),
-            "--raw",
-            "--limit",
-            "1",
-            "--run-id",
-            "run-1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-    assert_eq!(stdout.lines().count(), 1);
-    assert!(stdout.contains("\"worker_id\":\"w1\""));
-}
-
-#[test]
-fn events_prints_no_match_message_when_empty() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![otel_line("run-1", "w1", "worker.started", "INFO", 9)];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "events",
-            "--log-path",
-            log_path.as_str(),
-            "--run-id",
-            "missing-run",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stderr
-        .clone();
-    let stderr = String::from_utf8(output).unwrap_or_else(|_| {
-        panic!("stderr should be valid utf8");
-    });
-    assert!(stderr.contains("no events matched filters"));
-}
-
-#[test]
-fn timeline_limit_takes_most_recent_events() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![
-        otel_line("run-1", "w1", "worker.started", "INFO", 9),
-        otel_line("run-1", "w2", "worker.started", "INFO", 9),
-    ];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "timeline",
-            "--log-path",
-            log_path.as_str(),
-            "--run-id",
-            "run-1",
-            "--limit",
-            "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-    assert_eq!(stdout.lines().count(), 1);
-    assert!(stdout.contains("w2"));
-}
-
-#[test]
-fn timeline_prints_empty_match_message() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-    let lines = vec![otel_line("run-1", "w1", "worker.started", "INFO", 9)];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "timeline",
-            "--log-path",
-            log_path.as_str(),
-            "--run-id",
-            "missing-run",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stderr
-        .clone();
-    let stderr = String::from_utf8(output).unwrap_or_else(|_| {
-        panic!("stderr should be valid utf8");
-    });
-    assert!(stderr.contains("no timeline events matched filters"));
-}
-
-#[test]
-fn events_filter_by_payload_contains() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
-
-    let matching_payload = serde_json::json!({
-        "worker_id": "w1",
-        "run_id": "run-1",
-        "terminal": "failure",
-    });
-    let noisy_payload = serde_json::json!({
-        "worker_id": "w1",
-        "run_id": "run-1",
-        "terminal": "ok",
-    });
-    let matching_payload_json = must_ok(
-        serde_json::to_string(&matching_payload),
-        "encode matching payload json",
-    );
-    let noisy_payload_json = must_ok(
-        serde_json::to_string(&noisy_payload),
-        "encode noisy payload json",
-    );
-
-    let lines = vec![
-        serde_json::json!({
-            "logRecord": {
-                "severityText": "INFO",
-                "severityNumber": 9,
-                "attributes": [
-                    {"key": "run.id", "value": {"stringValue": "run-1"}},
-                    {"key": "event.type", "value": {"stringValue": "agent.turn.finished"}},
-                    {"key": "gardener.payload", "value": {"stringValue": matching_payload_json}},
-                ],
-            },
-            "event_type": "agent.turn.finished",
-            "payload": matching_payload,
-        })
-        .to_string(),
-        serde_json::json!({
-            "logRecord": {
-                "severityText": "INFO",
-                "severityNumber": 9,
-                "attributes": [
-                    {"key": "run.id", "value": {"stringValue": "run-1"}},
-                    {"key": "event.type", "value": {"stringValue": "agent.turn.finished"}},
-                    {"key": "gardener.payload", "value": {"stringValue": noisy_payload_json}},
-                ],
-            },
-            "event_type": "agent.turn.finished",
-            "payload": noisy_payload,
-        })
-        .to_string(),
-    ];
-    write_lines(&log_path, &lines);
-
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args([
-            "events",
-            "--log-path",
-            log_path.as_str(),
-            "--run-id",
-            "run-1",
-            "--contains",
-            "\"terminal\":\"failure\"",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-
-    assert_eq!(stdout.lines().count(), 1);
-    assert!(stdout.contains("agent.turn.finished"));
-    assert!(stdout.contains("run=run-1"));
-    assert!(!stdout.contains("terminal=\"ok\""));
-}
-
-#[test]
-fn stats_shows_unknown_for_missing_ids() {
-    let dir = must_ok(tempdir(), "failed to create tempdir");
-    let log_path = dir.path().join("otel-logs.jsonl");
     write_lines(
-        &log_path,
-        &["{\"event_type\":\"worker.started\"}".to_string()],
+        &rotated,
+        &[otel_line(
+            "run-1",
+            "w1",
+            "worker.started",
+            1_000_000_000,
+            None,
+            9,
+        )],
+    );
+    write_lines(
+        &base,
+        &[
+            otel_line("run-2", "w2", "worker.started", 2_000_000_000, None, 9),
+            otel_line(
+                "run-1",
+                "w1",
+                "worker.error",
+                3_000_000_000,
+                Some("boom"),
+                17,
+            ),
+        ],
     );
 
-    let log_path = log_path.to_string_lossy().into_owned();
-    let output = cargo_bin_cmd!("log-query")
-        .args(["stats", "--log-path", log_path.as_str()])
+    let output = cargo_bin_cmd!("otel-logs")
+        .args(["index", "--log-path", base.to_str().expect("path")])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let stdout =
-        String::from_utf8(output).unwrap_or_else(|_| panic!("stdout should be valid utf8"));
-    let parsed: Value = must_ok(serde_json::from_str(&stdout), "stats json parse failed");
-    assert_eq!(parsed["run_ids"]["<unknown>"].as_u64(), Some(1));
-    assert_eq!(parsed["workers"]["<unknown>"].as_u64(), Some(1));
-    assert_eq!(parsed["event_types"]["worker.started"].as_u64(), Some(1));
+    let stdout = String::from_utf8(output).expect("stdout");
+
+    assert!(stdout.contains("otel-logs.1.jsonl"));
+    assert!(stdout.contains("otel-logs.jsonl"));
+    assert!(stdout.contains("run(s)"));
 }
 
 #[test]
-fn command_reports_read_error_for_missing_file() {
-    let output = cargo_bin_cmd!("log-query")
+fn index_json_mode_outputs_valid_json() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("otel-logs.jsonl");
+    write_lines(
+        &base,
+        &[otel_line("run-1", "w1", "worker.started", 1, None, 9)],
+    );
+
+    let output = cargo_bin_cmd!("otel-logs")
         .args([
-            "events",
+            "index",
             "--log-path",
-            "/tmp/log-query-does-not-exist.jsonl",
+            base.to_str().expect("path"),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("json");
+    let array = parsed.as_array().expect("array");
+    assert_eq!(array.len(), 1);
+}
+
+#[test]
+fn index_empty_directory_prints_header_only() {
+    let dir = tempdir().expect("tempdir");
+    let missing = dir.path().join("no-logs-here.jsonl");
+
+    let output = cargo_bin_cmd!("otel-logs")
+        .args(["index", "--log-path", missing.to_str().expect("path")])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("stdout");
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], "FILE\tSIZE\tLINES\tFROM\tTO\tRUNS\tWORKERS");
+}
+
+#[test]
+fn filter_run_id_spans_rotation_boundary() {
+    let dir = tempdir().expect("tempdir");
+    let base = dir.path().join("otel-logs.jsonl");
+    let rotated = dir.path().join("otel-logs.1.jsonl");
+
+    write_lines(
+        &rotated,
+        &[otel_line(
+            "run-1",
+            "w1",
+            "worker.started",
+            1_000_000_000,
+            None,
+            9,
+        )],
+    );
+    write_lines(
+        &base,
+        &[
+            otel_line(
+                "run-1",
+                "w1",
+                "worker.activity.state_changed",
+                2_000_000_000,
+                Some("running"),
+                9,
+            ),
+            otel_line("run-2", "w2", "worker.started", 3_000_000_000, None, 9),
+        ],
+    );
+
+    let output = cargo_bin_cmd!("otel-logs")
+        .args([
+            "filter",
+            "--log-path",
+            base.to_str().expect("path"),
             "--run-id",
             "run-1",
         ])
         .assert()
-        .failure()
+        .success()
         .get_output()
-        .stderr
+        .stdout
         .clone();
-    let stderr = String::from_utf8(output).unwrap_or_else(|_| {
-        panic!("stderr should be valid utf8");
-    });
-    assert!(stderr.contains("error: failed to read log path"));
+
+    let output = String::from_utf8(output).expect("stdout");
+    let lines: Vec<_> = output.lines().collect();
+    assert_eq!(lines.len(), 2);
+}
+
+#[test]
+fn filter_max_limits_output() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("otel-logs.jsonl");
+    write_lines(
+        &path,
+        &(1..11)
+            .map(|i| otel_line("run-1", "w1", "worker.started", i, None, 9))
+            .collect::<Vec<_>>(),
+    );
+
+    let output = cargo_bin_cmd!("otel-logs")
+        .args([
+            "filter",
+            "--log-path",
+            path.to_str().expect("path"),
+            "--run-id",
+            "run-1",
+            "--max",
+            "5",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let parsed: Value = serde_json::from_slice(&output).expect("json");
+    let arr = parsed.as_array().expect("array");
+    assert_eq!(arr.len(), 5);
+}
+
+#[test]
+fn filter_tail_returns_last_matches_in_chronological_order() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("otel-logs.jsonl");
+    write_lines(
+        &path,
+        &[
+            otel_line("run-1", "w1", "worker.started", 1, None, 9),
+            otel_line("run-1", "w1", "worker.started", 2, None, 9),
+            otel_line("run-1", "w1", "worker.started", 3, None, 9),
+            otel_line("run-1", "w1", "worker.started", 4, None, 9),
+        ],
+    );
+
+    let output = cargo_bin_cmd!("otel-logs")
+        .args([
+            "filter",
+            "--log-path",
+            path.to_str().expect("path"),
+            "--run-id",
+            "run-1",
+            "--tail",
+            "--max",
+            "2",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let output = String::from_utf8(output).expect("stdout");
+    let lines: Vec<_> = output.lines().collect();
+    assert_eq!(lines.len(), 2);
+
+    let first: Value = serde_json::from_str(lines[0]).expect("event1");
+    let second: Value = serde_json::from_str(lines[1]).expect("event2");
+    let Some(first_time) = first["time_rfc3339"].as_str() else {
+        panic!("time missing for first event");
+    };
+    let Some(second_time) = second["time_rfc3339"].as_str() else {
+        panic!("time missing for second event");
+    };
+    assert!(first_time < second_time);
+}
+
+#[test]
+fn run_trace_identifies_files_spanned_and_errors() {
+    let dir = tempdir().expect("tempdir");
+    let rotated = dir.path().join("otel-logs.1.jsonl");
+    let base = dir.path().join("otel-logs.jsonl");
+
+    write_lines(
+        &rotated,
+        &[otel_line(
+            "run-1",
+            "w1",
+            "worker.activity.state_changed",
+            1,
+            Some("starting"),
+            9,
+        )],
+    );
+    write_lines(
+        &base,
+        &[
+            otel_line("run-1", "w1", "worker.started", 2, None, 9),
+            otel_line("run-1", "w1", "worker.failed", 3, Some("boom"), 17),
+        ],
+    );
+
+    let output = cargo_bin_cmd!("otel-logs")
+        .args([
+            "run-trace",
+            "--log-path",
+            base.to_str().expect("path"),
+            "--run-id",
+            "run-1",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("stdout");
+    let value: Value = serde_json::from_str(&stdout).expect("json");
+
+    assert_eq!(value["run_id"], "run-1");
+    assert_eq!(value["files_spanned"].as_array().expect("files").len(), 2);
+    assert_eq!(
+        value["files_spanned"].as_array().expect("files")[0],
+        "otel-logs.1.jsonl",
+    );
+    assert_eq!(
+        value["files_spanned"].as_array().expect("files")[1],
+        "otel-logs.jsonl",
+    );
+    assert_eq!(
+        value["state_transitions"].as_array().expect("states").len(),
+        1
+    );
+    assert_eq!(value["errors"].as_array().expect("errors").len(), 1);
+}
+
+#[test]
+fn run_trace_missing_run_exits_1() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("otel-logs.jsonl");
+    write_lines(
+        &path,
+        &[otel_line("run-1", "w1", "worker.started", 1, None, 9)],
+    );
+
+    cargo_bin_cmd!("otel-logs")
+        .args([
+            "run-trace",
+            "--log-path",
+            path.to_str().expect("path"),
+            "--run-id",
+            "missing",
+        ])
+        .assert()
+        .failure();
 }

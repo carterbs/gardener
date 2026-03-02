@@ -176,7 +176,7 @@ where
             json!({ "profile_loc": profile_loc.display().to_string() }),
         );
         return Err(GardenerError::Cli(
-            "No repo intelligence profile found. Run `brad-gardener --triage-only` in a terminal to complete setup."
+            "No repo intelligence profile found. Run `scripts/brad-gardener --triage-only` in a terminal to complete setup."
                 .to_string(),
         ));
     }

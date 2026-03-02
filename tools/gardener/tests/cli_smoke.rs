@@ -85,11 +85,13 @@ fn prune_only_with_scoped_working_dir_succeeds() {
 
 #[test]
 fn quit_after_smoke_succeeds() {
+    let temp = tempfile::tempdir().expect("tempdir");
     let mut cmd = cargo_bin_cmd!("gardener");
     cmd.arg("--quit-after")
         .arg("0")
         .arg("--config")
-        .arg(fixture("configs/phase01-minimal.toml"));
+        .arg(fixture("configs/phase01-minimal.toml"))
+        .env("GARDENER_DB_PATH", temp.path().join("backlog.sqlite"));
     cmd.assert().success();
 }
 
@@ -101,7 +103,8 @@ fn sync_only_exports_snapshot_and_exits_zero() {
         .arg("--config")
         .arg(fixture("configs/phase09-cutover.toml"))
         .arg("--working-dir")
-        .arg(temp.path());
+        .arg(temp.path())
+        .env("GARDENER_DB_PATH", temp.path().join("backlog.sqlite"));
     let out = cmd.assert().success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
     assert!(stdout.contains("sync complete: snapshot="));

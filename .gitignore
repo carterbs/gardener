@@ -1,5 +1,6 @@
 .cache/
 .gardener/
+.DS_Store
 .DS_STORE
 .claude/worktrees/
 .worktrees/
@@ -7,3 +8,6 @@ target/
 lint_order_demo
 otel-logs.jsonl
 docs/quality-grades.md.stamp
+*.profraw
+default_*.profraw
+startup-diagnostics/*.md

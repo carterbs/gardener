@@ -26,6 +26,13 @@ blocked=()
 for target in "${targets[@]}"; do
   [[ -f "$target" ]] || continue
 
+  case "$target" in
+    *.profraw|default_*.profraw|*/startup-diagnostics/*-startup-failure.md|startup-diagnostics/*-startup-failure.md)
+      blocked+=("$target (known runtime artifact)")
+      continue
+      ;;
+  esac
+
   mime_type="$(file -b --mime-type "$target")"
   mime_encoding="$(file -b --mime-encoding "$target")"
   if [[ "$mime_encoding" == "binary" ]]; then
@@ -50,7 +57,7 @@ for target in "${targets[@]}"; do
 done
 
 if [[ "${#blocked[@]}" -gt 0 ]]; then
-  echo "error: blocked binary blob(s) detected in staged files:" >&2
+  echo "error: blocked artifact(s) detected in staged files:" >&2
   for target in "${blocked[@]}"; do
     echo "  - $target" >&2
   done

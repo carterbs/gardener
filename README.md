@@ -84,8 +84,9 @@ Pre-commit uses the same validation pipeline as manual checks:
 3. `scripts/check-no-warnings.sh`
 4. `scripts/check-migrations-wired.sh`
 5. `scripts/check-binary-blobs.sh`
-6. `scripts/run-script-lint-fixture-tests.sh`
-7. `scripts/test-gardener-coverage.sh`
+6. `scripts/doc-gardening.sh`
+7. `scripts/run-script-lint-fixture-tests.sh`
+8. `scripts/test-gardener-coverage.sh`
 
 `run-validate.sh` runs these scripts in order; it stops on the first failure, so fix each failure before re-running.
 
@@ -127,6 +128,7 @@ When commit is blocked by hooks:
    - `Running custom linter: scripts/check-no-warnings.sh`
    - `Running custom linter: scripts/check-migrations-wired.sh`
    - `Running custom linter: scripts/check-binary-blobs.sh`
+   - `Running custom linter: scripts/doc-gardening.sh`
    - `Running custom linter: scripts/run-script-lint-fixture-tests.sh`
    - `Running project validation command: ./scripts/test-gardener-coverage.sh`
 3. Fix the root cause from the failing script output:
@@ -134,6 +136,8 @@ When commit is blocked by hooks:
      - Copy files from the command suggestions in `scripts/check-skills-sync.sh` output.
    - Clippy warnings:
      - Address the warning text, then re-run `./scripts/check-no-warnings.sh`.
+   - Doc-gardening maintenance drift:
+     - Review and fix failing checks from `./scripts/doc-gardening.sh`.
    - Migration wiring errors:
      - Add each missing migration include to `tools/gardener/src/backlog_store.rs`.
    - Binary blob failures:

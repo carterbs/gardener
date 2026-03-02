@@ -115,4 +115,39 @@ run_expect_exit 0 "$SCRIPT_DIR/startup-diagnostics.sh" \
 assert_file_contains "$start_diag_output_3" "No log file available for this run."
 rm -f "$start_diag_output_3"
 
+# recurring doc-gardening maintenance checks
+doc_gardening_output="$(mktemp)"
+repo_root="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
+quality_grades_path="$repo_root/docs/quality-grades.md"
+quality_grades_stamp="${quality_grades_path}.stamp"
+restore_quality_stamp=0
+quality_stamp_backup="$(mktemp)"
+if [ -f "$quality_grades_stamp" ]; then
+  cp "$quality_grades_stamp" "$quality_stamp_backup"
+  restore_quality_stamp=1
+else
+  rm -f "$quality_stamp_backup"
+fi
+echo "$(date -u +%s)" > "$quality_grades_stamp"
+
+set +e
+"$SCRIPT_DIR/doc-gardening.sh" > "$doc_gardening_output" 2>&1
+doc_gardening_status=$?
+set -e
+
+if [[ $doc_gardening_status -ne 0 ]]; then
+  echo "doc-gardening checks failed" >&2
+  sed 's/^/  /' "$doc_gardening_output" >&2
+  rm -f "$doc_gardening_output"
+  exit 1
+fi
+if [[ $restore_quality_stamp -eq 1 ]]; then
+  mv "$quality_stamp_backup" "$quality_grades_stamp"
+else
+  rm -f "$quality_grades_stamp"
+  rm -f "$quality_stamp_backup"
+fi
+assert_file_contains "$doc_gardening_output" "Doc-gardening summary:"
+rm -f "$doc_gardening_output"
+
 echo "Script lint fixture tests completed successfully."

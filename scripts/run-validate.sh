@@ -6,6 +6,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 fi
 
 CUSTOM_LINTERS=(
+  "scripts/doc-gardening.sh"
   "scripts/check-skills-sync.sh"
   "scripts/check-no-warnings.sh"
   "scripts/check-migrations-wired.sh"

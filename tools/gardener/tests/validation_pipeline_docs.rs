@@ -20,14 +20,28 @@ fn validation_pipeline_docs_match_live_validation_hook() {
         .unwrap_or_else(|err| panic!("failed to read docs/conventions/workflow.md: {err}"));
     let pre_commit = fs::read_to_string(repo_root.join(".githooks/pre-commit"))
         .unwrap_or_else(|err| panic!("failed to read .githooks/pre-commit: {err}"));
+    let docs_readme = fs::read_to_string(repo_root.join("docs/README.md"))
+        .unwrap_or_else(|err| panic!("failed to read docs/README.md: {err}"));
 
     assert!(
         readme.contains("scripts/check-binary-blobs.sh"),
         "README validation pipeline should list the binary-blob linter"
     );
     assert!(
+        readme.contains("scripts/doc-gardening.sh"),
+        "README validation pipeline should list the doc-gardening maintenance command"
+    );
+    assert!(
+        docs_readme.contains("scripts/doc-gardening.sh"),
+        "docs README should list the doc-gardening maintenance command"
+    );
+    assert!(
         readme.contains("scripts/run-script-lint-fixture-tests.sh"),
         "README validation pipeline should list fixture-script lint command"
+    );
+    assert!(
+        workflow.contains("scripts/doc-gardening.sh"),
+        "workflow doc should include doc-gardening maintenance command"
     );
     assert!(
         workflow.contains("scripts/run-script-lint-fixture-tests.sh"),

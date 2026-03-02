@@ -2,11 +2,12 @@
 set -euo pipefail
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  cd "$(git rev-parse --show-toplevel)"
+  repo_root="${GARDENER_REPO_ROOT:-"$(git rev-parse --show-toplevel)"}"
+  cd "$repo_root"
 fi
 
-migrations_dir="tools/gardener/migrations"
-store_file="tools/gardener/src/backlog_store.rs"
+migrations_dir="${GARDENER_MIGRATIONS_DIR:-tools/gardener/migrations}"
+store_file="${GARDENER_MIGRATIONS_STORE_FILE:-tools/gardener/src/backlog_store.rs}"
 exit_code=0
 
 for sql_file in "$migrations_dir"/*.sql; do

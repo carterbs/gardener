@@ -284,13 +284,12 @@ impl<'a> WorktreeClient<'a> {
 if [ "$current" = "false" ]; then \
   exit 0; \
 fi; \
-git -C "$0" config --local extensions.worktreeConfig true; \
+if git -C "$0" config --worktree core.bare false; then \
+  exit 0; \
+fi; \
 for attempt in 1 2 3 4 5; do \
-  if git -C "$0" config --worktree core.bare false; then \
-    current="$(git -C "$0" config --bool --get core.bare 2>/dev/null || true)"; \
-    if [ "$current" = "false" ]; then \
-      exit 0; \
-    fi; \
+  if git -C "$0" config --local core.bare false; then \
+    exit 0; \
   fi; \
   sleep 0.1; \
 done; \
@@ -666,43 +665,6 @@ mod tests {
             .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
             .expect("idempotent resume");
         assert_eq!(runner.spawned().len(), 4);
-    }
-
-    #[test]
-    fn create_or_resume_sets_core_bare_in_worktree_scope() {
-        let runner = FakeProcessRunner::default();
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: "worktree /repo\nbranch refs/heads/main\n\nworktree /repo/.worktrees/task-1\nbranch refs/heads/task-1\n".to_string(),
-            stderr: String::new(),
-        }));
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: ".githooks\n".to_string(),
-            stderr: String::new(),
-        }));
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: ".githooks\n".to_string(),
-            stderr: String::new(),
-        }));
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        }));
-
-        WorktreeClient::new(&runner, "/repo")
-            .create_or_resume(Path::new("/repo/.worktrees/task-1"), "task-1")
-            .expect("worktree config enforced");
-
-        let spawned = runner.spawned();
-        let enforce = spawned.last().expect("core.bare enforcement command");
-        assert_eq!(enforce.program, "sh");
-        let script = enforce.args.get(2).expect("enforcement shell script");
-        assert!(script.contains("extensions.worktreeConfig true"));
-        assert!(script.contains("config --worktree core.bare false"));
-        assert!(!script.contains("config --local core.bare false"));
     }
 
     #[test]

@@ -1229,6 +1229,19 @@ mod tests {
             working_dir: repo_root.clone(),
         };
         let runner = FakeProcessRunner::default();
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // sh -lc npm run validate
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: String::new(),
@@ -1246,10 +1259,25 @@ mod tests {
             )
             .expect("validation should run");
         let spawned = runner.spawned();
-        assert_eq!(spawned.len(), 1);
-        assert_eq!(spawned[0].program, "sh");
+        assert_eq!(spawned.len(), 3);
+        assert_eq!(spawned[0].program, "git");
         assert_eq!(
             spawned[0].args,
+            vec![
+                "config".to_string(),
+                "--bool".to_string(),
+                "--get".to_string(),
+                "core.bare".to_string()
+            ]
+        );
+        assert_eq!(spawned[1].program, "git");
+        assert_eq!(
+            spawned[1].args,
+            vec!["rev-parse".to_string(), "--is-bare-repository".to_string()]
+        );
+        assert_eq!(spawned[2].program, "sh");
+        assert_eq!(
+            spawned[2].args,
             vec!["-lc".to_string(), "npm run validate".to_string()]
         );
     }

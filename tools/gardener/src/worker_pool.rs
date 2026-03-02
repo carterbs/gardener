@@ -694,6 +694,31 @@ pub fn run_worker_pool_fsm(
                             request_interrupt();
                         } else {
                             match result {
+                                Err(GardenerError::Process(message))
+                                    if message.contains("user interrupt requested") =>
+                                {
+                                    // Graceful shutdown: restore to merge_pending so the next
+                                    // run picks this task up again. claim_merge_pending sets no
+                                    // lease_expires_at, so stale-lease recovery won't help here.
+                                    append_run_log(
+                                        "warn",
+                                        "merge_worker.task.interrupted",
+                                        json!({
+                                            "worker_id": MERGE_WORKER_ID,
+                                            "task_id": task_id
+                                        }),
+                                    );
+                                    let _ = store.mark_merge_pending(&task_id, MERGE_WORKER_ID);
+                                    workers[merge_row_idx].state = "interrupted".to_string();
+                                    let interrupted_msg =
+                                        format!("interrupted (merge_pending) {}", task_id);
+                                    workers[merge_row_idx].tool_line = interrupted_msg.clone();
+                                    append_worker_command(
+                                        &mut workers[merge_row_idx],
+                                        &interrupted_msg,
+                                    );
+                                    workers[merge_row_idx].last_state_line = last_worker_state_line;
+                                }
                                 Err(err) => {
                                     let msg = err.to_string();
                                     append_run_log(

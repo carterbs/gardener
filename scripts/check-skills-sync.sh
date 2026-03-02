@@ -2,11 +2,12 @@
 set -euo pipefail
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  cd "$(git rev-parse --show-toplevel)"
+  repo_root="${GARDENER_REPO_ROOT:-"$(git rev-parse --show-toplevel)"}"
+  cd "$repo_root"
 fi
 
-claude_skills_dir=".claude/skills"
-codex_skills_dir=".codex/skills"
+claude_skills_dir="${GARDENER_CLAUDE_SKILLS_DIR:-.claude/skills}"
+codex_skills_dir="${GARDENER_CODEX_SKILLS_DIR:-.codex/skills}"
 
 if [[ ! -d "$claude_skills_dir" || ! -d "$codex_skills_dir" ]]; then
   echo "error: both .claude/skills and .codex/skills must exist" >&2

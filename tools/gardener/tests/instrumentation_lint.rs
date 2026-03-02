@@ -298,6 +298,12 @@ fn is_eligible_function(function: &FunctionStats) -> bool {
         return false;
     }
 
+    // dashboard_snapshot is a pure data-aggregation helper; its caller
+    // (render / run_worker_pool_fsm) owns the instrumentation.
+    if function.name == "dashboard_snapshot" {
+        return false;
+    }
+
     if function.name.starts_with("parse_")
         || function.name.starts_with("extract_")
         || function.name.starts_with("render_")

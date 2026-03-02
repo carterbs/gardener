@@ -2,10 +2,11 @@ use crate::agent::factory::AdapterFactory;
 use crate::agent_turn::{run_agent_turn, AgentTurnInput};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
-use crate::gh::{generate_pr_title_body, GhClient};
+use crate::gh::GhClient;
 use crate::git::GitClient;
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
+use crate::prompt_registry::pr_creation_template;
 use crate::prompt_registry::PromptRegistry;
 use crate::protocol::AgentTerminal;
 use crate::runtime::ProcessRunner;
@@ -118,9 +119,28 @@ pub fn run_git_push(ctx: &GitPushContext<'_>) -> Result<GitPushOutcome, Gardener
         on_step("GIT", "creating pull request");
     }
     let gh = GhClient::new(ctx.process_runner, ctx.worktree_path);
-    let (title, body) =
-        generate_pr_title_body(ctx.process_runner, ctx.worktree_path, ctx.task_summary)?;
-    let (number, url) = gh.create_pr(&title, &body)?;
+    let pr_tpl = pr_creation_template();
+    let pr_result = run_agent_turn(AgentTurnInput {
+        cfg: ctx.cfg,
+        process_runner: ctx.process_runner,
+        scope: ctx.scope,
+        worktree_path: ctx.worktree_path,
+        factory: ctx.factory,
+        registry: ctx.registry,
+        learning_loop: ctx.learning_loop,
+        identity: ctx.identity,
+        state: WorkerState::Gitting,
+        task_summary: ctx.task_summary,
+        attempt_count: ctx.attempt_count,
+        prompt_override: Some(&pr_tpl),
+        on_event: ctx.on_agent_event,
+    })?;
+    if pr_result.terminal == AgentTerminal::Failure {
+        return Err(GardenerError::Process(
+            "pr creation agent failed".to_string(),
+        ));
+    }
+    let (number, url) = gh.find_pr_for_branch(ctx.branch)?;
     append_run_log(
         "info",
         "git_phase.pr_created",

@@ -352,6 +352,29 @@ VALIDATION: <command(s) run and pass/fail outcome>"#,
     }
 }
 
+pub fn pr_creation_template() -> PromptTemplate {
+    PromptTemplate {
+        version: "v1-pr-creation",
+        body: r#"Intent: create a pull request for the changes on this branch.
+
+## Steps
+
+1. Run `git log main..HEAD --oneline` to see what commits are on this branch.
+2. Run `git diff main..HEAD` to understand what changed.
+3. Run `gh pr create --title "<title>" --body "<body>"` to open the pull request.
+   - Title must use conventional commit format: `<type>: <description>` (max 72 chars).
+     Valid types: feat, fix, refactor, test, chore, docs, perf, style.
+     Base the title on the diff content, not a generic restatement of the task description.
+   - Body: 2-4 sentences or a brief bulleted list describing what changed and why. Be specific.
+   - If `gh pr create` reports the PR already exists, that is fine — stop.
+
+## Rules
+
+- Do NOT commit, push, or modify any source files.
+- Run exactly one `gh pr create` call."#,
+    }
+}
+
 fn merge_remediation_template() -> PromptTemplate {
     PromptTemplate {
         version: "v1-merge-remediation",

@@ -158,6 +158,48 @@ impl<'a> GhClient<'a> {
         Ok((number, url))
     }
 
+    pub fn find_pr_for_branch(&self, branch: &str) -> Result<(u64, String), GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.find_for_branch.started",
+            json!({ "cwd": self.cwd.display().to_string(), "branch": branch }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "list".to_string(),
+                "--head".to_string(),
+                branch.to_string(),
+                "--json".to_string(),
+                "number,url".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        #[derive(serde::Deserialize)]
+        struct PrEntry {
+            number: u64,
+            url: String,
+        }
+        let entries: Vec<PrEntry> = serde_json::from_str(&out.stdout).map_err(|e| {
+            GardenerError::Process(format!("failed to parse pr list for branch {branch}: {e}"))
+        })?;
+        let entry = entries.into_iter().next().ok_or_else(|| {
+            GardenerError::Process(format!("no open PR found for branch {branch}"))
+        })?;
+        append_run_log(
+            "info",
+            "gh.pr.find_for_branch.found",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "branch": branch,
+                "pr_number": entry.number,
+                "pr_url": entry.url
+            }),
+        );
+        Ok((entry.number, entry.url))
+    }
+
     pub fn view_pr(&self, pr_number: u64) -> Result<PrView, GardenerError> {
         append_run_log(
             "info",
@@ -758,6 +800,50 @@ mod tests {
         let gh = GhClient::new(&runner, "/repo");
         let err = gh.create_pr("title", "body").expect_err("must fail");
         assert!(format!("{err}").contains("gh pr create failed"));
+    }
+
+    #[test]
+    fn find_pr_for_branch_returns_first_match() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "[{\"number\":42,\"url\":\"https://github.com/owner/repo/pull/42\"}, {\"number\":43,\"url\":\"https://github.com/owner/repo/pull/43\"}]".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let (number, url) = gh
+            .find_pr_for_branch("feature/rewrite")
+            .expect("pr should be found");
+        assert_eq!(number, 42);
+        assert_eq!(url, "https://github.com/owner/repo/pull/42");
+    }
+
+    #[test]
+    fn find_pr_for_branch_returns_error_when_no_pr_exists() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "[]".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh
+            .find_pr_for_branch("feature/missing")
+            .expect_err("must fail");
+        assert!(format!("{err}").contains("no open PR found"));
+    }
+
+    #[test]
+    fn find_pr_for_branch_returns_error_for_invalid_json() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"bad\":\"json\"}".to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        let err = gh.find_pr_for_branch("feature/bad").expect_err("must fail");
+        assert!(format!("{err}").contains("failed to parse pr list for branch"));
     }
 
     #[test]

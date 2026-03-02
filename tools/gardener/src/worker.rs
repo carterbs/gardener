@@ -12,9 +12,9 @@ use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
-use crate::pr_phase::{run_pr_gen, PrGenContext};
 use crate::prompt_registry::{
-    ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry,
+    ci_failure_remediation_template, merge_main_conflict_resolution_template, pr_creation_template,
+    PromptRegistry,
 };
 use crate::protocol::AgentTerminal;
 use crate::review_phase::parse_reviewing_output;
@@ -539,16 +539,28 @@ fn execute_task_live(
 
     let gh = GhClient::new(process_runner, &worktree_path);
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PrCreating);
-    let (title, body) = run_pr_gen(&PrGenContext {
+    let pr_tpl = pr_creation_template();
+    let pr_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
-        factory: &factory,
-        worktree_path: &worktree_path,
         scope,
+        worktree_path: &worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &learning_loop,
         identity: &identity,
+        state: WorkerState::Gitting,
         task_summary,
+        attempt_count,
+        prompt_override: Some(&pr_tpl),
+        on_event: None,
     })?;
-    let (number, _url) = gh.create_pr(&title, &body)?;
+    if pr_result.terminal == AgentTerminal::Failure {
+        return Err(GardenerError::Process(
+            "pr creation agent failed".to_string(),
+        ));
+    }
+    let (number, _url) = gh.find_pr_for_branch(&branch)?;
     let pr_number = number;
     append_run_log(
         "info",

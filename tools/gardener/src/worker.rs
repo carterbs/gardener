@@ -403,6 +403,20 @@ fn execute_task_live(
                     }),
                 );
                 DoingOutput { summary: subject }
+            } else if !git.worktree_is_clean()? {
+                let msg = fallback_commit_message(task_summary);
+                git.commit_all(&msg)?;
+                append_run_log(
+                    "warn",
+                    "worker.doing.payload_fallback_to_dirty_worktree",
+                    json!({
+                        "worker_id": worker_id,
+                        "task_id": task_id,
+                        "parse_error": parse_err.to_string(),
+                        "commit_message": &msg
+                    }),
+                );
+                DoingOutput { summary: msg }
             } else {
                 emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed);
                 return Ok(WorkerOutcome::Completed(WorkerRunSummary {

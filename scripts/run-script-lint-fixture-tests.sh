@@ -81,11 +81,20 @@ run_expect_exit 1 env \
 run_expect_exit 0 "$SCRIPT_DIR/check-binary-blobs.sh" \
   "$SCRIPT_DIR/fixtures/check-binary-blobs/passing/runtime-note.txt"
 
+binary_blob_dir="$(mktemp -d)"
+blocked_profraw="$binary_blob_dir/default_1234567890_0_00000.profraw"
+blocked_startup_diag_dir="$binary_blob_dir/startup-diagnostics"
+blocked_startup_diag="$blocked_startup_diag_dir/runtime-startup.md"
+
+printf "runtime profile data\n" > "$blocked_profraw"
+mkdir -p "$blocked_startup_diag_dir"
+printf "# Runtime startup diagnostics\n" > "$blocked_startup_diag"
+
 binary_blob_output="$(mktemp)"
 set +e
 "$SCRIPT_DIR/check-binary-blobs.sh" \
-  "$SCRIPT_DIR/fixtures/check-binary-blobs/blocked/default_1234567890_0_00000.profraw" \
-  "$SCRIPT_DIR/fixtures/check-binary-blobs/blocked/startup-diagnostics/run-789-startup-failure.md" \
+  "$blocked_profraw" \
+  "$blocked_startup_diag" \
   >"$binary_blob_output" 2>&1
 status=$?
 set -e
@@ -93,11 +102,13 @@ if [[ $status -ne 1 ]]; then
   echo "expected check-binary-blobs to reject generated runtime artifacts" >&2
   sed -n '1,120p' "$binary_blob_output" >&2
   rm -f "$binary_blob_output"
+  rm -rf "$binary_blob_dir"
   exit 1
 fi
 assert_file_contains "$binary_blob_output" "default_1234567890_0_00000.profraw"
-assert_file_contains "$binary_blob_output" "run-789-startup-failure.md"
+assert_file_contains "$binary_blob_output" "runtime-startup.md"
 rm -f "$binary_blob_output"
+rm -rf "$binary_blob_dir"
 
 # startup-diagnostics fixtures
 start_diag_output_1="$(mktemp)"

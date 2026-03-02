@@ -17,6 +17,23 @@ pub const SEEDING_PROMPT_VERSION_SEEDING: &str = "seeding-v4";
 pub const SEEDING_PROMPT_VERSION_LEGACY: &str = SEEDING_PROMPT_VERSION_SEEDING;
 pub const SEEDING_PROMPT_VERSION_DIRECT: &str = SEEDING_PROMPT_VERSION_SEEDING;
 
+pub const SEEDING_ACTION_CONTRACT_DRY_RUN: &str = r#"Output contract
+- Emit JSON only.
+- Return either:
+  - {"tasks":[...]}
+  - {"schema_version":1,"state":"seeding","payload":{"tasks":[...]}}
+- Each task must include: title, details, rationale, domain, priority.
+- priority must be one of P0, P1, P2.
+- details and rationale must be concrete and actionable in this repository."#;
+
+pub const SEEDING_ACTION_CONTRACT_WRITE: &str = r#"Action contract
+- Use the backlog-db skill to insert each task directly into the backlog.
+- For each task run:
+  ./scripts/backlog-db.sh add --title "..." --details "..." --priority P0|P1|P2 --scope <domain> --kind maintenance
+- Do NOT emit JSON. Do NOT print a task list. Insert using the script only.
+- priority must be one of P0, P1, P2.
+- details must be concrete and actionable in this repository."#;
+
 pub fn seeding_prompt_template() -> PromptTemplate {
     PromptTemplate {
         version: SEEDING_PROMPT_VERSION_SEEDING,
@@ -25,14 +42,7 @@ Goal: identify 10 actionable tasks that improve repository hospitality for agent
 Do not implement code changes. Do not propose product behavior changes.
 Generate exactly 10 tasks that improve repository maintainability, clarity, reliability, or safety for future agents.
 
-Output contract
-- Emit JSON only.
-- Return either:
-  - {"tasks":[...]}
-  - {"schema_version":1,"state":"seeding","payload":{"tasks":[...]}}
-- Each task must include: title, details, rationale, domain, priority.
-- priority must be one of P0, P1, P2.
-- details and rationale must be concrete and actionable in this repository.
+{ACTION_CONTRACT}
 
 System framing
 - Do not invent nonexistent files, architecture, or conventions.
@@ -82,9 +92,9 @@ Seed-generation contract
 5. Ensure at least 2 tasks are explicit cleanup/debt reduction tasks.
 6. Ensure at least 4 tasks explicitly reduce agent friction (onboarding, evidence, diagnostics, workflow, guardrails).
 7. Ensure there are no product feature tasks.
-8. Final output must be valid JSON matching the task schema described above.
+8. Deliver per the action contract defined above.
 
-Quality doc (truncated for prompt budget)
+Quality doc
 {QUALITY_DOC}
 "#,
     }

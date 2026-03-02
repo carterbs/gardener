@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::prompt_registry::seeding_prompt_template;
+use crate::prompt_registry::{
+    seeding_prompt_template, SEEDING_ACTION_CONTRACT_DRY_RUN, SEEDING_ACTION_CONTRACT_WRITE,
+};
 use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
@@ -47,14 +49,26 @@ pub fn build_seed_dry_run_prompt(
 }
 
 pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
-    render_seed_prompt_template(seeding_prompt_template().body, context)
+    render_seed_prompt_template(
+        seeding_prompt_template().body,
+        context,
+        SEEDING_ACTION_CONTRACT_WRITE,
+    )
 }
 
 fn build_seed_dry_run_prompt_v1(context: &SeedPromptContext) -> String {
-    render_seed_prompt_template(seeding_prompt_template().body, context)
+    render_seed_prompt_template(
+        seeding_prompt_template().body,
+        context,
+        SEEDING_ACTION_CONTRACT_DRY_RUN,
+    )
 }
 
-fn render_seed_prompt_template(template_body: &str, context: &SeedPromptContext) -> String {
+fn render_seed_prompt_template(
+    template_body: &str,
+    context: &SeedPromptContext,
+    action_contract: &str,
+) -> String {
     let quality_risks = if context.quality_risks.is_empty() {
         "No parseable coverage rows found in quality report; infer risk from repository signals."
             .to_string()
@@ -82,6 +96,7 @@ fn render_seed_prompt_template(template_body: &str, context: &SeedPromptContext)
         format!("{}\n", context.backlog_skill_md)
     };
     template_body
+        .replace("{ACTION_CONTRACT}", action_contract)
         .replace("{PRIMARY_GAP}", &context.primary_gap)
         .replace("{READINESS_SCORE}", &context.readiness_score.to_string())
         .replace("{READINESS_GRADE}", &context.readiness_grade)

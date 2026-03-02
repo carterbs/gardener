@@ -25,7 +25,8 @@ Usage:
     Show this help text.
 
 Environment:
-  GARDENER_DB_PATH can also set the default DB path.
+  GARDENER_DB_PATH can also set the default DB path for manual operations.
+  Runtime binaries may use GARDENER_RUNTIME_DB_PATH for runtime cache-backed DB selection.
 USAGE
 }
 

@@ -22,6 +22,9 @@ use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
 const REPORT_TTL_SECONDS: u64 = 3600;
+const RUNTIME_BACKLOG_DB_ENV: &str = "GARDENER_RUNTIME_DB_PATH";
+const LEGACY_BACKLOG_DB_ENV: &str = "GARDENER_DB_PATH";
+const RUNTIME_BACKLOG_DB_PATH: &str = ".cache/gardener/backlog.sqlite";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupSummary {
@@ -34,28 +37,22 @@ pub struct StartupSummary {
     pub seeded_tasks_upserted: usize,
 }
 
-pub fn backlog_db_path(cfg: &crate::config::AppConfig, scope: &RuntimeScope) -> PathBuf {
-    if let Ok(path) = env::var("GARDENER_DB_PATH") {
-        return PathBuf::from(path);
-    }
-
-    if cfg.execution.test_mode {
-        return scope
-            .repo_root
-            .as_ref()
-            .unwrap_or(&scope.working_dir)
-            .join(".cache/gardener/backlog.sqlite");
-    }
-
-    if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
-        return PathBuf::from(home).join(".gardener").join("backlog.sqlite");
-    }
-
+fn runtime_backlog_db_path(scope: &RuntimeScope) -> PathBuf {
     scope
         .repo_root
         .as_ref()
         .unwrap_or(&scope.working_dir)
-        .join(".cache/gardener/backlog.sqlite")
+        .join(RUNTIME_BACKLOG_DB_PATH)
+}
+
+pub fn backlog_db_path(_cfg: &crate::config::AppConfig, scope: &RuntimeScope) -> PathBuf {
+    if let Ok(path) = env::var(RUNTIME_BACKLOG_DB_ENV) {
+        return PathBuf::from(path);
+    }
+    if let Ok(path) = env::var(LEGACY_BACKLOG_DB_ENV) {
+        return PathBuf::from(path);
+    }
+    runtime_backlog_db_path(scope)
 }
 
 pub fn refresh_quality_report(
@@ -1314,6 +1311,21 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let mut cfg = AppConfig::default();
         cfg.execution.test_mode = true;
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+        assert_eq!(
+            backlog_db_path(&cfg, &scope),
+            dir.path().join(".cache/gardener/backlog.sqlite")
+        );
+    }
+
+    #[test]
+    fn backlog_db_path_defaults_to_runtime_cache() {
+        let dir = tempdir().expect("tempdir");
+        let cfg = AppConfig::default();
         let scope = RuntimeScope {
             process_cwd: dir.path().to_path_buf(),
             repo_root: Some(dir.path().to_path_buf()),

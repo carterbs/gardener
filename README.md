@@ -83,7 +83,8 @@ Pre-commit uses the same validation pipeline as manual checks:
 2. `scripts/check-skills-sync.sh`
 3. `scripts/check-no-warnings.sh`
 4. `scripts/check-migrations-wired.sh`
-5. `scripts/test-gardener-coverage.sh`
+5. `scripts/check-binary-blobs.sh`
+6. `scripts/test-gardener-coverage.sh`
 
 `run-validate.sh` runs these scripts in order; it stops on the first failure, so fix each failure before re-running.
 
@@ -106,11 +107,13 @@ or run the repo helper script:
 Pre-commit now executes:
 
 ```text
-scripts/brad-gardener --config gardener.toml --validate --validation-command "scripts/check-skills-sync.sh"
+./.githooks/pre-commit
 ```
 
-That means each commit runs the configured custom linter set defined in
-`scripts/check-skills-sync.sh` before commit.
+That means each commit runs:
+
+1. auto-format on staged Rust files
+2. the full `scripts/run-validate.sh` pipeline above
 
 ### Pre-commit remediation playbook
 
@@ -129,9 +132,11 @@ When commit is blocked by hooks:
      - Address the warning text, then re-run `./scripts/check-no-warnings.sh`.
    - Migration wiring errors:
      - Add each missing migration include to `tools/gardener/src/backlog_store.rs`.
+   - Binary blob failures:
+     - Remove blocked files listed by `scripts/check-binary-blobs.sh` from the commit or move them outside git history.
    - Coverage gate failure:
      - Re-run `./scripts/test-gardener-coverage.sh`, inspect the reported `TOTAL` and failing areas, then tighten/fix uncovered paths in `tools/gardener/src`.
-4. Re-run `git add` on fixed files and commit again.
+4. Re-stage any files changed by the remediation command (`git add`) and commit again.
 
 ## Vision
 

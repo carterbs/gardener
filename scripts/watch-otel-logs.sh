@@ -13,6 +13,7 @@ fi
 OTEL_LOG_TAIL_LINES=${GARDENER_OTEL_LOG_TAIL_LINES:-30}
 OTEL_LOG_INTERVAL=${GARDENER_OTEL_LOG_INTERVAL_SECONDS:-60}
 OTEL_LOG_PRETTY=${GARDENER_OTEL_PRETTY:-1}
+OTEL_LOG_SMOKE_MAX_REFRESHES=${GARDENER_OTEL_LOG_SMOKE_MAX_REFRESHES:-0}
 
 if ! [[ "$OTEL_LOG_INTERVAL" =~ ^[0-9]+$ ]] || [[ "$OTEL_LOG_INTERVAL" -le 0 ]]; then
   echo "warn: invalid GARDENER_OTEL_LOG_INTERVAL_SECONDS=$OTEL_LOG_INTERVAL, defaulting to 60" >&2
@@ -22,6 +23,11 @@ fi
 if ! [[ "$OTEL_LOG_TAIL_LINES" =~ ^[0-9]+$ ]] || [[ "$OTEL_LOG_TAIL_LINES" -le 0 ]]; then
   echo "warn: invalid GARDENER_OTEL_LOG_TAIL_LINES=$OTEL_LOG_TAIL_LINES, defaulting to 30" >&2
   OTEL_LOG_TAIL_LINES=30
+fi
+
+if ! [[ "$OTEL_LOG_SMOKE_MAX_REFRESHES" =~ ^[0-9]+$ ]]; then
+  echo "warn: invalid GARDENER_OTEL_LOG_SMOKE_MAX_REFRESHES=$OTEL_LOG_SMOKE_MAX_REFRESHES, defaulting to 0" >&2
+  OTEL_LOG_SMOKE_MAX_REFRESHES=0
 fi
 
 pretty_print_line() {
@@ -53,6 +59,12 @@ is_true() {
   esac
 }
 
+SMOKE_ACTIVE=0
+if (( OTEL_LOG_SMOKE_MAX_REFRESHES > 0 )); then
+  SMOKE_ACTIVE=1
+fi
+
+refresh_count=0
 while true; do
   clear 2>/dev/null || true
   echo "Watching: $LOG_PATH"
@@ -70,6 +82,19 @@ while true; do
     fi
   else
     echo "log file not found: $LOG_PATH"
+  fi
+
+  refresh_count=$((refresh_count + 1))
+
+  if (( SMOKE_ACTIVE == 1 )); then
+    if (( refresh_count >= OTEL_LOG_SMOKE_MAX_REFRESHES )); then
+      echo
+      echo "smoke mode: completed ${refresh_count}/${OTEL_LOG_SMOKE_MAX_REFRESHES} refreshes, exiting"
+      break
+    fi
+    echo
+    echo "smoke mode: completed ${refresh_count}/${OTEL_LOG_SMOKE_MAX_REFRESHES} refreshes, continuing"
+    continue
   fi
 
   echo

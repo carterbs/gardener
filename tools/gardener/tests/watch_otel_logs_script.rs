@@ -55,3 +55,46 @@ fn watch_otel_logs_smoke_defaults_invalid_env_values() {
         "fallback tail lines and interval should be reflected in output"
     );
 }
+
+#[test]
+fn watch_otel_logs_smoke_mode_stops_after_configured_refreshes() {
+    let output = {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let log_path = temp_dir.path().join("otel-logs.jsonl");
+        std::fs::write(&log_path, "first-line\nsecond-line\n").expect("write otel log fixture");
+
+        let mut cmd = Command::new(watch_otel_logs_script());
+        cmd.env("GARDENER_LOG_PATH", &log_path)
+            .env("GARDENER_OTEL_LOG_SMOKE_MAX_REFRESHES", "3")
+            .env("GARDENER_OTEL_LOG_TAIL_LINES", "1")
+            .env("GARDENER_OTEL_PRETTY", "0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        cmd.output()
+            .expect("run watch-otel-logs smoke mode command")
+    };
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "watch-otel-logs should exit successfully in smoke mode"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("smoke mode: completed 3/3 refreshes, exiting"),
+        "smoke mode completion message should be present"
+    );
+    assert_eq!(
+        stdout.matches("Watching:").count(),
+        3,
+        "smoke mode should run exactly 3 refreshes before exiting"
+    );
+    assert!(
+        !stderr.contains("warn:"),
+        "valid smoke refresh count should not emit warnings"
+    );
+}

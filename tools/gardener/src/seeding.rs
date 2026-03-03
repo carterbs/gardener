@@ -6,7 +6,7 @@ use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
 use crate::seed_runner::{
-    run_legacy_seed_runner_v1_with_events, run_seed_agent_direct_v2_with_events, SeedTask,
+    run_legacy_seed_runner_v1_with_events_and_task_count, run_seed_agent_direct_v2_with_events, SeedTask,
 };
 use crate::types::RuntimeScope;
 use serde_json::json;
@@ -170,22 +170,25 @@ pub fn recommend_seed_tasks_with_events(
     );
 
     let prompt = build_seed_dry_run_prompt(profile, quality_doc, scope, existing_backlog);
+    const DRY_RUN_TASK_COUNT: usize = 10;
     let result = if let Some(sink) = on_event.as_mut() {
-        run_legacy_seed_runner_v1_with_events(
+        run_legacy_seed_runner_v1_with_events_and_task_count(
             process_runner,
             scope,
             cfg.seeding.backend,
             &cfg.seeding.model,
             &prompt,
+            DRY_RUN_TASK_COUNT,
             Some(*sink),
         )
     } else {
-        run_legacy_seed_runner_v1_with_events(
+        run_legacy_seed_runner_v1_with_events_and_task_count(
             process_runner,
             scope,
             cfg.seeding.backend,
             &cfg.seeding.model,
             &prompt,
+            DRY_RUN_TASK_COUNT,
             None,
         )
     };

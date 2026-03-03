@@ -1,3 +1,4 @@
+use crate::agent::factory::AdapterFactory;
 use crate::backlog_store::{BacklogStore, NewTask};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
@@ -5,7 +6,9 @@ use crate::logging::append_run_log;
 use crate::pr_audit::reconcile_open_prs;
 use crate::priority::Priority;
 use crate::protocol::{AgentEvent, AgentEventKind};
+use crate::quality_assessment_runner::QualityAssessmentConfig;
 use crate::quality_grades::render_quality_grade_document;
+use crate::quality_pipeline::run_quality_pipeline;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner, ProductionRuntime};
 use crate::seed_runner::SeedTask;
@@ -60,8 +63,6 @@ pub fn refresh_quality_report(
     scope: &RuntimeScope,
     force: bool,
 ) -> Result<(PathBuf, bool), GardenerError> {
-    let profile_loc = profile_path(scope, cfg);
-    let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
     let quality_path = quality_report_path(cfg, scope);
     let stamp_path = quality_stamp_path(&quality_path);
     let should_regen = force
@@ -79,18 +80,38 @@ pub fn refresh_quality_report(
     );
 
     if should_regen {
-        append_run_log(
-            "info",
-            "startup.quality_report.regenerating",
-            json!({
-                "quality_path": quality_path.display().to_string(),
-                "primary_gap": profile.agent_readiness.primary_gap,
-                "readiness_score": profile.agent_readiness.readiness_score,
-            }),
-        );
         let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
-        let quality_doc =
-            render_quality_grade_document(&profile_loc.display().to_string(), &profile, repo_root);
+
+        // Try the new pipeline first; fall back to legacy profile-based rendering
+        let quality_doc = match try_pipeline_quality_report(cfg, repo_root, runtime) {
+            Ok(doc) => {
+                append_run_log(
+                    "info",
+                    "startup.quality_report.pipeline_succeeded",
+                    json!({ "quality_path": quality_path.display().to_string() }),
+                );
+                doc
+            }
+            Err(pipeline_err) => {
+                append_run_log(
+                    "warn",
+                    "startup.quality_report.pipeline_fallback",
+                    json!({
+                        "error": pipeline_err.to_string(),
+                        "reason": "falling back to legacy profile-based renderer",
+                    }),
+                );
+                // Legacy path: read profile and render via the old renderer
+                let profile_loc = profile_path(scope, cfg);
+                let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
+                render_quality_grade_document(
+                    &profile_loc.display().to_string(),
+                    &profile,
+                    repo_root,
+                )
+            }
+        };
+
         if let Some(parent) = quality_path.parent() {
             runtime.file_system.create_dir_all(parent)?;
         }
@@ -116,6 +137,37 @@ pub fn refresh_quality_report(
         );
     }
     Ok((quality_path, should_regen))
+}
+
+/// Attempt to generate a quality report using the new pipeline.
+fn try_pipeline_quality_report(
+    cfg: &AppConfig,
+    repo_root: &Path,
+    runtime: &ProductionRuntime,
+) -> Result<String, GardenerError> {
+    let backend = cfg.quality.backend.unwrap_or(cfg.seeding.backend);
+    let model = cfg
+        .quality
+        .model
+        .clone()
+        .unwrap_or_else(|| cfg.seeding.model.clone());
+    let assessment_config = QualityAssessmentConfig {
+        backend,
+        model,
+        max_turns: cfg.quality.max_turns,
+        ..QualityAssessmentConfig::default()
+    };
+
+    let factory = AdapterFactory::with_defaults();
+    let (doc, _report) = run_quality_pipeline(
+        repo_root,
+        Some(&factory),
+        runtime.process_runner.as_ref(),
+        None, // no store — backlog emission is handled separately during seeding
+        &assessment_config,
+    )?;
+
+    Ok(doc)
 }
 
 pub fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> PathBuf {
@@ -1199,7 +1251,7 @@ fn extract_command_preview(payload: &serde_json::Value) -> Option<String> {
         })
 }
 
-fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
+pub fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("{}.stamp", quality_path.display()))
 }
 

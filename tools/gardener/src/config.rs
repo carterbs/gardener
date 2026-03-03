@@ -42,6 +42,7 @@ pub struct AppConfig {
     pub execution: ExecutionConfig,
     pub triage: TriageConfig,
     pub quality_report: QualityReportConfig,
+    pub quality: QualityConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +132,13 @@ pub struct QualityReportConfig {
     pub stale_if_head_commit_differs: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QualityConfig {
+    pub backend: Option<AgentKind>,
+    pub model: Option<String>,
+    pub max_turns: u32,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -185,6 +193,11 @@ impl Default for AppConfig {
                 stale_after_days: 7,
                 stale_if_head_commit_differs: true,
             },
+            quality: QualityConfig {
+                backend: None,
+                model: None,
+                max_turns: 10,
+            },
         }
     }
 }
@@ -204,6 +217,7 @@ struct PartialAppConfig {
     execution: Option<PartialExecutionConfig>,
     triage: Option<PartialTriageConfig>,
     quality_report: Option<PartialQualityReportConfig>,
+    quality: Option<PartialQualityConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -280,6 +294,13 @@ struct PartialQualityReportConfig {
     path: Option<String>,
     stale_after_days: Option<u64>,
     stale_if_head_commit_differs: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PartialQualityConfig {
+    backend: Option<AgentKind>,
+    model: Option<String>,
+    max_turns: Option<u32>,
 }
 
 pub fn load_config(
@@ -513,6 +534,18 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = quality.stale_if_head_commit_differs {
             cfg.quality_report.stale_if_head_commit_differs = value;
+        }
+    }
+
+    if let Some(quality) = partial.quality {
+        if let Some(backend) = quality.backend {
+            cfg.quality.backend = Some(backend);
+        }
+        if let Some(model) = quality.model {
+            cfg.quality.model = Some(model);
+        }
+        if let Some(max_turns) = quality.max_turns {
+            cfg.quality.max_turns = max_turns;
         }
     }
 }

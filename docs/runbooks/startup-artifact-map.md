@@ -12,12 +12,12 @@ Use this runbook when startup indicates:
 
 ## Startup artifact map
 
-## Backlog DB for startup evidence
+## Backlog path split
 
-Startup seeding and worker handoff use the shared backlog DB by default:
+The backlog lives at different paths depending on context:
 
-- Default backlog artifact: `~/.gardener/backlog.sqlite`.
-- Runtime override: `GARDENER_RUNTIME_DB_PATH` (legacy fallback: `GARDENER_DB_PATH`).
+- **Manual / CLI**: `~/.gardener/backlog.sqlite` — used by `scripts/backlog-db.sh` and manual operations. Override with `GARDENER_DB_PATH`.
+- **Runtime artifact**: `.cache/gardener/backlog.sqlite` — written by startup seeding and worker handoff. Override with `GARDENER_RUNTIME_DB_PATH` (legacy fallback: `GARDENER_DB_PATH`).
 
 | Artifact | Location | Why it exists | Typical steering questions |
 | --- | --- | --- | --- |

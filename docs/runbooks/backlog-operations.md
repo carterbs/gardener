@@ -2,13 +2,12 @@
 
 This runbook documents manual backlog actions for agents.
 
-## Backlog DB location
+## Backlog path split
 
-Manual operations and runtime use the same default backlog DB:
+The backlog lives at different paths depending on context:
 
-- Default DB path: `~/.gardener/backlog.sqlite`.
-- Manual CLI uses `GARDENER_DB_PATH` or `--db` to override.
-- Runtime uses `GARDENER_RUNTIME_DB_PATH` (or legacy `GARDENER_DB_PATH`) to override.
+- **Manual / CLI**: `~/.gardener/backlog.sqlite` — used by `scripts/backlog-db.sh` and manual operations. Override with `GARDENER_DB_PATH` or `--db`.
+- **Runtime artifact**: `.cache/gardener/backlog.sqlite` — written by the gardener runtime during startup. Override with `GARDENER_RUNTIME_DB_PATH` (legacy fallback: `GARDENER_DB_PATH`).
 
 ## Prerequisites
 

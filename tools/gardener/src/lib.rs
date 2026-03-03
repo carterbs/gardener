@@ -33,7 +33,28 @@ pub mod protocol;
 pub mod quality_domain_catalog;
 pub mod quality_evidence;
 pub mod quality_grades;
+pub mod quality_assertion_counter;
+pub mod quality_assessment_prompt;
+pub mod quality_assessment_runner;
+pub mod quality_dimension_prompts;
+pub mod quality_assessment_types;
+pub mod quality_backlog_emitter;
+pub mod quality_ci_lint_detector;
+pub mod quality_complexity_analyzer;
+pub mod quality_coverage_parser;
+pub mod quality_debt_scanner;
+pub mod quality_doc_scanner;
+pub mod quality_evidence_bundle;
+pub mod quality_file_sampler;
+pub mod quality_grade_compute;
+pub mod quality_grade_renderer;
+pub mod quality_pipeline;
+pub mod quality_instrumentation_detector;
+pub mod quality_language_registry;
 pub mod quality_scoring;
+pub mod quality_test_detector;
+pub mod quality_tree_walker;
+pub mod quality_untested_finder;
 pub mod repo_intelligence;
 pub mod review_phase;
 pub mod runtime;
@@ -69,7 +90,8 @@ use logging::{
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{
-    backlog_db_path, run_interactive_seeding, run_startup_audits, run_startup_audits_with_progress,
+    backlog_db_path, quality_report_path, quality_stamp_path, run_interactive_seeding, run_startup_audits,
+    run_startup_audits_with_progress,
 };
 use std::collections::{BTreeSet, HashMap};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
@@ -354,18 +376,52 @@ pub fn run_with_runtime(
 
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
-            let mut cfg_for_startup = cfg;
-            let _ =
-                run_with_startup_capture(runtime, &startup.scope, "quality-grades-only", || {
-                    run_startup_audits(
-                        runtime,
-                        &mut cfg_for_startup,
-                        &startup.scope,
-                        false,
-                        false,
-                        false,
-                    )
-                })?;
+            let repo_root = startup
+                .scope
+                .repo_root
+                .as_ref()
+                .unwrap_or(&startup.scope.working_dir);
+            let backend = cfg.quality.backend.unwrap_or(cfg.seeding.backend);
+            let model = cfg
+                .quality
+                .model
+                .clone()
+                .unwrap_or_else(|| cfg.seeding.model.clone());
+            let assessment_config =
+                quality_assessment_runner::QualityAssessmentConfig {
+                    backend,
+                    model,
+                    max_turns: cfg.quality.max_turns,
+                    ..quality_assessment_runner::QualityAssessmentConfig::default()
+                };
+            // quality-grades-only is read-only: no backlog store to avoid side effects
+            let factory = AdapterFactory::with_defaults();
+            let (doc, _report) = quality_pipeline::run_quality_pipeline(
+                repo_root,
+                Some(&factory),
+                runtime.process_runner.as_ref(),
+                None,
+                &assessment_config,
+            )?;
+            let quality_path = quality_report_path(&cfg, &startup.scope);
+            if let Some(parent) = quality_path.parent() {
+                runtime.file_system.create_dir_all(parent)?;
+            }
+            runtime.file_system.write_string(&quality_path, &doc)?;
+            let stamp_path = quality_stamp_path(&quality_path);
+            let now = runtime
+                .clock
+                .now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            runtime
+                .file_system
+                .write_string(&stamp_path, &now.to_string())?;
+            runtime.terminal.write_line(&format!(
+                "quality report written to {}",
+                quality_path.display()
+            ))?;
             return Ok(0);
         }
 

@@ -12,7 +12,6 @@ use crate::learning_loop::LearningLoop;
 use crate::logging::{
     append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines,
 };
-use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
 use crate::prompt_registry::{
     ci_failure_remediation_template, merge_main_conflict_resolution_template, pr_creation_template,
@@ -30,7 +29,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkerLogEvent {
@@ -107,6 +106,9 @@ struct ReviewArtifact {
 }
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
+pub const MAX_MERGE_REMEDIATION: u32 = 3;
+pub const MERGEABILITY_POLL_MAX: u32 = 12;
+pub const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerStreamEvent {

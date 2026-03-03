@@ -54,3 +54,27 @@ fn validation_pipeline_docs_match_live_validation_hook() {
         "pre-commit hook should run the canonical validation pipeline"
     );
 }
+
+#[test]
+fn coverage_ignore_manifest_is_documented_and_implemented() {
+    let repo_root = repo_root_path();
+
+    let readme = fs::read_to_string(repo_root.join("README.md"))
+        .unwrap_or_else(|err| panic!("failed to read README.md: {err}"));
+    let coverage_script = fs::read_to_string(repo_root.join("scripts/test-gardener-coverage.sh"))
+        .unwrap_or_else(|err| panic!("failed to read scripts/test-gardener-coverage.sh: {err}"));
+
+    let documented = readme.contains("COVERAGE_IGNORE_MANIFEST=");
+    assert!(
+        documented,
+        "README should document the COVERAGE_IGNORE_MANIFEST environment variable"
+    );
+    assert!(
+        coverage_script.contains("COVERAGE_IGNORE_MANIFEST"),
+        "coverage script should implement COVERAGE_IGNORE_MANIFEST support"
+    );
+    assert!(
+        coverage_script.contains("--ignore-filename-regex"),
+        "coverage script should pass regex filters through llvm-cov"
+    );
+}

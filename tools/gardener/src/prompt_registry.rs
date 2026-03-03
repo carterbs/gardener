@@ -24,7 +24,8 @@ pub const SEEDING_ACTION_CONTRACT_DRY_RUN: &str = r#"Output contract
   - {"schema_version":1,"state":"seeding","payload":{"tasks":[...]}}
 - Each task must include: title, details, rationale, domain, priority.
 - priority must be one of P0, P1, P2.
-- details and rationale must be concrete and actionable in this repository."#;
+- details and rationale must be concrete and actionable in this repository.
+- details must include at least one concrete evidence anchor (file path, docs section, quality-grade row, or existing backlog reference)."#;
 
 pub const SEEDING_ACTION_CONTRACT_WRITE: &str = r#"Action contract
 - Use the backlog-db skill to insert each task directly into the backlog.
@@ -32,7 +33,8 @@ pub const SEEDING_ACTION_CONTRACT_WRITE: &str = r#"Action contract
   ./scripts/backlog-db.sh add --title "..." --details "..." --priority P0|P1|P2 --scope <domain> --kind maintenance
 - Do NOT emit JSON. Do NOT print a task list. Insert using the script only.
 - priority must be one of P0, P1, P2.
-- details must be concrete and actionable in this repository."#;
+- details must be concrete and actionable in this repository.
+- details must include at least one concrete evidence anchor (file path, docs section, quality-grade row, or existing backlog reference)."#;
 
 pub fn seeding_prompt_template() -> PromptTemplate {
     PromptTemplate {
@@ -83,16 +85,25 @@ Create exactly 10 tasks. Prefer a practical mix of immediate fixes and cleanup d
 - priority must be one of P0, P1, P2.
 - domain should be concrete and align to discovered file families.
 - rationale must explain why this task makes coding agents more effective in this repository.
+- details must include at least one concrete evidence anchor (file path, docs section, quality-grade row, or existing backlog reference).
+
+Prioritization policy (effort vs impact)
+- Order tasks by effort-to-impact ratio: low effort + high impact first.
+- Prefer quick quality-grade lifts before broad tooling buildouts when impact is similar.
+- Favor missing tests for existing high-risk code paths over speculative framework additions.
+- Avoid filler tasks to reach count; every task must clear a clear impact threshold for this repository.
 
 Seed-generation contract
 1. Read docs/quality-grades.md, AGENTS.md, docs/conventions/, and docs/references/codex-agent-team-article.md.
 2. Inspect docs/ and repository structure for concrete, non-duplicate work that helps agents move faster safely.
-3. Prefer exactly 10 tasks.
+3. Generate exactly 10 tasks.
 4. Ensure at least 2 tasks map to primary_gap.
 5. Ensure at least 2 tasks are explicit cleanup/debt reduction tasks.
 6. Ensure at least 4 tasks explicitly reduce agent friction (onboarding, evidence, diagnostics, workflow, guardrails).
-7. Ensure there are no product feature tasks.
-8. Deliver per the action contract defined above.
+7. Rank tasks by effort-to-impact ratio (quick wins first).
+8. Ensure each task details field includes a concrete evidence anchor (path/section/grade/backlog reference).
+9. Ensure there are no product feature tasks.
+10. Deliver per the action contract defined above.
 
 Quality doc
 {QUALITY_DOC}

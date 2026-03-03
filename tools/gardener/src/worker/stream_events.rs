@@ -42,35 +42,65 @@ pub(crate) fn emit_adapter_tool_event(
 }
 
 fn extract_payload_command(payload: &serde_json::Value) -> Option<String> {
-    let extract_payload_command = |value: &serde_json::Value| {
-        if let Some(inputs) = value.get("inputs").or_else(|| value.get("input")) {
-            if let Some(command) = inputs.get("command").or_else(|| inputs.get("value")) {
-                return command.as_str().map(|command| command.replace('\n', "\\n"));
+    let normalize_command =
+        |value: &serde_json::Value| value.as_str().map(|text| text.replace('\n', "\\n"));
+
+    fn find_command(value: &serde_json::Value) -> Option<String> {
+        let normalize_command =
+            |value: &serde_json::Value| value.as_str().map(|text| text.replace('\n', "\\n"));
+
+        if let Some(command) = value.get("command").and_then(normalize_command) {
+            return Some(command);
+        }
+
+        let input = value.get("inputs").or_else(|| value.get("input"));
+        if let Some(command) = input
+            .and_then(|inputs| inputs.get("command").or_else(|| inputs.get("value")))
+            .and_then(normalize_command)
+        {
+            return Some(command);
+        }
+
+        if let Some(command) = value.get("item").and_then(find_command) {
+            return Some(command);
+        }
+
+        if let Some(message) = value.get("message") {
+            if let Some(command) = message
+                .get("content")
+                .and_then(|content| content.as_array())
+                .and_then(|commands| {
+                    commands.iter().find_map(|command_entry| {
+                        command_entry
+                            .get("input")
+                            .and_then(|input| input.get("command").or_else(|| input.get("value")))
+                            .and_then(normalize_command)
+                    })
+                })
+            {
+                return Some(command);
             }
         }
-        None
-    };
+
+        if let Some(message) = value.get("message").and_then(normalize_command) {
+            return Some(message);
+        }
+
+        if let Some(text) = value.get("text").and_then(normalize_command) {
+            return Some(text);
+        }
+
+        if let Some(content) = value.get("content").and_then(normalize_command) {
+            return Some(content);
+        }
+
+        value.get("payload").and_then(find_command)
+    }
+
     payload
-        .get("payload")
-        .and_then(extract_payload_command)
-        .or_else(|| {
-            payload
-                .get("message")
-                .and_then(|value| value.as_str())
-                .map(|message| message.replace('\n', "\\n"))
-        })
-        .or_else(|| {
-            payload
-                .get("text")
-                .and_then(|value| value.as_str())
-                .map(|text| text.replace('\n', "\\n"))
-        })
-        .or_else(|| {
-            payload
-                .get("content")
-                .and_then(|value| value.as_str())
-                .map(|content| content.replace('\n', "\\n"))
-        })
+        .get("command")
+        .and_then(normalize_command)
+        .or_else(|| find_command(payload))
 }
 
 fn format_adapter_event_command(event_type: &str, payload: &serde_json::Value) -> Option<String> {

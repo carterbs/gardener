@@ -16,7 +16,7 @@ The system is an **agent-driven assessment**. A coding agent receives a prompt, 
 
 **P0-2: LLM-driven domain discovery.** The agent discovers domains by inspecting the repo — reading directory structure, READMEs, module boundaries, package manifests, and naming conventions. No hardcoded domain maps. The agent decides what constitutes a meaningful domain and names it. An optional `.gardener/domains.toml` can provide hints, but the agent must work without it.
 
-**P0-3: Multi-language support as a first-class concern.** The agent must identify all languages present in the repo (and within each domain), assess test coverage per language, and flag languages with no test infrastructure. brad-os (TypeScript + Swift) is the first testbed. The tools must not assume a single language.
+**P0-3: Multi-language support as a first-class concern.** The agent must identify all languages present in the repo (and within each domain), assess test coverage per language, and flag languages with no test infrastructure. brad-os (TypeScript + Swift) is the first testbed. Gardener's own repo (rust) will be also used. The tools must not assume a single language.
 
 **P0-4: Deterministic evidence-gathering tools.** Provide the agent with tools it can invoke to collect hard data:
 - **Tree walker** — list source files, test files, and their languages, grouped by directory
@@ -41,6 +41,9 @@ These tools produce structured JSON. They do not interpret — the agent interpr
 
 **P0-8: Zero-config operation.** The system must grade any repo given only a path. No setup, no config files, no prior knowledge. The agent figures it out. Configuration only refines.
 
+**P0-9: Instrumentation/observability signal.** The tools detect logging, tracing, and metrics calls. The agent assesses whether critical paths have adequate observability. Bonus for well-instrumented domains.
+
+
 ---
 
 ## P1 — Important
@@ -53,21 +56,17 @@ These tools produce structured JSON. They do not interpret — the agent interpr
 
 **P1-4: Integration/e2e test detection and bonus.** The tools detect integration and e2e tests. The agent should weight these more heavily than unit tests for domains where integration behavior matters (API handlers, data pipelines, etc.). Again — the agent decides the weighting, not a formula.
 
-**P1-5: Freshness enforcement.** The grade document has a TTL (default 1 hour). Stale grades block seeding runs. The grading system can be re-invoked automatically on startup when stale.
+**P1-5: Convention adherence assessment.** The agent reads whatever convention docs exist (AGENTS.md, docs/conventions/, .editorconfig, linter configs) and checks source files for compliance. This is inherently non-deterministic — only an LLM can judge whether code follows documented conventions.
 
-**P1-6: Convention adherence assessment.** The agent reads whatever convention docs exist (AGENTS.md, docs/conventions/, .editorconfig, linter configs) and spot-checks source files for compliance. This is inherently non-deterministic — only an LLM can judge whether code follows documented conventions.
+**P1-6: AI-enriched per-domain notes.** The agent writes a one-sentence narrative note per domain explaining the grade and the most impactful improvement. These notes go directly into the output document.
 
 ---
 
 ## P2 — Nice to Have
 
-**P2-1: Instrumentation/observability signal.** The tools detect logging, tracing, and metrics calls. The agent assesses whether critical paths have adequate observability. Bonus for well-instrumented domains.
+**P2-1: Trend tracking.** Store previous grade snapshots so the document can show directional movement (improving/declining/stable) per domain.
 
-**P2-2: AI-enriched per-domain notes.** The agent writes a one-sentence narrative note per domain explaining the grade and the most impactful improvement. These notes go directly into the output document.
-
-**P2-3: Trend tracking.** Store previous grade snapshots so the document can show directional movement (improving/declining/stable) per domain.
-
-**P2-4: Cross-platform awareness.** For repos with multiple platform targets (ios/, android/, web/), report per-platform test health within each domain.
+**P2-2: Cross-platform awareness.** For repos with multiple platform targets (ios/, android/, web/), report per-platform test health within each domain.
 
 ---
 

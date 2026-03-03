@@ -2709,4 +2709,110 @@ mod tests {
         assert!(tasks.iter().any(|task| task.title == "backlog task"));
         assert!(!tasks.iter().any(|task| task.title == "merge queue task"));
     }
+
+    #[test]
+    fn insert_and_list_rejected_seeds_round_trip() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+        let task = SeedTask {
+            title: "Fix flaky tests".to_string(),
+            details: "Stabilize intermittent CI failures".to_string(),
+            rationale: "Reduces agent confusion from false negatives".to_string(),
+            domain: "testing".to_string(),
+            priority: "P1".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&task, Some("too vague"))
+            .expect("insert with reason");
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].title, "Fix flaky tests");
+        assert_eq!(seeds[0].details, "Stabilize intermittent CI failures");
+        assert_eq!(seeds[0].rejection_reason, "too vague");
+        assert_eq!(seeds[0].domain, "testing");
+    }
+
+    #[test]
+    fn insert_rejected_seed_without_reason() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+        let task = SeedTask {
+            title: "Add logging".to_string(),
+            details: "Improve observability".to_string(),
+            rationale: "Helps debug agent runs".to_string(),
+            domain: "infra".to_string(),
+            priority: "P2".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&task, None)
+            .expect("insert without reason");
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].title, "Add logging");
+        assert_eq!(seeds[0].rejection_reason, "");
+    }
+
+    #[test]
+    fn insert_rejected_seed_deduplicates_by_title_and_domain() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+        let task = SeedTask {
+            title: "Normalize paths".to_string(),
+            details: "First version".to_string(),
+            rationale: "r1".to_string(),
+            domain: "core".to_string(),
+            priority: "P1".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&task, Some("first reason"))
+            .expect("first insert");
+
+        let updated = SeedTask {
+            title: "Normalize paths".to_string(),
+            details: "Updated version".to_string(),
+            rationale: "r2".to_string(),
+            domain: "core".to_string(),
+            priority: "P0".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&updated, Some("updated reason"))
+            .expect("second insert");
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].details, "Updated version");
+        assert_eq!(seeds[0].rejection_reason, "updated reason");
+    }
+
+    #[test]
+    fn list_rejected_seeds_caps_at_twenty() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+
+        for i in 0..25 {
+            let task = SeedTask {
+                title: format!("Rejected task {i}"),
+                details: format!("Details for task {i}"),
+                rationale: "r".to_string(),
+                domain: format!("domain-{i}"),
+                priority: "P1".to_string(),
+            };
+            store
+                .insert_rejected_seed(&task, Some(&format!("reason {i}")))
+                .expect("insert");
+        }
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 20);
+    }
 }

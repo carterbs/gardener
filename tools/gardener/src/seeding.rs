@@ -513,9 +513,9 @@ fn extract_quality_risks(quality_doc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_seed_dry_run_prompt, build_seed_prompt, build_seed_prompt_context, build_seed_prompt_v2,
-        collect_docs_listing, extract_quality_risks, read_optional_file,
-        walk_docs, SeedPromptContext,
+        build_seed_dry_run_prompt, build_seed_prompt, build_seed_prompt_context,
+        build_seed_prompt_v2, build_seed_refine_prompt, collect_docs_listing,
+        extract_quality_risks, read_optional_file, walk_docs, SeedPromptContext,
     };
     use crate::prompt_registry::SEEDING_ACTION_CONTRACT_WRITE;
     use crate::triage_discovery::DiscoveryAssessment;
@@ -787,5 +787,130 @@ mod tests {
         assert!(prompt.contains("Emit JSON only."));
         assert!(prompt.contains("Seed-generation contract"));
         assert!(prompt.contains("Relevant repo anchors"));
+    }
+
+    #[test]
+    fn dry_run_prompt_includes_rejected_tasks_when_non_empty() {
+        let profile = sample_profile();
+        let rejected = "- \"Fix flaky test\" (testing) — rejected because: \"too vague\"";
+        let prompt = build_seed_dry_run_prompt(
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+            "No active backlog tasks.",
+            rejected,
+        );
+
+        assert!(prompt.contains("Previously rejected seed tasks"));
+        assert!(prompt.contains("do NOT suggest these again"));
+        assert!(prompt.contains("Fix flaky test"));
+    }
+
+    #[test]
+    fn dry_run_prompt_omits_rejected_section_when_empty() {
+        let profile = sample_profile();
+        let prompt = build_seed_dry_run_prompt(
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+            "No active backlog tasks.",
+            "",
+        );
+
+        assert!(!prompt.contains("Previously rejected seed tasks"));
+    }
+
+    #[test]
+    fn build_seed_refine_prompt_format() {
+        use crate::seed_runner::SeedTask;
+
+        let profile = sample_profile();
+        let tasks_with_feedback = vec![
+            (
+                SeedTask {
+                    title: "Add CI linting".to_string(),
+                    details: "Set up ESLint in CI pipeline".to_string(),
+                    rationale: "Catches style issues early".to_string(),
+                    domain: "ci".to_string(),
+                    priority: "P1".to_string(),
+                },
+                "Make it also cover formatting checks".to_string(),
+            ),
+            (
+                SeedTask {
+                    title: "Write onboarding guide".to_string(),
+                    details: "Document setup steps for new contributors".to_string(),
+                    rationale: "Reduces onboarding friction".to_string(),
+                    domain: "docs".to_string(),
+                    priority: "P2".to_string(),
+                },
+                "Focus on agent-specific onboarding, not human contributors".to_string(),
+            ),
+        ];
+
+        let prompt = build_seed_refine_prompt(
+            &tasks_with_feedback,
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+            "No active backlog tasks.",
+            "",
+        );
+
+        assert!(prompt.contains("Revise each task below"));
+        assert!(prompt.contains("exactly 2 revised tasks"));
+        assert!(prompt.contains("Task 1:"));
+        assert!(prompt.contains("Title: Add CI linting"));
+        assert!(prompt.contains("User feedback: \"Make it also cover formatting checks\""));
+        assert!(prompt.contains("Task 2:"));
+        assert!(prompt.contains("Title: Write onboarding guide"));
+        assert!(prompt.contains("User feedback: \"Focus on agent-specific onboarding"));
+        assert!(prompt.contains("Emit JSON only."));
+    }
+
+    #[test]
+    fn build_seed_refine_prompt_includes_rejected_tasks_context() {
+        use crate::seed_runner::SeedTask;
+
+        let profile = sample_profile();
+        let tasks_with_feedback = vec![(
+            SeedTask {
+                title: "Task A".to_string(),
+                details: "Details A".to_string(),
+                rationale: "Rationale A".to_string(),
+                domain: "infra".to_string(),
+                priority: "P0".to_string(),
+            },
+            "feedback".to_string(),
+        )];
+
+        let rejected = "- \"Old task\" (infra) — rejected because: \"duplicate\"";
+        let prompt = build_seed_refine_prompt(
+            &tasks_with_feedback,
+            &profile,
+            "Risk summary",
+            &RuntimeScope {
+                process_cwd: std::env::current_dir().expect("cwd"),
+                repo_root: None,
+                working_dir: std::env::current_dir().expect("cwd"),
+            },
+            "No active backlog tasks.",
+            rejected,
+        );
+
+        assert!(prompt.contains("Previously rejected tasks"));
+        assert!(prompt.contains("Old task"));
     }
 }

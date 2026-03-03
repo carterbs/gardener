@@ -1,7 +1,17 @@
 use std::fs;
 use std::path::PathBuf;
 
-const TARGET_FILES: &[&str] = &["worker.rs", "worker_pool.rs"];
+const TARGET_FILES: &[&str] = &[
+    "worker/mod.rs",
+    "worker/types.rs",
+    "worker/evidence.rs",
+    "worker/stream_events.rs",
+    "worker/worktree_naming.rs",
+    "worker/worker_doing.rs",
+    "worker/merge_phase.rs",
+    "worker/simulated.rs",
+    "worker_pool.rs",
+];
 const WORKER_LOG_CALL: &str = "append_run_log(";
 
 #[derive(Debug)]

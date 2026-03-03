@@ -138,3 +138,39 @@ pub fn classify_task(task_summary: &str) -> TaskCategory {
         TaskCategory::Task
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::fsm::TaskCategory;
+    use super::{classify_task, parse_understand_output};
+
+    #[test]
+    fn parse_understand_output_falls_back_to_classifier_when_payload_invalid() {
+        let output = parse_understand_output(
+            &serde_json::json!({"foo": "bar"}),
+            "worker-1",
+            "refactor: move prompt registry to module",
+        );
+        assert_eq!(output.task_type, TaskCategory::Refactor);
+        assert_eq!(
+            output.reasoning,
+            "fallback deterministic keyword classifier (invalid understand payload)"
+        );
+    }
+
+    #[test]
+    fn classify_build_and_implement_as_feature_for_planning() {
+        assert_eq!(
+            classify_task(
+                "GARD-04: Build Triage mode — Live activity and Triage artifacts cards"
+            ),
+            crate::fsm::TaskCategory::Feature
+        );
+        assert_eq!(
+            classify_task(
+                "GARD-02: Implement global frame — header, footer, and mode switching"
+            ),
+            crate::fsm::TaskCategory::Feature
+        );
+    }
+}

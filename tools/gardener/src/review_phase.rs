@@ -177,3 +177,25 @@ fn persist_review_artifact(ctx: &ReviewContext<'_>, reviewing_output: &Reviewing
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_reviewing_output;
+
+    #[test]
+    fn parse_reviewing_output_defaults_to_approve_without_verdict() {
+        let output = parse_reviewing_output(&serde_json::json!({}));
+        assert_eq!(output.verdict, crate::fsm::ReviewVerdict::Approve);
+        assert!(output.suggestions.is_empty());
+    }
+
+    #[test]
+    fn parse_reviewing_output_preserves_needs_changes_and_suggestions() {
+        let output = parse_reviewing_output(&serde_json::json!({
+            "verdict": "needs_changes",
+            "suggestions": ["first", 2, "third"],
+        }));
+        assert_eq!(output.verdict, crate::fsm::ReviewVerdict::NeedsChanges);
+        assert_eq!(output.suggestions, vec!["first", "third"]);
+    }
+}

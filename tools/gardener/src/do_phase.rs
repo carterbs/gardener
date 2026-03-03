@@ -121,3 +121,37 @@ pub(crate) fn fallback_commit_message(task_summary: &str) -> String {
         format!("feat: {desc}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_doing_output;
+
+    #[test]
+    fn parse_doing_output_returns_err_when_payload_invalid() {
+        let result = parse_doing_output(&serde_json::json!({"foo": "bar"}), "worker-1", "Add test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_doing_output_returns_err_when_payload_null() {
+        let result = parse_doing_output(&serde_json::Value::Null, "worker-1", "Add test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_doing_output_succeeds_with_valid_payload() {
+        let payload = serde_json::json!({"summary": "did the thing"});
+        let result = parse_doing_output(&payload, "worker-1", "Add test");
+        assert_eq!(
+            result.expect("valid payload should parse").summary,
+            "did the thing"
+        );
+    }
+
+    #[test]
+    fn fallback_commit_message_handles_empty_summary() {
+        use super::fallback_commit_message;
+        let message = fallback_commit_message("   ");
+        assert_eq!(message, "feat: implement requested changes");
+    }
+}

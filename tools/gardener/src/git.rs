@@ -653,6 +653,57 @@ impl<'a> GitClient<'a> {
         Ok(())
     }
 
+    pub fn pull_main_with_stashed_changes(&self) -> Result<(), GardenerError> {
+        let mut stashed = false;
+        if !self.worktree_is_clean()? {
+            let stash = self.run([
+                "git",
+                "stash",
+                "push",
+                "-u",
+                "-m",
+                "gardener: runtime main-sync isolation",
+            ])?;
+            if stash.exit_code != 0 {
+                append_run_log(
+                    "error",
+                    "git.pull_main_stash.push_failed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "exit_code": stash.exit_code,
+                        "stderr": stash.stderr
+                    }),
+                );
+                return Err(GardenerError::Process(format!(
+                    "git stash push --include-untracked failed: {}",
+                    stash.stderr
+                )));
+            }
+            stashed = true;
+        }
+
+        let result = self.pull_main();
+        if stashed {
+            let pop = self.run(["git", "stash", "pop", "--index"])?;
+            if pop.exit_code != 0 {
+                append_run_log(
+                    "error",
+                    "git.pull_main_stash.pop_failed",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "exit_code": pop.exit_code,
+                        "stderr": pop.stderr
+                    }),
+                );
+                return Err(GardenerError::Process(format!(
+                    "git stash pop --index failed: {}",
+                    pop.stderr
+                )));
+            }
+        }
+        result
+    }
+
     pub fn run_validation_command(&self, command: &str) -> Result<(), GardenerError> {
         append_run_log(
             "info",
@@ -1333,6 +1384,134 @@ mod tests {
         assert_eq!(spawned[2].args, vec!["fetch", "origin", "main"]);
         assert_eq!(spawned[3].args, vec!["merge", "--ff-only", "origin/main"]);
         assert_eq!(spawned.len(), 4);
+    }
+
+    #[test]
+    fn pull_main_with_stashed_changes_stashes_and_restores_dirty_worktree() {
+        let runner = FakeProcessRunner::default();
+        // git status --porcelain
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: " M tools/gardener/src/main.rs\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git stash push -u -m "gardener: runtime main-sync isolation"
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "Saved working tree and index state WIP on main: ...\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git stash pop --index
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        GitClient::new(&runner, "/repo")
+            .pull_main_with_stashed_changes()
+            .expect("pull_main should preserve dirty worktree state");
+
+        let spawned = runner.spawned();
+        assert_eq!(spawned[0].args, vec!["status", "--porcelain"]);
+        let stash_push = vec![
+            "stash",
+            "push",
+            "-u",
+            "-m",
+            "gardener: runtime main-sync isolation",
+        ];
+        let stash_pop = vec!["stash", "pop", "--index"];
+        let stash_push_index = spawned
+            .iter()
+            .position(|request| request.args.as_slice() == stash_push.as_slice())
+            .expect("stash push should run with dirty worktree");
+        let stash_pop_index = spawned
+            .iter()
+            .position(|request| request.args.as_slice() == stash_pop.as_slice())
+            .expect("stash pop should run after pull");
+        let merge_index = spawned
+            .iter()
+            .position(|request| request.args == vec!["merge", "--ff-only", "origin/main"])
+            .expect("main merge should run");
+        let fetch_index = spawned
+            .iter()
+            .position(|request| request.args == vec!["fetch", "origin", "main"])
+            .expect("main fetch should run");
+        assert!(stash_push_index < merge_index);
+        assert!(stash_push_index < stash_pop_index);
+        assert!(fetch_index < merge_index);
+        assert!(fetch_index < stash_pop_index);
+        assert!(stash_pop_index > fetch_index);
+        assert!(merge_index > fetch_index);
+    }
+
+    #[test]
+    fn pull_main_with_stashed_changes_keeps_clean_worktree_unmodified() {
+        let runner = FakeProcessRunner::default();
+        // git status --porcelain
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        GitClient::new(&runner, "/repo")
+            .pull_main_with_stashed_changes()
+            .expect("pull_main should skip stashing clean worktree");
+
+        let spawned = runner.spawned();
+        assert!(!spawned
+            .iter()
+            .any(|request| request.args.first() == Some(&"stash".to_string())));
     }
 
     #[test]

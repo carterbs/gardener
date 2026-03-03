@@ -914,7 +914,7 @@ fn teardown_after_completion(
         false
     };
     let main_updated = if output.merged {
-        if let Err(err) = repo_git.pull_main() {
+        if let Err(err) = repo_git.pull_main_with_stashed_changes() {
             append_run_log(
                 "warn",
                 "worker.teardown.pull_main_failed",
@@ -939,13 +939,16 @@ fn teardown_after_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::execute_merge_phase;
-    use super::has_explicit_failed_checks;
-    use crate::config::AppConfig;
+    use super::{execute_merge_phase, has_explicit_failed_checks, teardown_after_completion};
+    use crate::fsm::MergingOutput;
     use crate::gh::FailedCheck;
+    use crate::git::GitClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
+    use crate::config::AppConfig;
     use crate::types::{RuntimeScope, WorkerState};
     use crate::worker::types::MergeRequest;
+    use crate::worktree::WorktreeClient;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn execute_merge_phase_blocks_merge_when_validation_command_fails() {
@@ -1027,6 +1030,157 @@ mod tests {
                 && request.args[0] == "pr"
                 && request.args[1] == "merge"
         }));
+    }
+
+    #[test]
+    fn teardown_after_completion_stashes_dirty_repo_before_main_sync() {
+        let runner = FakeProcessRunner::default();
+        let worktree_path = PathBuf::from("/repo/.worktrees/task-1");
+
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git status --porcelain
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: " M quality-grades.md\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git stash push -u -m "gardener: runtime main-sync isolation"
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "Saved working tree and index state WIP on main: ...\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git stash pop --index
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let worktree_client = WorktreeClient::new(&runner, Path::new("/repo"));
+        let repo_git = GitClient::new(&runner, "/repo");
+        let output = MergingOutput {
+            merged: true,
+            merge_sha: Some("cafebabe".to_string()),
+        };
+        let teardown = teardown_after_completion(
+            &worktree_client,
+            &worktree_path,
+            &output,
+            &repo_git,
+            "worker-1",
+        );
+
+        assert!(teardown.worktree_cleaned);
+        assert!(teardown.main_updated);
+        let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec!["worktree", "remove", "--force", "/repo/.worktrees/task-1"]
+        );
+        assert_eq!(spawned[1].args, vec!["status", "--porcelain"]);
+        assert!(spawned
+            .iter()
+            .any(|request| request.args == vec![
+                "stash",
+                "push",
+                "-u",
+                "-m",
+                "gardener: runtime main-sync isolation"
+            ]));
+        assert!(spawned
+            .iter()
+            .any(|request| request.args == vec!["stash", "pop", "--index"]));
+    }
+
+    #[test]
+    fn teardown_after_completion_keeps_clean_repo_without_stash() {
+        let runner = FakeProcessRunner::default();
+        let worktree_path = PathBuf::from("/repo/.worktrees/task-2");
+
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git status --porcelain
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git config --bool --get core.bare
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git rev-parse --is-bare-repository
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        // git fetch origin main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // git merge --ff-only origin/main
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let worktree_client = WorktreeClient::new(&runner, Path::new("/repo"));
+        let repo_git = GitClient::new(&runner, "/repo");
+        let output = MergingOutput {
+            merged: true,
+            merge_sha: None,
+        };
+        let teardown = teardown_after_completion(
+            &worktree_client,
+            &worktree_path,
+            &output,
+            &repo_git,
+            "worker-2",
+        );
+
+        assert!(teardown.main_updated);
+        let spawned = runner.spawned();
+        assert!(!spawned
+            .iter()
+            .any(|request| request.args.first() == Some(&"stash".to_string())));
     }
 
     #[test]

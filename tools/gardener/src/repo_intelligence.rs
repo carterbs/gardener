@@ -55,11 +55,11 @@ pub struct UserValidated {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentReadiness {
-    pub agent_steering_score: i64,
-    pub knowledge_accessible_score: i64,
-    pub mechanical_guardrails_score: i64,
-    pub local_feedback_loop_score: i64,
-    pub coverage_signal_score: i64,
+    pub agent_steering_score: Option<i64>,
+    pub knowledge_accessible_score: Option<i64>,
+    pub mechanical_guardrails_score: Option<i64>,
+    pub local_feedback_loop_score: Option<i64>,
+    pub coverage_signal_score: Option<i64>,
     pub readiness_score: i64,
     pub readiness_grade: String,
     pub primary_gap: String,
@@ -302,14 +302,15 @@ pub fn build_profile(input: BuildProfileInput<'_>) -> RepoIntelligenceProfile {
     }
 }
 
-fn score_for_grade(grade: &str) -> i64 {
+fn score_for_grade(grade: &str) -> Option<i64> {
     match grade {
-        "A" => 18,
-        "B" => 14,
-        "C" => 9,
-        "D" => 5,
-        "F" => 0,
-        _ => 2,
+        "A" => Some(18),
+        "B" => Some(14),
+        "C" => Some(9),
+        "D" => Some(5),
+        "F" => Some(0),
+        "unknown" => None,
+        _ => None,
     }
 }
 
@@ -323,14 +324,14 @@ pub fn derive_agent_readiness(discovery: &DiscoveryAssessment) -> AgentReadiness
     ];
     let mut scores: Vec<(&str, i64)> = dims
         .iter()
-        .map(|(name, v)| (*name, score_for_grade(&v.grade)))
+        .filter_map(|(name, v)| score_for_grade(&v.grade).map(|score| (*name, score)))
         .collect();
     let total: i64 = scores.iter().map(|(_, score)| *score).sum();
     scores.sort_by_key(|(name, score)| (*score, *name));
     let primary_gap = scores
         .first()
         .map(|(name, _)| (*name).to_string())
-        .unwrap_or_default();
+        .unwrap_or_else(|| "agent_steering".to_string());
 
     AgentReadiness {
         agent_steering_score: score_for_grade(&discovery.agent_steering.grade),
@@ -351,5 +352,115 @@ fn readiness_grade(score: i64) -> &'static str {
         60..=74 => "C",
         40..=59 => "D",
         _ => "F",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{derive_agent_readiness, BuildProfileInput, DiscoveryAssessment};
+    use crate::triage_discovery::DimensionAssessment;
+    use crate::types::AgentKind;
+    use crate::runtime::FakeClock;
+    use std::path::PathBuf;
+
+    fn scored_discovery(
+        agent_steering: &str,
+        knowledge_accessible: &str,
+        mechanical: &str,
+        local_feedback_loop: &str,
+        coverage_signal: &str,
+    ) -> DiscoveryAssessment {
+        DiscoveryAssessment {
+            agent_steering: DimensionAssessment {
+                grade: agent_steering.to_string(),
+                summary: "test".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            knowledge_accessible: DimensionAssessment {
+                grade: knowledge_accessible.to_string(),
+                summary: "test".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            mechanical_guardrails: DimensionAssessment {
+                grade: mechanical.to_string(),
+                summary: "test".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            local_feedback_loop: DimensionAssessment {
+                grade: local_feedback_loop.to_string(),
+                summary: "test".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            coverage_signal: DimensionAssessment {
+                grade: coverage_signal.to_string(),
+                summary: "test".to_string(),
+                issues: Vec::new(),
+                strengths: Vec::new(),
+            },
+            overall_readiness_score: 0,
+            overall_readiness_grade: "F".to_string(),
+            primary_gap: "agent_steering".to_string(),
+            notable_findings: String::new(),
+            scope_notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn derive_agent_readiness_marks_unknown_as_unscored() {
+        let discovery = scored_discovery("unknown", "A", "F", "B", "C");
+        let readiness = derive_agent_readiness(&discovery);
+        assert_eq!(readiness.agent_steering_score, None);
+        assert_eq!(readiness.knowledge_accessible_score, Some(18));
+        assert_eq!(readiness.mechanical_guardrails_score, Some(0));
+        assert_eq!(readiness.local_feedback_loop_score, Some(14));
+        assert_eq!(readiness.coverage_signal_score, Some(9));
+        assert_eq!(readiness.readiness_score, 41);
+        assert_eq!(readiness.readiness_grade, "D");
+        assert_eq!(readiness.primary_gap, "mechanical_guardrails");
+    }
+
+    #[test]
+    fn derive_agent_readiness_without_known_grades_stays_unknown_gap() {
+        let discovery = scored_discovery("unknown", "unknown", "unknown", "unknown", "unknown");
+        let readiness = derive_agent_readiness(&discovery);
+        assert_eq!(readiness.agent_steering_score, None);
+        assert_eq!(readiness.knowledge_accessible_score, None);
+        assert_eq!(readiness.mechanical_guardrails_score, None);
+        assert_eq!(readiness.local_feedback_loop_score, None);
+        assert_eq!(readiness.coverage_signal_score, None);
+        assert_eq!(readiness.readiness_score, 0);
+        assert_eq!(readiness.readiness_grade, "F");
+        assert_eq!(readiness.primary_gap, "agent_steering");
+    }
+
+    #[test]
+    fn build_profile_uses_unknown_discovery_without_scoring() {
+        let clock = FakeClock::new(std::time::UNIX_EPOCH);
+        let repo_root = PathBuf::from("/repo");
+        let working_dir = PathBuf::from("/repo");
+        let discovery = DiscoveryAssessment::unknown();
+        let profile = super::build_profile(BuildProfileInput {
+            clock: &clock,
+            working_dir: &working_dir,
+            repo_root: &repo_root,
+            head_sha: "head".to_string(),
+            discovery,
+            discovery_used: false,
+            primary_agent: Some(AgentKind::Codex),
+            claude_signals: Vec::new(),
+            codex_signals: Vec::new(),
+            validation_command: "npm run validate".to_string(),
+            agents_md_present: false,
+        });
+        assert!(!profile.meta.discovery_used);
+        assert_eq!(profile.agent_readiness.agent_steering_score, None);
+        assert_eq!(profile.agent_readiness.knowledge_accessible_score, None);
+        assert_eq!(profile.agent_readiness.coverage_signal_score, None);
+        assert_eq!(profile.agent_readiness.readiness_score, 0);
+        assert_eq!(profile.agent_readiness.primary_gap, "agent_steering");
     }
 }

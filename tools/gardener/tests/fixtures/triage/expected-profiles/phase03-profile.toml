@@ -62,11 +62,6 @@ corrections_made = 0
 validated_at = "0"
 
 [agent_readiness]
-agent_steering_score = 2
-knowledge_accessible_score = 2
-mechanical_guardrails_score = 2
-local_feedback_loop_score = 2
-coverage_signal_score = 2
 readiness_score = 10
 readiness_grade = "F"
 primary_gap = "agent_steering"

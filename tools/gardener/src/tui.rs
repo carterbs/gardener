@@ -82,7 +82,7 @@ const TRIAGE_STAGE_LABELS: [&str; 4] = [
     "Build project profile",
     "Seed prioritized backlog",
 ];
-const WIZARD_STEP_LABELS: [&str; 4] = ["Parallelism", "Validation", "Docs", "Notes"];
+const WIZARD_STEP_LABELS: [&str; 5] = ["Parallelism", "Validation", "Docs", "Backlog", "Notes"];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiMode {
     Triage,
@@ -1688,8 +1688,35 @@ fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &st
         chunks[0],
     );
 
+    let body_lines: Vec<Line> = message
+        .lines()
+        .map(|line| {
+            if line.is_empty() {
+                Line::from("")
+            } else if line.starts_with("Tasks merged") || line.starts_with("Total runtime") {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Rgb(180, 180, 180)),
+                ))
+            } else if line.starts_with("Tasks failed") {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Rgb(255, 150, 100)),
+                ))
+            } else if line.starts_with("Tasks completed") {
+                Line::from(Span::styled(
+                    line.to_string(),
+                    Style::default()
+                        .fg(accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                Line::from(line.to_string())
+            }
+        })
+        .collect();
     frame.render_widget(
-        Paragraph::new(message.to_string()).block(
+        Paragraph::new(body_lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(accent)),
@@ -2009,6 +2036,7 @@ pub struct RepoHealthWizardAnswers {
     pub preferred_parallelism: u32,
     pub validation_command: String,
     pub external_docs_accessible: bool,
+    pub backlog_approval: bool,
     pub additional_context: String,
 }
 
@@ -2026,6 +2054,7 @@ pub fn run_repo_health_wizard(
     let mut parallelism_input = "3".to_string();
     let mut validation = default_validation_command.to_string();
     let mut docs_accessible = true;
+    let mut backlog_approval = true;
     let mut notes = String::new();
 
     loop {
@@ -2087,6 +2116,11 @@ pub fn run_repo_health_wizard(
                         "Are architecture/quality docs accessible in the repo? Press y/n.",
                         format!("> {}", if docs_accessible { "yes" } else { "no" }),
                     ),
+                    3 => (
+                        "Backlog seeding",
+                        "Gardener seeds a backlog of tasks that make your repo more hospitable to coding agents. Review each task before it's added, or auto-seed?",
+                        format!("> {}", if backlog_approval { "review tasks" } else { "auto-seed" }),
+                    ),
                     _ => (
                         "Additional constraints (optional)",
                         "Any extra context for workers? Leave empty to skip.",
@@ -2120,12 +2154,12 @@ pub fn run_repo_health_wizard(
 
                 let footer = Paragraph::new(Line::from(vec![
                     Span::styled(
-                        format!("Step {} of 4", step + 1),
+                        format!("Step {} of 5", step + 1),
                         Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                     ),
                     Span::raw("  "),
                     Span::styled(
-                        if step < 3 {
+                        if step < 4 {
                             "Enter →"
                         } else {
                             "Enter to finish"
@@ -2175,6 +2209,12 @@ pub fn run_repo_health_wizard(
                     KeyCode::Char('n') | KeyCode::Char('N') => docs_accessible = false,
                     _ => {}
                 },
+                3 => match key.code {
+                    KeyCode::Enter => step = 4,
+                    KeyCode::Char('a') | KeyCode::Char('A') => backlog_approval = false,
+                    KeyCode::Char('r') | KeyCode::Char('R') => backlog_approval = true,
+                    _ => {}
+                },
                 _ => match key.code {
                     KeyCode::Enter => break,
                     KeyCode::Backspace => {
@@ -2206,6 +2246,7 @@ pub fn run_repo_health_wizard(
             validation
         },
         external_docs_accessible: docs_accessible,
+        backlog_approval,
         additional_context: notes,
     })
 }

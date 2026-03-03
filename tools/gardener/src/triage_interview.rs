@@ -11,6 +11,7 @@ pub struct InterviewResult {
     pub validation_command: String,
     pub additional_context: String,
     pub external_docs_accessible: bool,
+    pub backlog_approval: bool,
     pub agent_steering_correction: String,
     pub external_docs_surface: String,
     pub guardrails_correction: String,
@@ -76,6 +77,7 @@ pub fn run_interview(
     let mut validation_command = default_validation_command.to_string();
     let mut additional_context = String::new();
     let mut external_docs_accessible = true;
+    let mut backlog_approval = true;
     let agent_steering_correction = format!(
         "{}: {}",
         discovery.agent_steering.grade, discovery.agent_steering.summary
@@ -105,6 +107,7 @@ pub fn run_interview(
                 preferred_parallelism = Some(answers.preferred_parallelism);
                 validation_command = answers.validation_command;
                 external_docs_accessible = answers.external_docs_accessible;
+                backlog_approval = answers.backlog_approval;
                 additional_context = answers.additional_context;
             }
             Err(err) => {
@@ -139,6 +142,7 @@ pub fn run_interview(
         validation_command,
         additional_context,
         external_docs_accessible,
+        backlog_approval,
         agent_steering_correction,
         external_docs_surface,
         guardrails_correction,

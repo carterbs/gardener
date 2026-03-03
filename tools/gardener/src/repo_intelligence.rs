@@ -47,6 +47,8 @@ pub struct UserValidated {
     pub additional_context: String,
     #[serde(default)]
     pub preferred_parallelism: Option<u32>,
+    #[serde(default)]
+    pub backlog_approval: bool,
     pub corrections_made: u32,
     pub validated_at: String,
 }
@@ -292,6 +294,7 @@ pub fn build_profile(input: BuildProfileInput<'_>) -> RepoIntelligenceProfile {
             coverage_grade_override: String::new(),
             additional_context: String::new(),
             preferred_parallelism: None,
+            backlog_approval: false,
             corrections_made: 0,
             validated_at: now,
         },

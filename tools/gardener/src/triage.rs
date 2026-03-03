@@ -344,6 +344,7 @@ pub fn run_triage(
     profile.user_validated.additional_context = interview.additional_context;
     profile.user_validated.external_docs_accessible = interview.external_docs_accessible;
     profile.user_validated.preferred_parallelism = interview.preferred_parallelism;
+    profile.user_validated.backlog_approval = interview.backlog_approval;
     profile.user_validated.agent_steering_correction = interview.agent_steering_correction;
     profile.user_validated.external_docs_surface = interview.external_docs_surface;
     profile.user_validated.guardrails_correction = interview.guardrails_correction;

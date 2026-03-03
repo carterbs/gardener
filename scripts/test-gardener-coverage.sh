@@ -1,41 +1,90 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
-COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-"/tools/gardener/src/(worker\.rs|worker/.*|startup\.rs|tui\.rs|worker_pool\.rs|runtime/mod\.rs|backlog_store\.rs|git\.rs|worktree\.rs|lib\.rs|replay/replayer\.rs|seeding\.rs|triage\.rs|pr_audit\.rs|agent_turn\.rs|do_phase\.rs|git_phase\.rs|merge_loop\.rs|phase_cli\.rs|plan_phase\.rs|review_phase\.rs|understand_phase\.rs|bin/do_task\.rs|bin/git_push\.rs|bin/plan\.rs|bin/review_pr\.rs|bin/understand\.rs|bin/friction_analysis\.rs)"}"
-COVERAGE_IGNORE_MANIFEST="${COVERAGE_IGNORE_MANIFEST:-}"
 PROFILE_DIR="${COVERAGE_PROFILE_DIR:-target/llvm-cov-target/profraw}"
+COVERAGE_IGNORE_MANIFEST="${COVERAGE_IGNORE_MANIFEST:-$SCRIPT_DIR/coverage-ignore-manifest.txt}"
+
+escape_for_regex() {
+  local value="$1"
+  printf '%s' "$value" | sed -e 's#[.\\/+*?^$(){}|]#\\&#g'
+}
+
+build_coverage_ignore_regex() {
+  local manifest_path="$1"
+  local raw_patterns=()
+  local final_patterns=()
+  local pattern
+
+  if [[ ! -f "$manifest_path" ]]; then
+    echo "coverage ignore manifest not found: $manifest_path" >&2
+    exit 1
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+
+    if [[ "$line" == *" "* || "$line" == *$'\t'* ]]; then
+      echo "coverage ignore manifest entry has whitespace: $line" >&2
+      exit 1
+    fi
+    if [[ "$line" == *\** || "$line" == *\?* || "$line" == *"["* || "$line" == *"]"* ]]; then
+      echo "coverage ignore manifest entries must be plain paths (no shell glob characters): $line" >&2
+      exit 1
+    fi
+    if [[ "$line" == \/* || "$line" == *".."* ]]; then
+      echo "coverage ignore manifest entries must be relative paths under tools/gardener/src/: $line" >&2
+      exit 1
+    fi
+
+    raw_patterns+=("$line")
+  done < "$manifest_path"
+
+  if ((${#raw_patterns[@]} == 0)); then
+    echo ""
+    return
+  fi
+
+  local temp_patterns_file
+  temp_patterns_file="$(mktemp)"
+  for pattern in "${raw_patterns[@]}"; do
+    local is_dir=0
+    local normalized="${pattern}"
+
+    if [[ "$normalized" == */ ]]; then
+      normalized="${normalized%/}"
+      is_dir="1"
+    fi
+    normalized="$(escape_for_regex "$normalized")"
+    if [[ "$is_dir" -eq 1 ]]; then
+      normalized="${normalized}/.*"
+    fi
+    printf '%s\n' "$normalized" >> "$temp_patterns_file"
+  done
+
+  while IFS= read -r pattern; do
+    final_patterns+=("$pattern")
+  done < <(sort -u "$temp_patterns_file")
+  rm -f "$temp_patterns_file"
+
+  local body
+  body="$(printf '%s|' "${final_patterns[@]}")"
+  body="${body%|}"
+  echo "/tools/gardener/src/($body)"
+}
+
+COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-$(build_coverage_ignore_regex "$COVERAGE_IGNORE_MANIFEST")}"
 
 # Keep raw LLVM profiles out of the repo root when coverage-instrumented
 # subprocesses are spawned during tests.
 mkdir -p "$PROFILE_DIR"
 export LLVM_PROFILE_FILE="${LLVM_PROFILE_FILE:-$(pwd)/$PROFILE_DIR/default_%p_%m.profraw}"
 
-ignore_args=()
 if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
-  ignore_args+=(--ignore-filename-regex "$COVERAGE_IGNORE_REGEX")
-fi
-
-if [[ -n "$COVERAGE_IGNORE_MANIFEST" ]]; then
-  if [[ ! -f "$COVERAGE_IGNORE_MANIFEST" ]]; then
-    echo "coverage gate: cannot read COVERAGE_IGNORE_MANIFEST file: ${COVERAGE_IGNORE_MANIFEST}" >&2
-    exit 1
-  fi
-
-  while IFS= read -r pattern; do
-    pattern="${pattern#"${pattern%%[![:space:]]*}"}"
-    pattern="${pattern%"${pattern##*[![:space:]]}"}"
-    [[ -z "$pattern" || "$pattern" == \#* ]] && continue
-    ignore_args+=(--ignore-filename-regex "$pattern")
-  done < <(awk '{
-    gsub(/^[[:space:]]+/, "", $0)
-    gsub(/[[:space:]]+$/, "", $0)
-    if ($0 != "" && $0 !~ /^#/) print
-  }' "$COVERAGE_IGNORE_MANIFEST")
-fi
-
-if [[ ${#ignore_args[@]} -gt 0 ]]; then
-  report="$(cargo llvm-cov -p gardener --all-targets --summary-only "${ignore_args[@]}")"
+  report="$(cargo llvm-cov -p gardener --all-targets --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX")"
 else
   report="$(cargo llvm-cov -p gardener --all-targets --summary-only)"
 fi

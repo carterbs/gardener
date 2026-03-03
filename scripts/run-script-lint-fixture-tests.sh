@@ -358,6 +358,47 @@ run_expect_exit_capture 1 "$backlog_output" \
 assert_file_contains "$backlog_output" "--title and --details are required for add"
 
 rm -f "$backlog_output"
+
+coverage_output="$(mktemp)"
+coverage_tmp_dir="$(mktemp -d)"
+coverage_manifest="$coverage_tmp_dir/coverage-ignore-manifest.txt"
+cat > "$coverage_manifest" <<'EOF'
+runtime/mod.rs
+bin/review_pr.rs
+worker/
+EOF
+coverage_fake_cargo_args_file="$coverage_tmp_dir/cargo.args"
+cat > "$coverage_tmp_dir/cargo" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$@" > "$coverage_fake_cargo_args_file"
+echo "TOTAL a b c d e f g h 95.00%"
+EOF
+chmod +x "$coverage_tmp_dir/cargo"
+
+run_expect_exit_capture 0 "$coverage_output" \
+  env \
+    PATH="$coverage_tmp_dir:$PATH" \
+    COVERAGE_IGNORE_MANIFEST="$coverage_manifest" \
+    COVERAGE_FAKE_CARGO_ARGS_FILE="$coverage_fake_cargo_args_file" \
+    "$SCRIPT_DIR/test-gardener-coverage.sh"
+assert_file_contains "$coverage_output" "coverage gate passed"
+assert_file_contains "$coverage_fake_cargo_args_file" '/tools/gardener/src/(bin\/review_pr\.rs|runtime\/mod\.rs|worker/.*)'
+rm -f "$coverage_output" "$coverage_fake_cargo_args_file"
+
+coverage_invalid_manifest="$coverage_tmp_dir/coverage-ignore-manifest.invalid.txt"
+cat > "$coverage_invalid_manifest" <<'EOF'
+worker/*.rs
+EOF
+run_expect_exit_capture 1 "$coverage_output" \
+  env \
+    PATH="$coverage_tmp_dir:$PATH" \
+    COVERAGE_IGNORE_MANIFEST="$coverage_invalid_manifest" \
+    "$SCRIPT_DIR/test-gardener-coverage.sh"
+assert_file_contains "$coverage_output" "coverage ignore manifest entries must be plain paths"
+rm -f "$coverage_output"
+rm -rf "$coverage_tmp_dir"
+
 rm -rf "$tmp_backlog_dir"
 
 echo "Script lint fixture tests completed successfully."

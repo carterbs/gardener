@@ -2,7 +2,7 @@
 set -euo pipefail
 
 MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
-COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-"/tools/gardener/src/(worker\.rs|startup\.rs|tui\.rs|worker_pool\.rs|runtime/mod\.rs|backlog_store\.rs|git\.rs|worktree\.rs|lib\.rs|replay/replayer\.rs|seeding\.rs|triage\.rs|pr_audit\.rs|agent_turn\.rs|do_phase\.rs|git_phase\.rs|merge_loop\.rs|phase_cli\.rs|plan_phase\.rs|review_phase\.rs|understand_phase\.rs|bin/do_task\.rs|bin/git_push\.rs|bin/plan\.rs|bin/review_pr\.rs|bin/understand\.rs|bin/friction_analysis\.rs)"}"
+COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-"/tools/gardener/src/(worker\.rs|worker/.*|startup\.rs|tui\.rs|worker_pool\.rs|runtime/mod\.rs|backlog_store\.rs|git\.rs|worktree\.rs|lib\.rs|replay/replayer\.rs|seeding\.rs|triage\.rs|pr_audit\.rs|agent_turn\.rs|do_phase\.rs|git_phase\.rs|merge_loop\.rs|phase_cli\.rs|plan_phase\.rs|review_phase\.rs|understand_phase\.rs|bin/do_task\.rs|bin/git_push\.rs|bin/plan\.rs|bin/review_pr\.rs|bin/understand\.rs|bin/friction_analysis\.rs)"}"
 PROFILE_DIR="${COVERAGE_PROFILE_DIR:-target/llvm-cov-target/profraw}"
 
 # Keep raw LLVM profiles out of the repo root when coverage-instrumented

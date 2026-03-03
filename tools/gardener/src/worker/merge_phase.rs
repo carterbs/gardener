@@ -13,6 +13,7 @@ use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::worker::evidence::log_event_from;
 use crate::worker::stream_events::{
     emit_adapter_tool_event, emit_worker_activity_state, emit_worker_activity_state_with,
+    emit_worker_tool_command,
     extract_failure_reason, merge_polling_block_reason,
 };
 use crate::worker::types::{MergeRequest, TeardownReport, WorkerRunSummary, WorkerStreamEvent};
@@ -164,6 +165,11 @@ pub(crate) fn execute_merge_phase(
                     }
                 };
                 if !skip_pre_validation {
+                    emit_worker_tool_command(
+                        task_id,
+                        on_event,
+                        &format!("{} (pre-merge validation)", cfg.validation.command),
+                    );
                     if let Err(err) = run_repo_validation_with_quality_guard(
                         &repo_root_git,
                         runtime_file_system,
@@ -196,6 +202,7 @@ pub(crate) fn execute_merge_phase(
                         });
                     }
                 }
+                emit_worker_tool_command(task_id, on_event, &format!("gh pr merge {pr}"));
                 match gh.merge_pr(pr) {
                     Ok(()) => {
                         let view = gh.view_pr(pr)?;
@@ -580,6 +587,12 @@ pub(crate) fn execute_merge_phase(
                         failure_reason: Some(format!("pre-merge validation failed: {err}")),
                     });
                 }
+                emit_worker_tool_command(
+                    task_id,
+                    on_event,
+                    &format!("{} (pre-merge validation)", cfg.validation.command),
+                );
+                emit_worker_tool_command(task_id, on_event, &format!("gh pr merge {pr}"));
                 match gh.merge_pr(pr) {
                     Ok(()) => {
                         let view = gh.view_pr(pr)?;
@@ -617,6 +630,11 @@ pub(crate) fn execute_merge_phase(
     }
 
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation, on_event);
+    emit_worker_tool_command(
+        task_id,
+        on_event,
+        &format!("{} (post-merge validation)", cfg.validation.command),
+    );
     if let Err(err) = run_repo_validation_with_quality_guard(
         &repo_root_git,
         runtime_file_system,
@@ -768,6 +786,7 @@ pub(crate) fn worker_merge_main_and_push(
     on_event: Option<&dyn Fn(WorkerStreamEvent)>,
 ) -> Result<(), GardenerError> {
     if git.abort_merge_if_in_progress()? {
+        emit_worker_tool_command(task_id, on_event, "git merge --abort");
         append_run_log(
             "warn",
             "worker.merging.merge_from_main.stale_merge_aborted",
@@ -779,6 +798,8 @@ pub(crate) fn worker_merge_main_and_push(
         );
     }
 
+    emit_worker_tool_command(task_id, on_event, "git fetch origin main");
+    emit_worker_tool_command(task_id, on_event, "git merge origin/main --no-edit");
     match git.try_merge_from_main() {
         Ok(RebaseResult::Clean) => {
             append_run_log(
@@ -790,6 +811,7 @@ pub(crate) fn worker_merge_main_and_push(
                     "attempt": attempt + 1
                 }),
             );
+            emit_worker_tool_command(task_id, on_event, &format!("git push origin {branch}"));
             git.push_with_rebase_recovery(branch)?;
             Ok(())
         }
@@ -830,7 +852,13 @@ pub(crate) fn worker_merge_main_and_push(
             })?;
             logs.push(log_event_from(&conflict_result, WorkerState::Merging));
             if conflict_result.terminal != AgentTerminal::Failure {
+                emit_worker_tool_command(
+                    task_id,
+                    on_event,
+                    "git add -A && git commit -m \"fix: merge main into branch\"",
+                );
                 git.commit_all("fix: merge main into branch")?;
+                emit_worker_tool_command(task_id, on_event, &format!("git push origin {branch}"));
                 git.push_with_rebase_recovery(branch)?;
                 Ok(())
             } else {

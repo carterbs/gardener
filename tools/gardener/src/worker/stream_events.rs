@@ -41,6 +41,20 @@ pub(crate) fn emit_adapter_tool_event(
     });
 }
 
+pub(crate) fn emit_worker_tool_command(
+    task_id: &str,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
+    command: &str,
+) {
+    let Some(on_event) = on_event else {
+        return;
+    };
+    on_event(WorkerStreamEvent::ToolCommand {
+        task_id: task_id.to_string(),
+        command: truncate_utf8(command, crate::worker::types::PROMPT_LINE_COMMAND_LIMIT),
+    });
+}
+
 fn extract_payload_command(payload: &serde_json::Value) -> Option<String> {
     let normalize_command =
         |value: &serde_json::Value| value.as_str().map(|text| text.replace('\n', "\\n"));

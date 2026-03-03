@@ -1,6 +1,6 @@
 use crate::agent::factory::AdapterFactory;
 use crate::agent::AdapterContext;
-use crate::backlog_store::NewTask;
+use crate::backlog_store::{NewTask, TaskStatus};
 use crate::config::AppConfig;
 use crate::logging::append_run_log;
 use crate::priority::Priority;
@@ -312,6 +312,11 @@ const ANALYSIS_PROMPT: &str = r#"You are analyzing OTEL log events from a Garden
 - Review suggestions that improved code quality
 - Standard git operations (checkout, commit, push)
 
+**DO NOT DUPLICATE OPEN WORK**
+- You will receive an `Already tracked open friction tasks` section.
+- If a potential finding is already covered there (even if wording differs), do not emit a new finding.
+- Only emit net-new friction that is not already represented by an open friction task.
+
 ## Categories
 Use exactly one of: `missing_context`, `tool_failure`, `convention_gap`, `documentation_gap`, `config_issue`, `flaky_infra`
 
@@ -335,6 +340,74 @@ If the run had no systemic friction, return `{"findings": [], "smooth_run": true
 ## Worker run timeline
 
 "#;
+
+fn open_friction_tasks_prompt_context(cfg: &AppConfig, scope: &RuntimeScope) -> String {
+    let db_path = crate::startup::backlog_db_path(cfg, scope);
+    let store = match crate::backlog_store::BacklogStore::open(db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            append_run_log(
+                "warn",
+                "friction_analysis.open_tasks_unavailable",
+                json!({ "error": err.to_string() }),
+            );
+            return "Unavailable (failed to open backlog store).".to_string();
+        }
+    };
+
+    let tasks = match store.list_tasks() {
+        Ok(tasks) => tasks,
+        Err(err) => {
+            append_run_log(
+                "warn",
+                "friction_analysis.open_tasks_unavailable",
+                json!({ "error": err.to_string() }),
+            );
+            return "Unavailable (failed to list backlog tasks).".to_string();
+        }
+    };
+
+    let mut lines: Vec<String> = tasks
+        .into_iter()
+        .filter(|task| task.source == "friction_analysis")
+        .filter(|task| {
+            matches!(
+                task.status,
+                TaskStatus::Ready
+                    | TaskStatus::Leased
+                    | TaskStatus::InProgress
+                    | TaskStatus::MergePending
+                    | TaskStatus::Unresolved
+            )
+        })
+        .map(|task| {
+            let details = task.details.split_whitespace().collect::<Vec<_>>().join(" ");
+            let details = if details.chars().count() > 180 {
+                let trimmed: String = details.chars().take(180).collect();
+                format!("{trimmed}...")
+            } else {
+                details
+            };
+            format!(
+                "- {} | {} | {} | {}",
+                task.task_id, task.scope_key, task.title, details
+            )
+        })
+        .collect();
+
+    lines.sort();
+    append_run_log(
+        "debug",
+        "friction_analysis.open_tasks_loaded",
+        json!({ "count": lines.len() }),
+    );
+
+    if lines.is_empty() {
+        "None".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
 
 pub fn run_friction_analysis(
     input: &FrictionAnalysisInput<'_>,
@@ -363,13 +436,15 @@ pub fn run_friction_analysis(
         });
     }
 
+    let open_friction_tasks = open_friction_tasks_prompt_context(cfg, scope);
     let prompt = format!(
-        "{}Task: {} (id={})\nMerge SHA: {}\n\n{}",
+        "{}Task: {} (id={})\nMerge SHA: {}\n\n{}\n\n## Already tracked open friction tasks\n{}\n",
         ANALYSIS_PROMPT,
         input.task_summary,
         input.task_id,
         input.merge_sha.unwrap_or("unknown"),
-        timeline
+        timeline,
+        open_friction_tasks
     );
 
     let factory = AdapterFactory::with_defaults();

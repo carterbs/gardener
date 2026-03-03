@@ -29,6 +29,7 @@ Quality-grade document ownership is in Gardener runtime startup audits. External
 - Gardener validation command entrypoint is configured under `[validation] command` and `[startup] validation_command` in `gardener.toml`.
 - `scripts/run-validate.sh` is the canonical project validation command.
   - It executes each custom linter in order:
+    - `scripts/doc-gardening.sh`
     - `scripts/check-skills-sync.sh`
     - `scripts/check-no-warnings.sh`
     - `scripts/check-migrations-wired.sh`
@@ -58,6 +59,7 @@ Pre-commit remediation playbook:
 
 - `skills` check mismatch: copy files from the command suggestions in `scripts/check-skills-sync.sh` output.
 - clippy warnings: address the warning text, then re-run `./scripts/check-no-warnings.sh`.
+- doc-gardening maintenance issues: review and fix failing checks from `./scripts/doc-gardening.sh`.
 - migration wiring failures: add each missing migration include to `tools/gardener/src/backlog_store.rs`.
 - binary blob failures: remove blocked files listed by `scripts/check-binary-blobs.sh` from the commit or move them outside git history.
 - fixture-script failures: rerun `./scripts/run-script-lint-fixture-tests.sh` after updating script docs or fixtures.

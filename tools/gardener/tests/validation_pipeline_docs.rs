@@ -26,6 +26,10 @@ fn validation_pipeline_docs_match_live_validation_hook() {
         "README should reference the canonical validation workflow section"
     );
     assert!(
+        workflow.contains("scripts/doc-gardening.sh"),
+        "workflow doc should include doc-gardening maintenance command"
+    );
+    assert!(
         workflow.contains("scripts/run-script-lint-fixture-tests.sh"),
         "workflow doc should include fixture-script lint command"
     );

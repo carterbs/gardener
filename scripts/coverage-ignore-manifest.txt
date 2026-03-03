@@ -14,6 +14,16 @@ merge_loop.rs
 phase_cli.rs
 plan_phase.rs
 pr_audit.rs
+quality_assessment_runner.rs
+quality_ci_lint_detector.rs
+quality_complexity_analyzer.rs
+quality_debt_scanner.rs
+quality_domain_catalog.rs
+quality_evidence_bundle.rs
+quality_instrumentation_detector.rs
+quality_scoring.rs
+quality_tree_walker.rs
+quality_untested_finder.rs
 replay/replayer.rs
 triage.rs
 review_phase.rs

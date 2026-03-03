@@ -6,8 +6,10 @@ use crate::prompt_registry::{SEEDING_PROMPT_VERSION_DIRECT, SEEDING_PROMPT_VERSI
 use crate::protocol::{AgentEvent, AgentTerminal};
 use crate::runtime::ProcessRunner;
 use crate::types::{AgentKind, RuntimeScope};
+use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -51,7 +53,15 @@ pub fn run_legacy_seed_runner_v1(
     model: &str,
     prompt: &str,
 ) -> Result<Vec<SeedTask>, GardenerError> {
-    run_legacy_seed_runner_v1_with_events(process_runner, scope, backend, model, prompt, None)
+    run_legacy_seed_runner_v1_with_events_internal(
+        process_runner,
+        scope,
+        backend,
+        model,
+        prompt,
+        None,
+        None,
+    )
 }
 
 pub fn run_legacy_seed_runner_v1_with_events(
@@ -60,7 +70,47 @@ pub fn run_legacy_seed_runner_v1_with_events(
     backend: AgentKind,
     model: &str,
     prompt: &str,
+    on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+) -> Result<Vec<SeedTask>, GardenerError> {
+    run_legacy_seed_runner_v1_with_events_internal(
+        process_runner,
+        scope,
+        backend,
+        model,
+        prompt,
+        on_event,
+        None,
+    )
+}
+
+pub fn run_legacy_seed_runner_v1_with_events_and_task_count(
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    backend: AgentKind,
+    model: &str,
+    prompt: &str,
+    expected_task_count: usize,
+    on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+) -> Result<Vec<SeedTask>, GardenerError> {
+    run_legacy_seed_runner_v1_with_events_internal(
+        process_runner,
+        scope,
+        backend,
+        model,
+        prompt,
+        on_event,
+        Some(expected_task_count),
+    )
+}
+
+fn run_legacy_seed_runner_v1_with_events_internal(
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    backend: AgentKind,
+    model: &str,
+    prompt: &str,
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+    expected_task_count: Option<usize>,
 ) -> Result<Vec<SeedTask>, GardenerError> {
     append_run_log(
         "info",
@@ -161,33 +211,46 @@ pub fn run_legacy_seed_runner_v1_with_events(
         )));
     }
 
-    let payload = match parse_seed_payload(exec_result.payload) {
-        Ok(payload) => payload,
-        Err(event_error) => {
-            append_run_log(
-                "warn",
-                "seed_runner.parse_from_event_failed",
-                json!({
-                    "backend": format!("{:?}", backend),
-                    "model": model,
-                    "error": event_error.to_string()
-                }),
-            );
-            parse_seed_payload_from_file(&output_file).map_err(|file_error| {
+    let payload = {
+        let payload_result = match expected_task_count {
+            Some(expected_task_count) => {
+                parse_seed_payload_with_task_count(exec_result.payload, Some(expected_task_count))
+            }
+            None => parse_seed_payload(exec_result.payload),
+        };
+        match payload_result {
+            Ok(payload) => payload,
+            Err(event_error) => {
                 append_run_log(
-                    "error",
-                    "seed_runner.parse_failed",
+                    "warn",
+                    "seed_runner.parse_from_event_failed",
                     json!({
                         "backend": format!("{:?}", backend),
                         "model": model,
-                        "event_error": event_error.to_string(),
-                        "file_error": file_error.to_string()
+                        "error": event_error.to_string()
                     }),
                 );
-                GardenerError::OutputEnvelope(format!(
-                    "failed to parse seeding payload from event and file: event={event_error}; file={file_error}"
-                ))
-            })?
+                let file_payload = if let Some(expected_task_count) = expected_task_count {
+                    parse_seed_payload_from_file_with_task_count(&output_file, Some(expected_task_count))
+                } else {
+                    parse_seed_payload_from_file(&output_file)
+                };
+                file_payload.map_err(|file_error| {
+                    append_run_log(
+                        "error",
+                        "seed_runner.parse_failed",
+                        json!({
+                            "backend": format!("{:?}", backend),
+                            "model": model,
+                            "event_error": event_error.to_string(),
+                            "file_error": file_error.to_string()
+                        }),
+                    );
+                    GardenerError::OutputEnvelope(format!(
+                        "failed to parse seeding payload from event and file: event={event_error}; file={file_error}"
+                    ))
+                })?
+            }
         }
     };
 
@@ -291,14 +354,30 @@ pub fn run_seed_agent_direct_v2_with_events(
 }
 
 fn parse_seed_payload(value: serde_json::Value) -> Result<SeedPayload, serde_json::Error> {
+    parse_seed_payload_with_task_count(value, None)
+}
+
+fn parse_seed_payload_with_task_count(
+    value: serde_json::Value,
+    expected_task_count: Option<usize>,
+) -> Result<SeedPayload, serde_json::Error> {
     if let Ok(payload) = serde_json::from_value::<SeedPayload>(value.clone()) {
+        validate_seed_payload(&payload, expected_task_count)?;
         return Ok(payload);
     }
     let envelope: SeedEnvelope = serde_json::from_value(value)?;
+    validate_seed_payload(&envelope.payload, expected_task_count)?;
     Ok(envelope.payload)
 }
 
 fn parse_seed_payload_from_file(path: &Path) -> Result<SeedPayload, GardenerError> {
+    parse_seed_payload_from_file_with_task_count(path, None)
+}
+
+fn parse_seed_payload_from_file_with_task_count(
+    path: &Path,
+    expected_task_count: Option<usize>,
+) -> Result<SeedPayload, GardenerError> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) => {
@@ -329,13 +408,59 @@ fn parse_seed_payload_from_file(path: &Path) -> Result<SeedPayload, GardenerErro
             path.display()
         ))
     })?;
-
-    parse_seed_payload(value).map_err(|err| {
+    parse_seed_payload_with_task_count(value, expected_task_count).map_err(|err| {
         GardenerError::OutputEnvelope(format!(
             "seed output file payload parse failed at {}: {err}",
             path.display()
         ))
     })
+}
+
+fn validate_seed_payload(
+    payload: &SeedPayload,
+    expected_task_count: Option<usize>,
+) -> Result<(), serde_json::Error> {
+    if let Some(expected_task_count) = expected_task_count {
+        if payload.tasks.len() != expected_task_count {
+            return Err(DeError::custom(format!(
+                "expected {expected_task_count} tasks in dry-run payload, found {}",
+                payload.tasks.len()
+            )));
+        }
+    }
+
+    let mut titles = HashSet::new();
+    for task in &payload.tasks {
+        let normalized_title = task.title.trim().to_ascii_lowercase();
+        if !titles.insert(normalized_title) {
+            return Err(DeError::custom(format!(
+                "duplicate task title in payload: {}",
+                task.title
+            )));
+        }
+
+        if is_placeholder_domain(&task.domain) {
+            return Err(DeError::custom(format!(
+                "invalid placeholder domain in task {}: {}",
+                task.title,
+                task.domain
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_placeholder_domain(domain: &str) -> bool {
+    let normalized = domain.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return true;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "placeholder" | "todo" | "tbd" | "n/a" | "na" | "none" | "unknown" | "to be decided" | "to be determined" | "not set" | "unassigned"
+    ) || normalized.contains("placeholder")
 }
 
 fn seed_output_schema_path(scope: &RuntimeScope) -> Result<PathBuf, GardenerError> {
@@ -384,8 +509,8 @@ fn seed_output_schema() -> String {
       "properties": {
         "tasks": {
           "type": "array",
-          "minItems": 1,
-          "maxItems": 12,
+            "minItems": 10,
+            "maxItems": 10,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -411,13 +536,16 @@ fn seed_output_schema() -> String {
 mod tests {
     use super::{
         parse_seed_payload, parse_seed_payload_from_file, run_legacy_seed_runner_v1,
-        run_legacy_seed_runner_v1_with_events, run_seed_agent_direct_v2_with_events, SeedTask,
+        run_legacy_seed_runner_v1_with_events, run_legacy_seed_runner_v1_with_events_and_task_count,
+        parse_seed_payload_with_task_count, run_seed_agent_direct_v2_with_events, SeedTask,
     };
     use crate::errors::GardenerError;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use crate::types::{AgentKind, RuntimeScope};
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    const DRY_RUN_TASK_COUNT: usize = 10;
 
     fn codex_scope(working_dir: &std::path::Path) -> RuntimeScope {
         RuntimeScope {
@@ -674,6 +802,31 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_with_task_count_rejects_wrong_payload_size() {
+        let runner = FakeProcessRunner::default();
+        let working_dir = tempdir().expect("tempdir");
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":{\"schema_version\":1,\"state\":\"seeding\",\"payload\":{\"tasks\":[{\"title\":\"t\",\"details\":\"d\",\"rationale\":\"r\",\"domain\":\"backlog\",\"priority\":\"P1\"}]}}}\n".to_string(),
+            stderr: String::new(),
+        }));
+        let result = run_legacy_seed_runner_v1_with_events_and_task_count(
+            &runner,
+            &RuntimeScope {
+                process_cwd: PathBuf::from("/cwd"),
+                repo_root: None,
+                working_dir: working_dir.path().to_path_buf(),
+            },
+            AgentKind::Codex,
+            "gpt-5-codex",
+            "prompt",
+            DRY_RUN_TASK_COUNT,
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn seed_task_serde_defaults_apply_when_fields_absent() {
         let json =
             r#"{"title":"test task","details":"some details","rationale":"some rationale here"}"#;
@@ -696,6 +849,74 @@ mod tests {
         let result = parse_seed_payload(payload);
         assert!(result.is_ok());
         assert_eq!(result.expect("parse_seed_payload succeeded").tasks.len(), 1);
+    }
+
+    #[test]
+    fn parse_seed_payload_with_task_count_enforces_exact_task_count() {
+        let payload = serde_json::json!({
+            "tasks": [{
+                "title": "a",
+                "details": "d",
+                "rationale": "rationale",
+                "domain": "backlog",
+                "priority": "P1"
+            }]
+        });
+        let result = parse_seed_payload_with_task_count(payload, Some(DRY_RUN_TASK_COUNT));
+        assert!(
+            result.is_err(),
+            "expected Err for dry-run payload task count mismatch"
+        );
+    }
+
+    #[test]
+    fn parse_seed_payload_with_task_count_rejects_duplicate_titles() {
+        let tasks: Vec<serde_json::Value> = (0..10)
+            .map(|index| {
+        serde_json::json!({
+                    "title": if index % 2 == 0 {
+                        "same title".to_string()
+                    } else {
+                        format!("t{index}")
+                    },
+                    "details": "details here",
+                    "rationale": "rationale is detailed",
+                    "domain": "backlog",
+                    "priority": "P1"
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "tasks": tasks
+        });
+        let result = parse_seed_payload_with_task_count(payload, Some(DRY_RUN_TASK_COUNT));
+        assert!(
+            result.is_err(),
+            "expected Err for duplicate titles in dry-run payload"
+        );
+    }
+
+    #[test]
+    fn parse_seed_payload_with_task_count_rejects_placeholder_domain() {
+        let tasks: Vec<serde_json::Value> = (0..10)
+            .map(|index| {
+                serde_json::json!({
+                    "title": format!("task {index}"),
+                    "details": "details here",
+                    "rationale": "rationale is detailed",
+                    "domain": if index == 0 { "todo" } else { "backlog" },
+                    "priority": "P1"
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "tasks": tasks
+        });
+        let result = parse_seed_payload_with_task_count(payload, Some(DRY_RUN_TASK_COUNT));
+        assert!(
+            result.is_err(),
+            "expected Err for placeholder task domain in dry-run payload"
+        );
     }
 
     #[test]
@@ -728,6 +949,14 @@ mod tests {
         assert_eq!(
             schema["properties"]["payload"]["properties"]["tasks"]["items"]["additionalProperties"],
             serde_json::json!(false)
+        );
+        assert_eq!(
+            schema["properties"]["payload"]["properties"]["tasks"]["minItems"],
+            serde_json::json!(10)
+        );
+        assert_eq!(
+            schema["properties"]["payload"]["properties"]["tasks"]["maxItems"],
+            serde_json::json!(10)
         );
     }
 }

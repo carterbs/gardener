@@ -82,7 +82,7 @@ Create exactly 10 tasks. Prefer a practical mix of immediate fixes and cleanup d
 - At least 4 tasks should directly reduce repository friction for agents (docs, automation, diagnostics, workflow).
 - priority must be one of P0, P1, P2.
 - domain should be concrete and align to discovered file families.
-- rationale should state the immediate quality signal and why now.
+- rationale must explain why this task makes coding agents more effective in this repository.
 
 Seed-generation contract
 1. Read docs/quality-grades.md, AGENTS.md, docs/conventions/, and docs/references/codex-agent-team-article.md.

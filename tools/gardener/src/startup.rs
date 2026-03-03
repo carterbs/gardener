@@ -707,33 +707,49 @@ where
             let _ = tx.send(SeedProgressMessage::Done(result));
         });
 
+        let is_tty = runtime.terminal.stdin_is_tty();
+        let mut activity_lines: Vec<String> = Vec::new();
+        const MAX_ACTIVITY_LINES: usize = 20;
         let mut waited_seconds = 0u64;
         let mut last_event: Option<String> = None;
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
-                        progress(&update)?;
-                        if !runtime.terminal.stdin_is_tty() {
+                        activity_lines.push(update.clone());
+                        if activity_lines.len() > MAX_ACTIVITY_LINES {
+                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                        }
+                        if is_tty {
+                            runtime.terminal.draw_seeding(&activity_lines)?;
+                        } else {
                             runtime
                                 .terminal
                                 .write_line(&format!("startup backlog seeding: {update}"))?;
                         }
+                        progress(&update)?;
                         last_event = Some(update);
                     }
                 }
                 Ok(SeedProgressMessage::Done(result)) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     waited_seconds = waited_seconds.saturating_add(10);
-                    progress(&format!(
+                    let msg = format!(
                         "Backlog seeding agent still running ({waited_seconds}s elapsed); waiting for model output"
-                    ))?;
-                    if !runtime.terminal.stdin_is_tty() {
+                    );
+                    activity_lines.push(msg.clone());
+                    if activity_lines.len() > MAX_ACTIVITY_LINES {
+                        activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                    }
+                    if is_tty {
+                        runtime.terminal.draw_seeding(&activity_lines)?;
+                    } else {
                         runtime.terminal.write_line(&format!(
                             "startup backlog seeding: still running, elapsed={}s",
                             waited_seconds
                         ))?;
                     }
+                    progress(&msg)?;
                     if waited_seconds == 60 {
                         progress(
                             "Backlog seeding is taking longer than expected; this can happen during first-run auth or slow model/network response",
@@ -795,33 +811,49 @@ where
             let _ = tx.send(SeedProgressMessage::Done(result));
         });
 
+        let is_tty = runtime.terminal.stdin_is_tty();
+        let mut activity_lines: Vec<String> = Vec::new();
+        const MAX_ACTIVITY_LINES: usize = 20;
         let mut waited_seconds = 0u64;
         let mut last_event: Option<String> = None;
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
-                        progress(&update)?;
-                        if !runtime.terminal.stdin_is_tty() {
+                        activity_lines.push(update.clone());
+                        if activity_lines.len() > MAX_ACTIVITY_LINES {
+                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                        }
+                        if is_tty {
+                            runtime.terminal.draw_seeding(&activity_lines)?;
+                        } else {
                             runtime.terminal.write_line(&format!(
                                 "startup backlog seeding dry-run: {update}"
                             ))?;
                         }
+                        progress(&update)?;
                         last_event = Some(update);
                     }
                 }
                 Ok(SeedProgressMessage::Done(result)) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     waited_seconds = waited_seconds.saturating_add(10);
-                    progress(&format!(
+                    let msg = format!(
                         "Backlog seeding dry-run still running ({waited_seconds}s elapsed); waiting for model output"
-                    ))?;
-                    if !runtime.terminal.stdin_is_tty() {
+                    );
+                    activity_lines.push(msg.clone());
+                    if activity_lines.len() > MAX_ACTIVITY_LINES {
+                        activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                    }
+                    if is_tty {
+                        runtime.terminal.draw_seeding(&activity_lines)?;
+                    } else {
                         runtime.terminal.write_line(&format!(
                             "startup backlog seeding dry-run: still running, elapsed={}s",
                             waited_seconds
                         ))?;
                     }
+                    progress(&msg)?;
                     if waited_seconds == 60 {
                         progress(
                             "Backlog seeding dry-run is taking longer than expected; this can happen during first-run auth or slow model/network response",
@@ -866,6 +898,139 @@ fn print_seed_recommendations(
             .write_line(&format!("   rationale: {}", task.rationale))?;
     }
     Ok(())
+}
+
+/// Run interactive seeding: reads backlog_approval from profile and routes
+/// to either auto-seed (v2 direct-write) or review mode (v1 dry-run + wizard).
+/// The seeding TUI screen is shown during agent execution on TTY.
+pub fn run_interactive_seeding(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    store: &BacklogStore,
+    force_seed_backlog: bool,
+) -> Result<usize, GardenerError> {
+    let profile_loc = profile_path(scope, cfg);
+    let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
+    let quality_path = quality_report_path(cfg, scope);
+    let quality_doc = runtime.file_system.read_to_string(&quality_path)?;
+    let backlog_snapshot = summarize_active_backlog(store)?;
+    let existing_count = store.count_active_tasks()?;
+
+    if !should_seed_backlog(true, cfg.execution.test_mode, existing_count, force_seed_backlog) {
+        append_run_log(
+            "info",
+            "startup.interactive_seeding.skipped",
+            json!({ "existing_count": existing_count }),
+        );
+        return Ok(0);
+    }
+
+    let backlog_approval = profile.user_validated.backlog_approval;
+    append_run_log(
+        "info",
+        "startup.interactive_seeding.started",
+        json!({
+            "backlog_approval": backlog_approval,
+            "backend": format!("{:?}", cfg.seeding.backend),
+            "model": cfg.seeding.model,
+        }),
+    );
+
+    let mut seeded = 0usize;
+
+    if backlog_approval {
+        // Review mode: dry-run to get recommendations, then show review wizard.
+        let mut progress = |_detail: &str| -> Result<(), GardenerError> { Ok(()) };
+        let recommendations = run_seed_recommendations_with_heartbeat(
+            runtime,
+            scope,
+            cfg,
+            &profile,
+            &quality_doc,
+            &backlog_snapshot,
+            &mut progress,
+        )?;
+
+        if recommendations.is_empty() {
+            append_run_log(
+                "info",
+                "startup.interactive_seeding.review.empty",
+                json!({}),
+            );
+            return Ok(0);
+        }
+
+        // Close the live seeding TUI before launching the blocking review wizard.
+        let _ = runtime.terminal.close_ui();
+
+        let kept = crate::tui::run_seed_review_wizard(&recommendations)?;
+        for (index, keep) in kept.iter().enumerate() {
+            if *keep {
+                let task = &recommendations[index];
+                let priority = match task.priority.as_str() {
+                    "P0" => Priority::P0,
+                    "P2" => Priority::P2,
+                    _ => Priority::P1,
+                };
+                store.upsert_task(NewTask {
+                    kind: TaskKind::Maintenance,
+                    title: task.title.clone(),
+                    details: task.details.clone(),
+                    scope_key: task.domain.clone(),
+                    rationale: task.rationale.clone(),
+                    priority,
+                    source: "interactive_seed_review".to_string(),
+                    related_pr: None,
+                    related_branch: None,
+                })?;
+                seeded += 1;
+            }
+        }
+        append_run_log(
+            "info",
+            "startup.interactive_seeding.review.completed",
+            json!({
+                "total_recommended": recommendations.len(),
+                "kept": seeded,
+            }),
+        );
+    } else {
+        // Auto-seed mode: direct-write with seeding screen.
+        let mut progress = |_detail: &str| -> Result<(), GardenerError> { Ok(()) };
+        if let Err(err) = run_seed_with_heartbeat(
+            runtime,
+            scope,
+            cfg,
+            &profile,
+            &quality_doc,
+            &backlog_snapshot,
+            &mut progress,
+        ) {
+            append_run_log(
+                "warn",
+                "startup.interactive_seeding.auto.failed",
+                json!({ "error": err.to_string() }),
+            );
+            runtime
+                .terminal
+                .write_line(&format!("WARN backlog seeding failed: {err}"))?;
+            return Ok(0);
+        }
+        let post_count = store.count_active_tasks()?;
+        seeded = post_count.saturating_sub(existing_count);
+        append_run_log(
+            "info",
+            "startup.interactive_seeding.auto.completed",
+            json!({
+                "seeded": seeded,
+                "existing_count": existing_count,
+                "post_count": post_count,
+            }),
+        );
+    }
+
+    Ok(seeded)
 }
 
 fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerError> {

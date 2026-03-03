@@ -111,6 +111,11 @@ pub trait Terminal: Send + Sync {
         let frame = render_triage(activity, artifacts, width, height);
         self.draw(&frame)
     }
+    fn draw_seeding(&self, activity: &[String]) -> Result<(), GardenerError> {
+        let (width, height) = self.draw_dimensions();
+        let frame = crate::tui::render_seeding(activity, width, height);
+        self.draw(&frame)
+    }
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
         self.write_line(&format!("{title}: {message}"))
     }
@@ -698,6 +703,11 @@ impl Terminal for ProductionTerminal {
     fn draw_triage(&self, activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
         start_key_listener_if_needed();
         draw_triage_live(activity, artifacts)
+    }
+
+    fn draw_seeding(&self, activity: &[String]) -> Result<(), GardenerError> {
+        start_key_listener_if_needed();
+        crate::tui::draw_seeding_live(activity)
     }
 
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {

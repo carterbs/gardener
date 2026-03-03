@@ -68,7 +68,9 @@ use logging::{
 };
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
-use startup::{backlog_db_path, run_startup_audits, run_startup_audits_with_progress};
+use startup::{
+    backlog_db_path, run_interactive_seeding, run_startup_audits, run_startup_audits_with_progress,
+};
 use std::collections::{BTreeSet, HashMap};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
 use triage_agent_detection::{is_non_interactive, EnvMap};
@@ -476,13 +478,17 @@ pub fn run_with_runtime(
                 "BACKLOG_SYNC",
                 "Seeding and reconciling backlog before worker assignment",
             )?;
+            let is_tty = runtime.terminal.stdin_is_tty();
             if !cfg_for_startup.execution.test_mode {
+                // When TTY, run startup audits without seeding; interactive
+                // seeding is handled separately below.
+                let run_seeding_in_audits = !is_tty;
                 run_with_startup_capture(runtime, &startup.scope, "worker-startup", || {
                     run_startup_audits_with_progress(
                         runtime,
                         &mut cfg_for_startup,
                         &startup.scope,
-                        true,
+                        run_seeding_in_audits,
                         cli.force_seed_backlog,
                         cli.seed_dry_run,
                         |detail| draw_boot_stage(runtime, "BACKLOG_SYNC", detail),
@@ -491,6 +497,22 @@ pub fn run_with_runtime(
             }
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
+            if is_tty && !cfg_for_startup.execution.test_mode {
+                let seeded = run_interactive_seeding(
+                    runtime,
+                    &startup.scope,
+                    &cfg_for_startup,
+                    &store,
+                    cli.force_seed_backlog,
+                )?;
+                if seeded > 0 {
+                    append_run_log(
+                        "info",
+                        "startup.interactive_seeding.upserted",
+                        json!({ "seeded": seeded }),
+                    );
+                }
+            }
             store.recover_stale_leases(system_time_unix())?;
             let mut startup_backlog = store.list_tasks()?;
             if !cfg_for_startup.execution.test_mode {

@@ -1,6 +1,7 @@
 use crate::errors::GardenerError;
 use crate::hotkeys::{dashboard_controls_legend, report_controls_legend};
 use crate::logging::{current_run_id, current_run_log_path};
+use crate::seed_runner::SeedTask;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -1630,6 +1631,261 @@ pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
             .map(|_| ())
             .map_err(|e| GardenerError::Io(e.to_string()))
     })
+}
+
+pub fn draw_seeding_live(activity: &[String]) -> Result<(), GardenerError> {
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(|frame| draw_seeding_frame(frame, activity))
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
+fn draw_seeding_frame(frame: &mut ratatui::Frame<'_>, activity: &[String]) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "seeding your backlog",
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    let activity_items = if activity.is_empty() {
+        vec![ListItem::new("- waiting for seeding updates")]
+    } else {
+        activity
+            .iter()
+            .map(|line| ListItem::new(format!("- {} {}", now_hhmmss(), line)))
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(activity_items).block(
+            Block::default()
+                .title("Live Activity")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        chunks[1],
+    );
+
+    let footer =
+        Paragraph::new("Seeding in progress \u{2014} agent is exploring your repository").block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        );
+    frame.render_widget(footer, chunks[2]);
+}
+
+pub fn render_seeding(activity: &[String], width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
+    terminal
+        .draw(|frame| draw_seeding_frame(frame, activity))
+        .unwrap_or_else(|err| panic!("draw: {err}"));
+
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn draw_seed_review_frame(
+    frame: &mut ratatui::Frame<'_>,
+    task: &SeedTask,
+    index: usize,
+    total: usize,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("review backlog  ({}/{})", index + 1, total),
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    let priority_style = match task.priority.as_str() {
+        "P0" => Style::default()
+            .fg(Color::Rgb(255, 122, 122))
+            .add_modifier(Modifier::BOLD),
+        "P1" => Style::default()
+            .fg(Color::Rgb(255, 207, 105))
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::Rgb(127, 230, 148))
+            .add_modifier(Modifier::BOLD),
+    };
+
+    let body_lines = vec![
+        Line::from(Span::styled(
+            task.title.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            task.details.clone(),
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "Why this helps agents: ",
+                Style::default()
+                    .fg(Color::Rgb(85, 198, 255))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                task.rationale.clone(),
+                Style::default().fg(Color::Rgb(85, 198, 255)),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Priority: ", Style::default().fg(Color::Gray)),
+            Span::styled(task.priority.clone(), priority_style),
+            Span::styled(
+                format!("    Domain: {}", task.domain),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(body_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        chunks[1],
+    );
+
+    let footer = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "[k] Keep",
+            Style::default()
+                .fg(Color::Rgb(126, 231, 135))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("    "),
+        Span::styled(
+            "[d] Discard",
+            Style::default()
+                .fg(Color::Rgb(255, 122, 122))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("    "),
+        Span::styled(
+            "[q] Discard remaining & finish",
+            Style::default().fg(Color::Gray),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(footer, chunks[2]);
+}
+
+pub fn run_seed_review_wizard(tasks: &[SeedTask]) -> Result<Vec<bool>, GardenerError> {
+    let mut stdout = io::stdout();
+    enable_raw_mode().map_err(|e| GardenerError::Io(e.to_string()))?;
+    execute!(stdout, EnterAlternateScreen).map_err(|e| GardenerError::Io(e.to_string()))?;
+
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
+
+    let total = tasks.len();
+    let mut kept = vec![false; total];
+    let mut current = 0usize;
+
+    loop {
+        if current >= total {
+            break;
+        }
+        terminal
+            .draw(|frame| draw_seed_review_frame(frame, &tasks[current], current, total))
+            .map_err(|e| GardenerError::Io(e.to_string()))?;
+
+        if let Event::Key(key) = event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
+            match key.code {
+                KeyCode::Char('k') | KeyCode::Char('K') => {
+                    kept[current] = true;
+                    current += 1;
+                }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    kept[current] = false;
+                    current += 1;
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    // Discard all remaining
+                    break;
+                }
+                KeyCode::Esc => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    teardown_terminal(terminal)?;
+    Ok(kept)
 }
 
 pub fn draw_triage_live(activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {

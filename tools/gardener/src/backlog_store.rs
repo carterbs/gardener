@@ -88,6 +88,14 @@ pub struct NewTask {
     pub related_branch: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedSeed {
+    pub title: String,
+    pub details: String,
+    pub rejection_reason: String,
+    pub domain: String,
+}
+
 #[derive(Debug)]
 enum WriteCmd {
     Upsert {
@@ -164,6 +172,16 @@ enum WriteCmd {
     PromoteReadyWithPr {
         now: i64,
         reply: oneshot::Sender<StoreResult<usize>>,
+    },
+    InsertRejectedSeed {
+        title: String,
+        details: String,
+        rationale: String,
+        domain: String,
+        priority: String,
+        rejection_reason: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<()>>,
     },
 }
 
@@ -560,6 +578,42 @@ impl BacklogStore {
                             &writer_path,
                             operation,
                             &result.as_ref().map(|count| json!({ "count": count })),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::InsertRejectedSeed {
+                        title,
+                        details,
+                        rationale,
+                        domain,
+                        priority,
+                        rejection_reason,
+                        now,
+                        reply,
+                    } => {
+                        let id = {
+                            use sha2::{Sha256, Digest};
+                            let mut hasher = Sha256::new();
+                            hasher.update(title.trim().to_ascii_lowercase().as_bytes());
+                            hasher.update(b"|");
+                            hasher.update(domain.trim().to_ascii_lowercase().as_bytes());
+                            let hash = format!("{:x}", hasher.finalize());
+                            format!("rej-{}", &hash[..16])
+                        };
+                        let result = write_conn
+                            .execute(
+                                "INSERT OR REPLACE INTO rejected_seed_tasks \
+                                 (id, title, details, rationale, domain, priority, rejection_reason, rejected_at) \
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                params![id, title, details, rationale, domain, priority, rejection_reason, now],
+                            )
+                            .map(|_| ())
+                            .map_err(db_err);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|_| json!({ "id": id, "title": title })),
                             result.as_ref().err(),
                         );
                         let _ = reply.send(result);
@@ -1263,6 +1317,58 @@ impl BacklogStore {
     pub fn get_task(&self, task_id: &str) -> StoreResult<Option<BacklogTask>> {
         self.read_pool.with_conn(|conn| fetch_task(conn, task_id))
     }
+
+    pub fn insert_rejected_seed(
+        &self,
+        task: &crate::seed_runner::SeedTask,
+        reason: Option<&str>,
+    ) -> StoreResult<()> {
+        let now = system_time_unix();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::InsertRejectedSeed {
+                title: task.title.clone(),
+                details: task.details.clone(),
+                rationale: task.rationale.clone(),
+                domain: task.domain.clone(),
+                priority: task.priority.clone(),
+                rejection_reason: reason.unwrap_or("").to_string(),
+                now,
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?
+    }
+
+    pub fn list_rejected_seeds(&self) -> StoreResult<Vec<RejectedSeed>> {
+        self.read_pool.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT title, details, rejection_reason, domain \
+                     FROM rejected_seed_tasks \
+                     ORDER BY rejected_at DESC \
+                     LIMIT 20",
+                )
+                .map_err(db_err)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(RejectedSeed {
+                        title: row.get(0)?,
+                        details: row.get(1)?,
+                        rejection_reason: row.get(2)?,
+                        domain: row.get(3)?,
+                    })
+                })
+                .map_err(db_err)?;
+            let mut seeds = Vec::new();
+            for row in rows {
+                seeds.push(row.map_err(db_err)?);
+            }
+            Ok(seeds)
+        })
+    }
 }
 
 fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
@@ -1413,6 +1519,14 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
                 "now": now,
             }),
         ),
+        WriteCmd::InsertRejectedSeed { title, domain, now, .. } => (
+            "insert_rejected_seed",
+            json!({
+                "title": title,
+                "domain": domain,
+                "now": now,
+            }),
+        ),
     }
 }
 
@@ -1540,6 +1654,7 @@ fn run_migrations(conn: &mut Connection) -> StoreResult<()> {
         (2_i64, include_str!("../migrations/0002_backlog.sql")),
         (3_i64, include_str!("../migrations/0003_backlog.sql")),
         (4_i64, include_str!("../migrations/0004_merge_pending.sql")),
+        (5_i64, include_str!("../migrations/0005_rejected_seeds.sql")),
     ];
 
     conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL); COMMIT;")
@@ -2593,5 +2708,111 @@ mod tests {
             .all(|task| task.status != TaskStatus::MergePending));
         assert!(tasks.iter().any(|task| task.title == "backlog task"));
         assert!(!tasks.iter().any(|task| task.title == "merge queue task"));
+    }
+
+    #[test]
+    fn insert_and_list_rejected_seeds_round_trip() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+        let task = SeedTask {
+            title: "Fix flaky tests".to_string(),
+            details: "Stabilize intermittent CI failures".to_string(),
+            rationale: "Reduces agent confusion from false negatives".to_string(),
+            domain: "testing".to_string(),
+            priority: "P1".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&task, Some("too vague"))
+            .expect("insert with reason");
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].title, "Fix flaky tests");
+        assert_eq!(seeds[0].details, "Stabilize intermittent CI failures");
+        assert_eq!(seeds[0].rejection_reason, "too vague");
+        assert_eq!(seeds[0].domain, "testing");
+    }
+
+    #[test]
+    fn insert_rejected_seed_without_reason() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+        let task = SeedTask {
+            title: "Add logging".to_string(),
+            details: "Improve observability".to_string(),
+            rationale: "Helps debug agent runs".to_string(),
+            domain: "infra".to_string(),
+            priority: "P2".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&task, None)
+            .expect("insert without reason");
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].title, "Add logging");
+        assert_eq!(seeds[0].rejection_reason, "");
+    }
+
+    #[test]
+    fn insert_rejected_seed_deduplicates_by_title_and_domain() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+        let task = SeedTask {
+            title: "Normalize paths".to_string(),
+            details: "First version".to_string(),
+            rationale: "r1".to_string(),
+            domain: "core".to_string(),
+            priority: "P1".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&task, Some("first reason"))
+            .expect("first insert");
+
+        let updated = SeedTask {
+            title: "Normalize paths".to_string(),
+            details: "Updated version".to_string(),
+            rationale: "r2".to_string(),
+            domain: "core".to_string(),
+            priority: "P0".to_string(),
+        };
+
+        store
+            .insert_rejected_seed(&updated, Some("updated reason"))
+            .expect("second insert");
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 1);
+        assert_eq!(seeds[0].details, "Updated version");
+        assert_eq!(seeds[0].rejection_reason, "updated reason");
+    }
+
+    #[test]
+    fn list_rejected_seeds_caps_at_twenty() {
+        use crate::seed_runner::SeedTask;
+
+        let (store, _dir) = temp_store();
+
+        for i in 0..25 {
+            let task = SeedTask {
+                title: format!("Rejected task {i}"),
+                details: format!("Details for task {i}"),
+                rationale: "r".to_string(),
+                domain: format!("domain-{i}"),
+                priority: "P1".to_string(),
+            };
+            store
+                .insert_rejected_seed(&task, Some(&format!("reason {i}")))
+                .expect("insert");
+        }
+
+        let seeds = store.list_rejected_seeds().expect("list");
+        assert_eq!(seeds.len(), 20);
     }
 }

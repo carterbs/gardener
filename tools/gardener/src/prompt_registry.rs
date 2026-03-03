@@ -74,6 +74,7 @@ Read this file directly before writing tasks.
 
 Existing active backlog snapshot
 {EXISTING_BACKLOG}
+{REJECTED_TASKS}
 Backlog DB skill reference (.codex/skills/backlog-db/SKILL.md)
 {BACKLOG_SKILL_MD}
 

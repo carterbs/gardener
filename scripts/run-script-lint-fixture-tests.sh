@@ -255,6 +255,100 @@ run_expect_exit_capture 1 "$backlog_output" \
   "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --kind "Feature" --db "$backlog_db"
 assert_file_contains "$backlog_output" "invalid --kind"
 
+create_fake_toolchain() {
+  local target_dir=$1
+  local repo_root=$2
+  local include_gh=$3
+
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir/bin"
+
+  cat > "$target_dir/bin/git" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == "rev-parse" && "$2" == "--show-toplevel" ]]; then
+  echo "$GARDENER_FAKE_REPO_ROOT"
+  exit 0
+fi
+if [[ "$1" == "config" ]]; then
+  exit 0
+fi
+exit 0
+SH
+
+  cat > "$target_dir/bin/file" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+
+  cat > "$target_dir/bin/cargo" <<'SH'
+#!/usr/bin/env bash
+if [[ "$1" == "fmt" || "$1" == "clippy" || "$1" == "llvm-cov" ]]; then
+  exit 0
+fi
+if [[ "$1" == "install" ]]; then
+  exit 0
+fi
+exit 0
+SH
+
+  cat > "$target_dir/bin/rustfmt" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+
+  cat > "$target_dir/bin/cargo-llvm-cov" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+
+  if [[ "$include_gh" == "1" ]]; then
+    cat > "$target_dir/bin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  else
+    cat > "$target_dir/bin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
+  fi
+
+  chmod +x "$target_dir/bin/"*
+}
+
+run_preflight_tool_dir="$(mktemp -d)"
+run_preflight_success_output="$(mktemp)"
+trap 'rm -rf "$run_preflight_tool_dir" "$run_preflight_success_output" "$run_preflight_missing_output"' EXIT
+
+create_fake_toolchain "$run_preflight_tool_dir" "$SCRIPT_DIR/.." 1
+run_expect_exit_capture 0 "$run_preflight_success_output" \
+  env \
+    GARDENER_FAKE_REPO_ROOT="$SCRIPT_DIR/.." \
+    PATH="$run_preflight_tool_dir/bin:/bin" \
+    bash "$SCRIPT_DIR/run-validate.sh" --preflight
+assert_file_contains "$run_preflight_success_output" "Pre-flight checks passed"
+
+create_fake_toolchain "$run_preflight_tool_dir" "$SCRIPT_DIR/.." 0
+run_preflight_missing_output="$(mktemp)"
+run_expect_exit_capture 1 "$run_preflight_missing_output" \
+  env \
+    GARDENER_FAKE_REPO_ROOT="$SCRIPT_DIR/.." \
+    PATH="$run_preflight_tool_dir/bin:/bin" \
+    bash "$SCRIPT_DIR/run-validate.sh" --preflight
+assert_file_contains "$run_preflight_missing_output" "Pre-flight failed"
+assert_file_contains "$run_preflight_missing_output" "gh"
+assert_file_contains "$run_preflight_missing_output" "Install GitHub CLI"
+assert_file_contains "$run_preflight_missing_output" "Example: ./scripts/setup-git-hooks.sh --preflight"
+
+run_preflight_missing_output="$(mktemp)"
+run_expect_exit_capture 1 "$run_preflight_missing_output" \
+  env \
+    GARDENER_FAKE_REPO_ROOT="$SCRIPT_DIR/.." \
+    PATH="$run_preflight_tool_dir/bin:/bin" \
+    bash "$SCRIPT_DIR/setup-git-hooks.sh" --preflight
+assert_file_contains "$run_preflight_missing_output" "Pre-flight failed"
+assert_file_contains "$run_preflight_missing_output" "gh"
+
 run_expect_exit_capture 1 "$backlog_output" \
   "$SCRIPT_DIR/backlog-db.sh" add --details "details" --db "$backlog_db"
 assert_file_contains "$backlog_output" "--title and --details are required for add"

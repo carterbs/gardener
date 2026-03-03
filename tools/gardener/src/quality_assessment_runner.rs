@@ -415,7 +415,7 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
                     risk_exposure: 50,
                     convention_adherence: 50,
                 },
-                note,
+                notes: vec![note],
             }
         })
         .collect();
@@ -804,7 +804,7 @@ mod tests {
         let raw = r#"Some text before
 <<GARDENER_JSON_START>>
 {
-  "domains": [{"name": "core", "languages": ["Rust"], "scores": {"test_coverage": 80, "test_quality": 70, "risk_exposure": 30, "convention_adherence": 85}, "note": "well tested"}],
+  "domains": [{"name": "core", "languages": ["Rust"], "scores": {"test_coverage": 80, "test_quality": 70, "risk_exposure": 30, "convention_adherence": 85}, "notes": ["well tested"]}],
   "repo_wide": {"agent_steering": 60, "mechanical_guardrails": 80, "local_feedback_loop": 90, "coverage_infrastructure": 50, "documentation_quality": 40},
   "deficiencies": [],
   "domain_file_map": {"core": ["src/main.rs"]},
@@ -838,7 +838,7 @@ Some text after"#;
                     risk_exposure: 150,
                     convention_adherence: 100,
                 },
-                note: "over max".to_string(),
+                notes: vec!["over max".to_string()],
             }],
             repo_wide: RepoWideAssessment {
                 agent_steering: 200,

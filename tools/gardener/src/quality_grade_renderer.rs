@@ -110,7 +110,10 @@ pub fn render_grade_document(report: &GradeReport, assessed_by: &str) -> String 
         out.push_str("No domains assessed.\n\n");
     } else {
         for (domain, _, _) in &report.domain_grades {
-            out.push_str(&format!("- **{}**: {}\n", domain.name, domain.note));
+            out.push_str(&format!("### {}\n\n", domain.name));
+            for note in &domain.notes {
+                out.push_str(&format!("- {note}\n"));
+            }
         }
         out.push('\n');
     }
@@ -262,7 +265,9 @@ pub fn render_grade_document_with_repo_wide(
         out.push_str("No domains assessed.\n\n");
     } else {
         for (domain, _, _) in &report.domain_grades {
-            out.push_str(&format!("- **{}**: {}\n", domain.name, domain.note));
+            for note in &domain.notes {
+                out.push_str(&format!("- **{}**: {}\n", domain.name, note));
+            }
         }
         out.push('\n');
     }
@@ -303,8 +308,8 @@ mod tests {
                         risk_exposure: 80,
                         convention_adherence: 60,
                     },
-                    note: "Authentication module handles JWT validation with no test coverage"
-                        .to_string(),
+                    notes: vec!["Authentication module handles JWT validation with no test coverage"
+                        .to_string()],
                 },
                 DomainAssessment {
                     name: "api".to_string(),
@@ -315,8 +320,8 @@ mod tests {
                         risk_exposure: 20,
                         convention_adherence: 95,
                     },
-                    note: "API layer is well tested with comprehensive integration tests"
-                        .to_string(),
+                    notes: vec!["API layer is well tested with comprehensive integration tests"
+                        .to_string()],
                 },
             ],
             repo_wide: repo_wide.clone(),

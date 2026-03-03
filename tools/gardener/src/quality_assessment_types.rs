@@ -18,7 +18,7 @@ pub struct DomainAssessment {
     pub name: String,
     pub languages: Vec<String>,
     pub scores: DomainScores,
-    pub note: String,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

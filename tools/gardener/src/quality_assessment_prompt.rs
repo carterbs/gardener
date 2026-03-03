@@ -48,14 +48,22 @@ Score these repository-wide dimensions:
 - **coverage_infrastructure**: Is code coverage tracked and enforced? Look for coverage tools, thresholds, and reporting.
 - **documentation_quality**: How well-documented is the codebase? Look for READMEs, API docs, inline documentation, and architectural docs.
 
+## Domain Notes
+
+For each domain, provide 2-4 bullet points in the `notes` array that mix strengths and weaknesses. Each bullet should be a concrete observation, not a vague summary. Include specific numbers, file names, or patterns where possible. Example:
+- "Strong: 12/14 source files have corresponding test files with 3+ assertions each"
+- "Weak: error handling in worker_pool.rs and merge_loop.rs uses unwrap() in 8 call sites"
+- "Integration tests cover the happy path but no failure/retry scenarios"
+
 ## Deficiencies
 
 Identify structural deficiencies. Each deficiency must have:
-- A description of the gap
+- A description of the gap, including concrete numbers (e.g. "29 of 95 source files (31%)" or "37 files have no instrumentation")
 - The affected domain (or null for repo-wide)
 - A category: one of "CoverageGap", "MissingTooling", "MissingDocumentation", "ConventionViolation", "ObservabilityGap", "FeedbackLoopGap"
 - A severity: "P0" (critical), "P1" (important), or "P2" (nice-to-have)
-- A suggested task title and details for fixing it
+- A suggested task title (imperative, actionable)
+- Suggested task details that are prescriptive: name specific files or directories to change, specific tools to add, specific thresholds to set. Do not give vague advice like "raise baseline" — instead say exactly what to do and where.
 
 ## Primary Gap
 
@@ -79,7 +87,7 @@ The JSON must conform to this exact schema:
         "risk_exposure": 0,
         "convention_adherence": 0
       }},
-      "note": "string - brief assessment note"
+      "notes": ["string - 2 to 4 bullet points mixing strengths and weaknesses"]
     }}
   ],
   "repo_wide": {{

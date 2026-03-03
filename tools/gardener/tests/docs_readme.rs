@@ -83,6 +83,49 @@ fn docs_readme_links_runtime_failure_triage_cookbook() {
 }
 
 #[test]
+fn backlog_paths_are_documented_consistently_across_runbooks() {
+    let backlog_operations_path = repo_root_path("../../docs/runbooks/backlog-operations.md");
+    let startup_artifact_map_path = repo_root_path("../../docs/runbooks/startup-artifact-map.md");
+
+    let backlog_operations = std::fs::read_to_string(&backlog_operations_path)
+        .unwrap_or_else(|err| panic!("unable to read backlog-operations runbook: {err}"));
+    let startup_artifact_map = std::fs::read_to_string(&startup_artifact_map_path)
+        .unwrap_or_else(|err| panic!("unable to read startup artifact map runbook: {err}"));
+
+    for (path, content) in [
+        (&backlog_operations_path, &backlog_operations),
+        (&startup_artifact_map_path, &startup_artifact_map),
+    ] {
+        assert!(
+            content.contains("## Backlog path split"),
+            "{} should contain an explicit backlog path split section",
+            path.display()
+        );
+    }
+
+    let manual_path = "~/.gardener/backlog.sqlite";
+    let runtime_path = ".cache/gardener/backlog.sqlite";
+
+    assert!(
+        backlog_operations.contains(manual_path) && startup_artifact_map.contains(manual_path),
+        "both runbooks should describe the manual backlog default path"
+    );
+    assert!(
+        backlog_operations.contains(runtime_path) && startup_artifact_map.contains(runtime_path),
+        "both runbooks should describe the runtime backlog artifact path"
+    );
+    assert!(
+        backlog_operations.contains("GARDENER_DB_PATH") && startup_artifact_map.contains("GARDENER_DB_PATH"),
+        "both runbooks should document `GARDENER_DB_PATH` as the manual override for CLI/manual DB selection"
+    );
+    assert!(
+        backlog_operations.contains("GARDENER_RUNTIME_DB_PATH")
+            && startup_artifact_map.contains("GARDENER_RUNTIME_DB_PATH"),
+        "both runbooks should document `GARDENER_RUNTIME_DB_PATH` as the runtime artifact override"
+    );
+}
+
+#[test]
 fn docs_readme_disallows_ephemeral_plan_links() {
     let readme_path = repo_root_path("../../docs/README.md");
     let readme = std::fs::read_to_string(&readme_path)

@@ -34,7 +34,7 @@ run_preflight() {
     recommendations+=("Install coverage helper: cargo install cargo-llvm-cov --locked")
   fi
 
-  if ! command -v gh >/dev/null 2>&1; then
+  if ! gh --version >/dev/null 2>&1; then
     missing_tools+=("gh")
     recommendations+=("Install GitHub CLI: https://cli.github.com/manual/installation")
   fi

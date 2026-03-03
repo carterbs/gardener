@@ -306,6 +306,11 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
+  else
+    cat > "$target_dir/bin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 127
+SH
   fi
 
   chmod +x "$target_dir/bin/"*

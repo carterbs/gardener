@@ -88,7 +88,9 @@ pub struct Cli {
     #[arg(long)]
     pub working_dir: Option<std::path::PathBuf>,
     #[arg(long)]
-    pub parallelism: Option<u32>,
+    pub num_workers: Option<u32>,
+    #[arg(long = "worker-count", conflicts_with = "num_workers", help = "Deprecated: use --num-workers")]
+    pub worker_count: Option<u32>,
     #[arg(long)]
     pub task: Option<String>,
     #[arg(long = "quit-after")]
@@ -206,6 +208,7 @@ pub fn run_with_runtime(
                 _ => return Err(GardenerError::Cli(error.to_string())),
             },
         };
+        let cli_parallelism_override = cli.num_workers.or(cli.worker_count);
         append_run_log(
             "info",
             "cli.parsed",
@@ -221,6 +224,11 @@ pub fn run_with_runtime(
                 "seed_dry_run": cli.seed_dry_run
             }),
         );
+        if cli.worker_count.is_some() {
+            let _ = runtime.terminal.write_line(
+                "warning: --worker-count is deprecated and will be removed; use --num-workers instead",
+            );
+        }
 
         let env_map = env_to_map(env);
 
@@ -238,7 +246,7 @@ pub fn run_with_runtime(
         let overrides = CliOverrides {
             config_path: cli.config.clone(),
             working_dir: cli.working_dir.clone(),
-            parallelism: cli.parallelism,
+            parallelism: cli_parallelism_override,
             task: cli.task.clone(),
             target: cli.target,
             worker_mode: cli.worker_mode.map(|mode| mode.as_str().to_string()),
@@ -439,7 +447,7 @@ pub fn run_with_runtime(
                 apply_profile_runtime_preferences(
                     &mut cfg_for_startup,
                     profile.as_ref(),
-                    cli.parallelism,
+                    cli_parallelism_override,
                 );
             }
             draw_boot_stage(
@@ -892,7 +900,7 @@ fn persist_agent_default(
 #[cfg(test)]
 mod tests {
     use super::{config, repo_intelligence, runtime, triage_discovery};
-    use clap::Parser;
+    use clap::{error::ErrorKind, Parser};
     use std::path::Path;
 
     fn sample_profile(
@@ -925,6 +933,35 @@ mod tests {
         super::apply_profile_runtime_preferences(&mut cfg, Some(&profile), Some(4));
 
         assert_eq!(cfg.orchestrator.parallelism, 4);
+    }
+
+    #[test]
+    fn parse_num_workers_cli_flag() {
+        let cli = super::Cli::try_parse_from(["gardener", "--num-workers", "5"])
+            .expect("new flag should parse");
+        assert_eq!(cli.num_workers, Some(5));
+        assert_eq!(cli.worker_count, None);
+    }
+
+    #[test]
+    fn parse_worker_count_alias_cli_flag() {
+        let cli = super::Cli::try_parse_from(["gardener", "--worker-count", "5"])
+            .expect("deprecated alias should parse");
+        assert_eq!(cli.worker_count, Some(5));
+        assert_eq!(cli.num_workers, None);
+    }
+
+    #[test]
+    fn parse_conflicting_worker_count_and_num_workers_is_rejected() {
+        let err = super::Cli::try_parse_from([
+            "gardener",
+            "--num-workers",
+            "5",
+            "--worker-count",
+            "6",
+        ])
+        .expect_err("conflicting worker count flags should fail");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
     #[test]

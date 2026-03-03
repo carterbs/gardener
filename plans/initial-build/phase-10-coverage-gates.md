@@ -32,7 +32,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 ### Phase Validation Gate (Mandatory)
 - Run: `cargo test -p gardener --all-targets`
 - Run: `npm run test:gardener:coverage` (must report 100.00% lines for `tools/gardener/src/**`).
-- Run full E2E binary smoke: `cargo run -p gardener --bin gardener -- --parallelism 3 --target 3 --config tools/gardener/tests/fixtures/configs/phase10-full.toml` and verify expected task completion + clean shutdown.
+- Run full E2E binary smoke: `cargo run -p gardener --bin gardener -- --num-workers 3 --target 3 --config tools/gardener/tests/fixtures/configs/phase10-full.toml` and verify expected task completion + clean shutdown.
 - Run repository gate: `npm run validate`.
 
 ### Autonomous Completion Rule

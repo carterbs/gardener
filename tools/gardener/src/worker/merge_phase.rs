@@ -3,7 +3,7 @@ use crate::agent_turn::{run_agent_turn, AgentTurnInput};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::fsm::MergingOutput;
-use crate::gh::{GhClient, MergeStateStatus, Mergeable};
+use crate::gh::{FailedCheck, GhClient, MergeStateStatus, Mergeable};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::prompt_registry::{ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry};
@@ -468,24 +468,27 @@ pub(crate) fn execute_merge_phase(
                     }),
                 );
                 let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
-                if failed_checks.is_empty() {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    return Ok(WorkerRunSummary {
-                        worker_id: req.worker_id.clone(),
-                        session_id: req.session_id.clone(),
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason: Some(
-                            "PR is blocked by branch protection rules (no failed CI checks found)"
-                                .to_string(),
-                        ),
-                    });
+                if !has_explicit_failed_checks(&failed_checks) {
+                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Failed,
+                            on_event,
+                        );
+                        return Ok(WorkerRunSummary {
+                            worker_id: req.worker_id.clone(),
+                            session_id: req.session_id.clone(),
+                            final_state: WorkerState::Failed,
+                            logs,
+                            teardown: None,
+                            failure_reason: Some(
+                                "PR is blocked by branch protection rules (no explicit failed checks found)"
+                                    .to_string(),
+                            ),
+                        });
+                    }
+                    continue;
                 }
                 emit_worker_activity_state_with(
                     worker_id,
@@ -894,6 +897,10 @@ fn run_repo_validation_with_quality_guard(
     repo_root_git.run_validation_command(&cfg.validation.command)
 }
 
+fn has_explicit_failed_checks(failed_checks: &[FailedCheck]) -> bool {
+    !failed_checks.is_empty()
+}
+
 fn teardown_after_completion(
     worktree_client: &WorktreeClient<'_>,
     worktree_path: &std::path::Path,
@@ -932,8 +939,9 @@ fn teardown_after_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_merge_phase, teardown_after_completion};
+    use super::{execute_merge_phase, has_explicit_failed_checks, teardown_after_completion};
     use crate::fsm::MergingOutput;
+    use crate::gh::FailedCheck;
     use crate::git::GitClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
     use crate::config::AppConfig;
@@ -1173,5 +1181,20 @@ mod tests {
         assert!(!spawned
             .iter()
             .any(|request| request.args.first() == Some(&"stash".to_string())));
+    }
+
+    #[test]
+    fn blocked_state_without_explicit_failed_checks_is_not_remediated() {
+        assert!(!has_explicit_failed_checks(&[]));
+    }
+
+    #[test]
+    fn blocked_state_with_explicit_failed_checks_is_remediated() {
+        let failed = vec![FailedCheck {
+            name: "ci".to_string(),
+            link: "https://github.com/example/repo/actions/runs/1/job/2".to_string(),
+            log_snippet: "failing log".to_string(),
+        }];
+        assert!(has_explicit_failed_checks(&failed));
     }
 }

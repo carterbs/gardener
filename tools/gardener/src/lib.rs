@@ -56,7 +56,7 @@ pub mod worktree_audit;
 use agent::factory::AdapterFactory;
 use agent::{probe_and_persist, validate_model};
 use backlog_snapshot::export_markdown_snapshot;
-use backlog_store::{BacklogStore, TaskStatus};
+use backlog_store::{system_time_unix, BacklogStore, TaskStatus};
 use clap::{error::ErrorKind, CommandFactory, Parser, ValueEnum};
 use config::{effective_agent_for_state, load_config, resolve_validation_command, CliOverrides};
 use errors::GardenerError;
@@ -381,6 +381,7 @@ pub fn run_with_runtime(
                 runtime.file_system.create_dir_all(parent)?;
             }
             let store = BacklogStore::open(db_path)?;
+            store.recover_stale_leases(system_time_unix())?;
             let _ = export_markdown_snapshot(&store, &snapshot_path)?;
             runtime.terminal.write_line(&format!(
                 "sync complete: snapshot={}",
@@ -489,6 +490,7 @@ pub fn run_with_runtime(
             }
             let db_path = backlog_db_path(&cfg_for_startup, &startup.scope);
             let store = BacklogStore::open(db_path)?;
+            store.recover_stale_leases(system_time_unix())?;
             let mut startup_backlog = store.list_tasks()?;
             if !cfg_for_startup.execution.test_mode {
                 if let Ok(open_prs) = GhClient::new(

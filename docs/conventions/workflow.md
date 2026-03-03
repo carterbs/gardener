@@ -5,6 +5,7 @@
 - `--prune-only`: prune/reconcile only, then exit.
 - `--validate`: run configured validation command and exit with its status.
 - `--backlog-only`: startup audits and backlog maintenance without worker pool launch.
+- `--num-workers <N>`: configure how many worker slots are created (replaces deprecated `--worker-count`).
 - `--quit-after <N>`: run worker pool until `N` task completions are reached, then exit.
 - `--sync-only`: reconciliation-only flow with startup audits (when not in test mode), PR/worktree sync, backlog snapshot export, then deterministic exit.
 - `seed-backlog --mode dry-run|write`: run the seeding phase as a standalone binary (default `dry-run` prints recommended tasks to stdout without backlog writes).

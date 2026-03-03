@@ -126,7 +126,8 @@ fn cli_help_contract() {
     for flag in [
         "--config",
         "--working-dir",
-        "--parallelism",
+        "--num-workers",
+        "--worker-count",
         "--task",
         "--quit-after",
         "--worker-mode",
@@ -269,6 +270,44 @@ fn run_with_runtime_paths_and_errors() {
     let err = gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime)
         .expect_err("test fixture should not fail");
     assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
+}
+
+#[test]
+fn parse_worker_count_alias_emits_deprecation_warning() {
+    let fs = FakeFileSystem::default();
+    fs.write_string(Path::new("/config.toml"), "")
+        .expect("test fixture should not fail");
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let terminal = FakeTerminal::new(true);
+    let runtime = ProductionRuntime {
+        clock: Arc::new(ProductionClock),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process_runner),
+        terminal: Arc::new(terminal.clone()),
+    };
+
+    let args = vec![
+        "gardener".into(),
+        "--prune-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+        "--worker-count".into(),
+        "2".into(),
+    ];
+    assert_eq!(
+        gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime)
+            .expect("test fixture should not fail"),
+        0
+    );
+    let lines = terminal.written_lines();
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("deprecated") && line.contains("--worker-count")));
 }
 
 #[test]

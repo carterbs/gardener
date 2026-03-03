@@ -12,12 +12,12 @@ Use this runbook when startup indicates:
 
 ## Startup artifact map
 
-## Backlog path split for startup evidence
+## Backlog DB for startup evidence
 
-Startup seeding and worker handoff use runtime cache artifacts:
+Startup seeding and worker handoff use the shared backlog DB by default:
 
-- Runtime backlog artifact: `{repo_root|working_dir}/.cache/gardener/backlog.sqlite` (or `GARDENER_RUNTIME_DB_PATH`).
-- Manual CLI/backlog-seed authoring still uses `~/.gardener/backlog.sqlite` by default (or `GARDENER_DB_PATH`) and should be treated as a separate source.
+- Default backlog artifact: `~/.gardener/backlog.sqlite`.
+- Runtime override: `GARDENER_RUNTIME_DB_PATH` (legacy fallback: `GARDENER_DB_PATH`).
 
 | Artifact | Location | Why it exists | Typical steering questions |
 | --- | --- | --- | --- |
@@ -25,8 +25,8 @@ Startup seeding and worker handoff use runtime cache artifacts:
 | Quality-grade summary | `docs/quality-grades.md` (or configured `quality_report.path`) | Startup writes the latest readiness document before worker startup | Is `agent_steering` the lowest dimension or the current `primary_gap`? |
 | Startup logs | `.gardener/otel-logs.jsonl` (or `GARDENER_LOG_PATH`) | Structured startup audit events and errors | Did startup run triage/profile load and complete quality refresh? |
 | Startup diagnostics | `scripts/startup-diagnostics.sh` output (if startup fails) | One-command summary for failure triage | Which startup audit step failed first and what was the exact error? |
-| Backlog seed evidence | `.cache/gardener/backlog.sqlite` | Startup may upsert tasks mapped from startup findings | Did startup seed tasks for `agent_steering` gaps that need manual routing? |
-| Startup backup copy | `.cache/gardener/backlog.sqlite.bak` and sidecars | Preserves DB state when startup runs | Do startup errors correlate with missing or stale backlog state? |
+| Backlog seed evidence | `~/.gardener/backlog.sqlite` | Startup may upsert tasks mapped from startup findings | Did startup seed tasks for `agent_steering` gaps that need manual routing? |
+| Startup backup copy | `~/.gardener/backlog.sqlite.bak` and sidecars | Preserves DB state when startup runs | Do startup errors correlate with missing or stale backlog state? |
 
 ## Quick startup evidence collection
 

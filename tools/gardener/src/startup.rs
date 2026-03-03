@@ -24,7 +24,7 @@ use std::time::UNIX_EPOCH;
 const REPORT_TTL_SECONDS: u64 = 3600;
 const RUNTIME_BACKLOG_DB_ENV: &str = "GARDENER_RUNTIME_DB_PATH";
 const LEGACY_BACKLOG_DB_ENV: &str = "GARDENER_DB_PATH";
-const RUNTIME_BACKLOG_DB_PATH: &str = ".cache/gardener/backlog.sqlite";
+const DEFAULT_BACKLOG_DB_PATH: &str = ".gardener/backlog.sqlite";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupSummary {
@@ -38,11 +38,10 @@ pub struct StartupSummary {
 }
 
 fn runtime_backlog_db_path(scope: &RuntimeScope) -> PathBuf {
-    scope
-        .repo_root
-        .as_ref()
-        .unwrap_or(&scope.working_dir)
-        .join(RUNTIME_BACKLOG_DB_PATH)
+    if let Ok(home) = env::var("HOME") {
+        return PathBuf::from(home).join(DEFAULT_BACKLOG_DB_PATH);
+    }
+    scope.working_dir.join(DEFAULT_BACKLOG_DB_PATH)
 }
 
 pub fn backlog_db_path(_cfg: &crate::config::AppConfig, scope: &RuntimeScope) -> PathBuf {
@@ -1338,14 +1337,13 @@ mod tests {
             repo_root: Some(dir.path().to_path_buf()),
             working_dir: dir.path().to_path_buf(),
         };
-        assert_eq!(
-            backlog_db_path(&cfg, &scope),
-            dir.path().join(".cache/gardener/backlog.sqlite")
-        );
+        let path = backlog_db_path(&cfg, &scope);
+        assert!(path.ends_with(".gardener/backlog.sqlite"));
+        assert!(!path.display().to_string().contains(".cache/gardener"));
     }
 
     #[test]
-    fn backlog_db_path_defaults_to_runtime_cache() {
+    fn backlog_db_path_defaults_to_non_cache_home_path() {
         let dir = tempdir().expect("tempdir");
         let cfg = AppConfig::default();
         let scope = RuntimeScope {
@@ -1353,10 +1351,9 @@ mod tests {
             repo_root: Some(dir.path().to_path_buf()),
             working_dir: dir.path().to_path_buf(),
         };
-        assert_eq!(
-            backlog_db_path(&cfg, &scope),
-            dir.path().join(".cache/gardener/backlog.sqlite")
-        );
+        let path = backlog_db_path(&cfg, &scope);
+        assert!(path.ends_with(".gardener/backlog.sqlite"));
+        assert!(!path.display().to_string().contains(".cache/gardener"));
     }
 
     #[test]

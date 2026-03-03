@@ -8,7 +8,7 @@ fn fixture(path: &str) -> String {
 #[ignore]
 fn scheduler_mode_completes_target() {
     let mut cmd = cargo_bin_cmd!("gardener");
-    cmd.arg("--parallelism")
+    cmd.arg("--num-workers")
         .arg("3")
         .arg("--quit-after")
         .arg("3")

@@ -17,7 +17,7 @@ Context: [Vision](./00-gardener-vision.md) | [Shared Foundation](./01-shared-fou
 - Define CLI contract for:
   - `--config <path>`
   - `--working-dir <path>` (scope Gardener to repo root or subdirectory)
-  - `--parallelism <n>`
+- `--num-workers <n>`
   - `--task <text>`
   - `--target <n>`
   - `--prune-only`

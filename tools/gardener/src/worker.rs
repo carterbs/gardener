@@ -137,8 +137,8 @@ pub(crate) enum WorkerStreamEvent {
     },
     StateChanged {
         _task_id: String,
-        _state: String,
-        _details: String,
+        state: String,
+        details: String,
     },
 }
 
@@ -323,8 +323,8 @@ fn emit_worker_activity_state_with(
     if let Some(on_event) = on_event {
         on_event(WorkerStreamEvent::StateChanged {
             _task_id: task_id.to_string(),
-            _state: state.as_str().to_string(),
-            _details: details_str,
+            state: state.as_str().to_string(),
+            details: details_str,
         });
     }
     STATE_SINK.with(|cell| {

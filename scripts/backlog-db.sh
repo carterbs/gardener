@@ -25,13 +25,31 @@ Usage:
     Show this help text.
 
 Environment:
-  GARDENER_DB_PATH can also set the default DB path.
+  GARDENER_DB_PATH can also set the default DB path for manual operations.
+  Runtime binaries may use GARDENER_RUNTIME_DB_PATH for runtime cache-backed DB selection.
 USAGE
 }
 
 env_db_path="${GARDENER_DB_PATH:-${HOME}/.gardener/backlog.sqlite}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 runbook_path="${script_dir}/../docs/runbooks/backlog-operations.md"
+
+require_arg_value() {
+  local arg_name=$1
+  if [[ $# -lt 2 ]]; then
+    echo "$arg_name requires a value" >&2
+    usage
+    exit 1
+  fi
+}
+
+ensure_db_exists() {
+  local path=$1
+  if [[ ! -f "$path" ]]; then
+    echo "database file not found: $path" >&2
+    exit 1
+  fi
+}
 
 if [[ $# -eq 0 ]]; then
   usage
@@ -67,6 +85,7 @@ case "$cmd" in
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --db)
+          require_arg_value "--db" "$@"
           db_path="$2"
           shift 2
           ;;
@@ -78,6 +97,7 @@ case "$cmd" in
       esac
     done
 
+    ensure_db_exists "$db_path"
     sqlite3 "$db_path" "SELECT task_id, title, priority, status, source, scope_key FROM backlog_tasks ORDER BY created_at DESC LIMIT 50;"
     ;;
 
@@ -93,38 +113,47 @@ case "$cmd" in
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --db)
+          require_arg_value "--db" "$@"
           db_path="$2"
           shift 2
           ;;
         --title)
+          require_arg_value "--title" "$@"
           title="$2"
           shift 2
           ;;
         --details)
+          require_arg_value "--details" "$@"
           details="$2"
           shift 2
           ;;
         --priority)
+          require_arg_value "--priority" "$@"
           priority="$2"
           shift 2
           ;;
         --scope)
+          require_arg_value "--scope" "$@"
           scope_key="$2"
           shift 2
           ;;
         --status)
+          require_arg_value "--status" "$@"
           status="$2"
           shift 2
           ;;
         --kind)
+          require_arg_value "--kind" "$@"
           kind="$2"
           shift 2
           ;;
         --source)
+          require_arg_value "--source" "$@"
           source="$2"
           shift 2
           ;;
         --id)
+          require_arg_value "--id" "$@"
           task_id="$2"
           shift 2
           ;;
@@ -173,8 +202,6 @@ case "$cmd" in
     if [[ -z "$task_id" ]]; then
       task_id="manual:${scope_key}:auto-${now}"
     fi
-
-    mkdir -p "$(dirname "$db_path")"
 
     if [[ ! -f "$db_path" ]]; then
       echo "database file not found: $db_path" >&2

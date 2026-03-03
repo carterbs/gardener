@@ -12,6 +12,7 @@ use gardener::friction_analysis::{
     FrictionAnalysisOutcome,
 };
 use gardener::logging::append_run_log;
+use gardener::backlog_store::system_time_unix;
 use gardener::runtime::ProductionRuntime;
 use gardener::startup::backlog_db_path;
 use std::path::PathBuf;
@@ -179,6 +180,7 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
                 let db_path = backlog_db_path(&cfg, &scope);
                 eprintln!("Writing to backlog at {}", db_path.display());
                 let store = gardener::backlog_store::BacklogStore::open(db_path)?;
+                store.recover_stale_leases(system_time_unix())?;
                 let tasks = findings_to_tasks(&findings);
                 for task in &tasks {
                     match store.upsert_task(task.clone()) {

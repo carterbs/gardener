@@ -77,20 +77,9 @@ COVERAGE_IGNORE_MANIFEST=./scripts/coverage-ignore-manifest.txt ./scripts/test-g
 
 ### Validation pipeline
 
-Pre-commit uses the same validation pipeline as manual checks:
+The canonical validation workflow is documented in:
 
-1. `scripts/run-validate.sh`
-2. `scripts/check-skills-sync.sh`
-3. `scripts/check-no-warnings.sh`
-4. `scripts/check-migrations-wired.sh`
-5. `scripts/check-binary-blobs.sh`
-6. `scripts/doc-gardening.sh`
-7. `scripts/run-script-lint-fixture-tests.sh`
-8. `scripts/test-gardener-coverage.sh`
-
-`run-validate.sh` runs these scripts in order; it stops on the first failure, so fix each failure before re-running.
-
-`gardener.toml` points both startup/runtime validation at `./scripts/run-validate.sh`.
+- [Validation and pre-commit flow](docs/conventions/workflow.md#validation-and-pre-commit-flow)
 
 
 ## Git Hooks
@@ -120,31 +109,9 @@ That means each commit runs:
 
 ### Pre-commit remediation playbook
 
-When commit is blocked by hooks:
+Use the canonical playbook in the workflow docs:
 
-1. Run `./.githooks/pre-commit` directly to reproduce locally.
-2. Read the last stage name from the output:
-   - `Running custom linter: scripts/check-skills-sync.sh`
-   - `Running custom linter: scripts/check-no-warnings.sh`
-   - `Running custom linter: scripts/check-migrations-wired.sh`
-   - `Running custom linter: scripts/check-binary-blobs.sh`
-   - `Running custom linter: scripts/doc-gardening.sh`
-   - `Running custom linter: scripts/run-script-lint-fixture-tests.sh`
-   - `Running project validation command: ./scripts/test-gardener-coverage.sh`
-3. Fix the root cause from the failing script output:
-   - Skills mismatch:
-     - Copy files from the command suggestions in `scripts/check-skills-sync.sh` output.
-   - Clippy warnings:
-     - Address the warning text, then re-run `./scripts/check-no-warnings.sh`.
-   - Doc-gardening maintenance drift:
-     - Review and fix failing checks from `./scripts/doc-gardening.sh`.
-   - Migration wiring errors:
-     - Add each missing migration include to `tools/gardener/src/backlog_store.rs`.
-   - Binary blob failures:
-     - Remove blocked files listed by `scripts/check-binary-blobs.sh` from the commit or move them outside git history.
-  - Coverage gate failure:
-    - Re-run `./scripts/test-gardener-coverage.sh`, inspect the reported `TOTAL` and failing areas, then tighten/fix uncovered paths in `tools/gardener/src`.
-4. Re-stage any files changed by the remediation command (`git add`) and commit again.
+- [Validation and pre-commit flow](docs/conventions/workflow.md#validation-and-pre-commit-flow)
 
 ## Vision
 

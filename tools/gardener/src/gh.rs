@@ -71,6 +71,11 @@ struct PrCheck {
     name: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct PrRequiredCheck {
+    bucket: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct FailedCheck {
     pub name: String,
@@ -349,21 +354,83 @@ impl<'a> GhClient<'a> {
             if m.mergeable != Mergeable::Unknown && !m.merge_state_status.is_pending() {
                 return Ok(m);
             }
+            let retry_delay = mergeability_poll_retry_delay(interval, attempt);
             append_run_log(
                 "debug",
                 "gh.pr.mergeability.poll_retry",
                 json!({
                     "pr_number": pr_number,
                     "attempt": attempt + 1,
-                    "max_polls": max_polls
+                    "max_polls": max_polls,
+                    "sleep_ms": retry_delay.as_millis()
                 }),
             );
             if attempt + 1 < max_polls {
-                std::thread::sleep(interval);
+                std::thread::sleep(retry_delay);
             }
         }
         // Return the last Unknown result rather than erroring
         self.check_mergeability(pr_number)
+    }
+
+    pub fn required_checks_green(&self, pr_number: u64) -> Result<bool, GardenerError> {
+        append_run_log(
+            "info",
+            "gh.pr.required_checks.check",
+            json!({ "cwd": self.cwd.display().to_string(), "pr_number": pr_number }),
+        );
+        let out = self.runner.run(ProcessRequest {
+            program: "gh".to_string(),
+            args: vec![
+                "pr".to_string(),
+                "checks".to_string(),
+                pr_number.to_string(),
+                "--required".to_string(),
+                "--json".to_string(),
+                "bucket".to_string(),
+            ],
+            cwd: Some(self.cwd.clone()),
+        })?;
+        if out.exit_code == 8 {
+            // Pending checks are not green yet.
+            append_run_log(
+                "info",
+                "gh.pr.required_checks.pending",
+                json!({ "pr_number": pr_number }),
+            );
+            return Ok(false);
+        }
+        if out.exit_code != 0 {
+            append_run_log(
+                "warn",
+                "gh.pr.required_checks.failed",
+                json!({
+                    "pr_number": pr_number,
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "gh pr checks --required failed: {}",
+                out.stderr
+            )));
+        }
+        let checks: Vec<PrRequiredCheck> = serde_json::from_str(&out.stdout)
+            .map_err(|e| GardenerError::Process(format!("invalid required checks json: {e}")))?;
+        let all_green = !checks.is_empty()
+            && checks
+                .iter()
+                .all(|check| check.bucket.eq_ignore_ascii_case("pass"));
+        append_run_log(
+            "info",
+            "gh.pr.required_checks.result",
+            json!({
+                "pr_number": pr_number,
+                "required_checks_count": checks.len(),
+                "all_green": all_green
+            }),
+        );
+        Ok(all_green)
     }
 
     pub fn merge_pr(&self, pr_number: u64) -> Result<(), GardenerError> {
@@ -600,6 +667,14 @@ fn truncate_log(log: &str, max_lines: usize) -> String {
         let start = lines.len() - max_lines;
         lines[start..].join("\n")
     }
+}
+
+fn mergeability_poll_retry_delay(base: Duration, attempt: u32) -> Duration {
+    let base_ms = base.as_millis().max(1);
+    let max_ms = Duration::from_secs(30).as_millis();
+    let multiplier = u128::from(attempt.saturating_add(1));
+    let delay_ms = base_ms.saturating_mul(multiplier).min(max_ms);
+    Duration::from_millis(delay_ms as u64)
 }
 
 fn parse_pr_number_from_url(url: &str) -> Option<u64> {
@@ -1193,6 +1268,42 @@ mod tests {
         assert_eq!(m.merge_state_status, MergeStateStatus::Clean);
         // Should have made 2 calls (waited through Blocked)
         assert_eq!(runner.spawned().len(), 2);
+    }
+
+    #[test]
+    fn required_checks_green_true_when_all_required_checks_pass() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"[{"bucket":"pass"},{"bucket":"pass"}]"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        assert!(gh.required_checks_green(77).expect("ok"));
+    }
+
+    #[test]
+    fn required_checks_green_false_when_pending() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 8,
+            stdout: String::new(),
+            stderr: "checks pending".to_string(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        assert!(!gh.required_checks_green(77).expect("ok"));
+    }
+
+    #[test]
+    fn required_checks_green_false_when_not_all_passed() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"[{"bucket":"pass"},{"bucket":"fail"}]"#.to_string(),
+            stderr: String::new(),
+        }));
+        let gh = GhClient::new(&runner, "/repo");
+        assert!(!gh.required_checks_green(77).expect("ok"));
     }
 
     #[test]

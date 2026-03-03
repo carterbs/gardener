@@ -12,6 +12,13 @@ Use this runbook when startup indicates:
 
 ## Startup artifact map
 
+## Backlog path split for startup evidence
+
+Startup seeding and worker handoff use runtime cache artifacts:
+
+- Runtime backlog artifact: `{repo_root|working_dir}/.cache/gardener/backlog.sqlite` (or `GARDENER_RUNTIME_DB_PATH`).
+- Manual CLI/backlog-seed authoring still uses `~/.gardener/backlog.sqlite` by default (or `GARDENER_DB_PATH`) and should be treated as a separate source.
+
 | Artifact | Location | Why it exists | Typical steering questions |
 | --- | --- | --- | --- |
 | Repo intelligence profile | `.gardener/repo-intelligence.toml` (or configured `triage.output_path`) | Discovery and interview output captured by startup | Does this repository expose clear steering docs for Codex/Claude and stable conventions? |
@@ -51,4 +58,3 @@ scripts/startup-diagnostics.sh --run-id <run-id> --log-path <log-path> --output 
   - read the latest `startup.*` events in logs,
   - check missing profile message and ensure triage output path exists,
   - compare `repo-intelligence.toml` and quality report paths to the configured scope (`--working-dir`).
-

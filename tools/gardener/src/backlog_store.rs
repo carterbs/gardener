@@ -576,14 +576,12 @@ impl BacklogStore {
             db_path: path.clone(),
         };
 
-        let recovered = store.recover_stale_leases(system_time_unix())?;
         let (p0, p1, p2) = store.count_tasks_by_priority().unwrap_or((0, 0, 0));
         append_run_log(
             "info",
             "backlog_store.opened",
             json!({
                 "path": path.display().to_string(),
-                "stale_recovered": recovered,
                 "task_count": { "p0": p0, "p1": p1, "p2": p2, "total": p0 + p1 + p2 },
             }),
         );

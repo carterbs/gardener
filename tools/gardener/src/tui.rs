@@ -20,7 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const WORKER_LIST_ROW_HEIGHT: usize = 3;
 const COMPACT_WORKER_LIST_ROW_HEIGHT: usize = 2;
 const RECENT_COMMAND_STREAM_LIMIT: usize = 4;
-const COMMAND_SCROLL_RATE_MS: u128 = 120;
 const WORKER_FLOW_STATES: [&str; 7] = [
     "understand",
     "planning",
@@ -517,6 +516,13 @@ fn parse_backlog_item(raw: &str) -> Option<ParsedBacklogItem> {
     }
 }
 
+fn is_in_progress_backlog_item(raw: &str) -> bool {
+    raw.split_whitespace()
+        .next()
+        .map(|token| matches!(token, "INP" | "inp"))
+        .unwrap_or(false)
+}
+
 fn parse_merge_queue_item(raw: &str) -> Option<ParsedBacklogItem> {
     let tokens = raw.split_whitespace().collect::<Vec<_>>();
     if tokens.is_empty() || tokens[0] != "MRG" {
@@ -548,6 +554,9 @@ fn ordered_backlog_items(in_progress: &[String], queued: &[String]) -> Vec<Parse
     let mut p2 = Vec::new();
 
     for raw in in_progress.iter().chain(queued.iter()) {
+        if is_in_progress_backlog_item(raw) {
+            continue;
+        }
         if let Some(item) = parse_backlog_item(raw) {
             match item.priority {
                 ParsedBacklogPriority::P0 => p0.push(item),
@@ -626,7 +635,6 @@ fn merge_worker_card_item(
     row: Option<&WorkerRow>,
     compact: bool,
     command_stream_max_width: usize,
-    command_scroll_offset: usize,
 ) -> ListItem<'static> {
     let (state, task, tool_line, command_details) = row
         .map(|row| {
@@ -656,11 +664,7 @@ fn merge_worker_card_item(
     flow_spans.extend(flow_line);
 
     let command_stream = worker_command_stream(&command_details);
-    let command_stream = command_stream_window(
-        &command_stream,
-        command_stream_max_width,
-        command_scroll_offset,
-    );
+    let command_stream = command_stream_window(&command_stream, command_stream_max_width);
 
     let worker_style = Style::default()
         .fg(Color::Cyan)
@@ -1151,7 +1155,6 @@ fn draw_dashboard_frame(
     let command_stream_max_width = workers_panel
         .width
         .saturating_sub(8 + "Commands: ".len() as u16) as usize;
-    let command_scroll_offset = current_command_scroll_offset();
     let worker_items = visible_worker_cards
         .iter()
         .enumerate()
@@ -1172,11 +1175,7 @@ fn draw_dashboard_frame(
             };
             let flow_line = worker_flow_chain_spans(&row.state);
             let command_stream = worker_command_stream(&row.command_details);
-            let command_stream = command_stream_window(
-                &command_stream,
-                command_stream_max_width,
-                command_scroll_offset,
-            );
+            let command_stream = command_stream_window(&command_stream, command_stream_max_width);
             let mut flow_spans = vec![
                 Span::raw("    "),
                 Span::styled(
@@ -1294,7 +1293,6 @@ fn draw_dashboard_frame(
         merge_row,
         compact_view || compact_worker_row,
         merge_command_stream_max_width,
-        command_scroll_offset,
     )];
     let merge_worker_card = Layout::default()
         .direction(Direction::Vertical)
@@ -1501,7 +1499,6 @@ thread_local! {
     static WORKERS_VIEWPORT_SELECTED: RefCell<usize> = const { RefCell::new(0) };
     static WORKERS_VIEWPORT_CAPACITY: RefCell<usize> = const { RefCell::new(1) };
     static WORKERS_TOTAL_COUNT: RefCell<usize> = const { RefCell::new(0) };
-    static COMMAND_SCROLL_TICK: RefCell<(usize, u128)> = const { RefCell::new((0, 0)) };
 }
 
 fn now_unix_millis() -> u128 {
@@ -1883,43 +1880,13 @@ fn worker_command_stream(commands: &[CommandEntry]) -> String {
 
     recent
         .into_iter()
-        .rev()
         .map(|entry| format!("{}  {}", entry.timestamp, entry.command))
         .collect::<Vec<_>>()
         .join("  |  ")
 }
 
-fn current_command_scroll_offset() -> usize {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    COMMAND_SCROLL_TICK.with(|cell| {
-        let mut state = cell.borrow_mut();
-        let (offset, last_ms) = *state;
-        if last_ms == 0 {
-            *state = (0, now_ms);
-            return 0;
-        }
-        let elapsed = now_ms.saturating_sub(last_ms);
-        let new_ticks = elapsed / COMMAND_SCROLL_RATE_MS;
-        if new_ticks > 0 {
-            let new_offset = offset.saturating_add(new_ticks as usize);
-            *state = (new_offset, last_ms + new_ticks * COMMAND_SCROLL_RATE_MS);
-        }
-        state.0
-    })
-}
-
-fn command_stream_window(stream: &str, width: usize, offset: usize) -> String {
-    let chars: Vec<char> = stream.chars().collect();
-    let len = chars.len();
-    if len <= width {
-        return stream.to_string();
-    }
-    let max_offset = len.saturating_sub(width);
-    let start = offset.min(max_offset);
-    chars[start..start + width].iter().collect()
+fn command_stream_window(stream: &str, width: usize) -> String {
+    truncate_right(stream, width)
 }
 
 fn normalize_worker_state(state: &str) -> &str {
@@ -2257,10 +2224,11 @@ fn teardown_terminal(
 #[cfg(test)]
 mod tests {
     use super::{
-        format_breadcrumb, format_state_label, render_dashboard, render_dashboard_at_tick,
-        render_triage, reset_workers_scroll, scroll_workers_down, scroll_workers_up,
-        worker_flow_chain_spans, AppState, BacklogView, QueueStats, StageState,
-        StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow, WorkerState,
+        command_stream_window, format_breadcrumb, format_state_label, render_dashboard,
+        render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
+        scroll_workers_up, worker_command_stream, worker_flow_chain_spans, AppState, BacklogView,
+        CommandEntry, QueueStats, StageState, StartupHeadlineView, WorkerCard, WorkerMetrics,
+        WorkerRow, WorkerState,
     };
 
     fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -2295,8 +2263,11 @@ mod tests {
                 p2: 0,
             },
             &BacklogView {
-                in_progress: vec!["P1 abc123 fix queue".to_string()],
-                queued: vec!["P2 def456 tune logs".to_string()],
+                in_progress: vec!["INP P1 fix queue".to_string()],
+                queued: vec![
+                    "P0 abc123 queued task".to_string(),
+                    "P2 def456 tune logs".to_string(),
+                ],
             },
             80,
             40,
@@ -2311,6 +2282,7 @@ mod tests {
         assert!(frame.contains("Action:"));
         assert!(frame.contains("P0"));
         assert!(frame.contains("P2"));
+        assert!(!frame.contains("fix queue"));
         assert!(!frame.contains("status="));
         assert!(!frame.contains("action="));
     }
@@ -2331,11 +2303,15 @@ mod tests {
             },
             &BacklogView {
                 in_progress: vec![
-                    "INP P1 alpha task".to_string(),
+                    "INP P1 active task should be omitted".to_string(),
                     "INP P0 bravo task".to_string(),
                     "INP P2 charlie task".to_string(),
                 ],
-                queued: vec![],
+                queued: vec![
+                    "P0 abc123 queued p0".to_string(),
+                    "P1 def456 queued p1".to_string(),
+                    "P2 feed00 queued p2".to_string(),
+                ],
             },
             80,
             40,
@@ -2344,17 +2320,50 @@ mod tests {
             .find("BACKLOG (PRIORITY ORDER)")
             .expect("backlog heading");
         let backlog_section = &frame[backlog_section_start..];
-        let p0 = backlog_section.find("P0").expect("p0 row");
-        let p1 = backlog_section.find("P1").expect("p1 row");
-        let p2 = backlog_section.find("P2").expect("p2 row");
+        let p0 = backlog_section.find("queued p0").expect("p0 row");
+        let p1 = backlog_section.find("queued p1").expect("p1 row");
+        let p2 = backlog_section.find("queued p2").expect("p2 row");
+        assert!(
+            p0 < p2,
+            "P0 rows should render before P2 rows in Backlog panel"
+        );
         assert!(
             p0 < p1,
             "P0 rows should render before P1 rows in Backlog panel"
         );
         assert!(
-            p1 < p2,
-            "P1 rows should render before P2 rows in Backlog panel"
+            !backlog_section.contains("active task should be omitted"),
+            "INP items should be excluded from backlog panel"
         );
+        assert!(
+            !backlog_section.contains("bravo task"),
+            "INP items should be excluded from backlog panel"
+        );
+    }
+
+    #[test]
+    fn backlog_excludes_in_progress_tasks() {
+        let frame = render_dashboard(
+            &[worker(10, false)],
+            &QueueStats {
+                ready: 1,
+                active: 1,
+                failed: 0,
+                unresolved: 0,
+                merge_pending: 0,
+                p0: 1,
+                p1: 1,
+                p2: 0,
+            },
+            &BacklogView {
+                in_progress: vec!["INP P1 5d8c91 active task".to_string()],
+                queued: vec!["P0 abc123 queued task".to_string()],
+            },
+            120,
+            30,
+        );
+        assert!(frame.contains("queued task"));
+        assert!(!frame.contains("P1 active task"));
     }
 
     #[test]
@@ -2568,6 +2577,34 @@ mod tests {
                 "Complete"
             ]
         );
+    }
+
+    #[test]
+    fn worker_command_stream_shows_most_recent_first() {
+        let entries = vec![
+            CommandEntry {
+                timestamp: "10:00:00".to_string(),
+                command: "first".to_string(),
+            },
+            CommandEntry {
+                timestamp: "10:00:10".to_string(),
+                command: "second".to_string(),
+            },
+            CommandEntry {
+                timestamp: "10:00:20".to_string(),
+                command: "third".to_string(),
+            },
+        ];
+        assert_eq!(
+            worker_command_stream(&entries),
+            "10:00:20  third  |  10:00:10  second  |  10:00:00  first"
+        );
+    }
+
+    #[test]
+    fn command_stream_window_truncates_without_scrolling() {
+        let long = "long command stream that should be truncated";
+        assert_eq!(command_stream_window(long, 10), "long comm…");
     }
 
     #[test]

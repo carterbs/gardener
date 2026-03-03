@@ -12,7 +12,6 @@ use crate::learning_loop::LearningLoop;
 use crate::logging::{
     append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines,
 };
-use crate::merge_loop::{MAX_MERGE_REMEDIATION, MERGEABILITY_POLL_INTERVAL, MERGEABILITY_POLL_MAX};
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
 use crate::prompt_registry::{
     ci_failure_remediation_template, merge_main_conflict_resolution_template, pr_creation_template,
@@ -28,9 +27,10 @@ use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
+use std::cell::RefCell;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WorkerLogEvent {
@@ -107,6 +107,27 @@ struct ReviewArtifact {
 }
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
+pub const MAX_MERGE_REMEDIATION: u32 = 3;
+pub const MERGEABILITY_POLL_MAX: u32 = 12;
+pub const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+type WorkerStateSink = Box<dyn Fn(&str, &str, &str)>;
+
+thread_local! {
+    static STATE_SINK: RefCell<Option<WorkerStateSink>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn install_state_sink(sink: WorkerStateSink) {
+    STATE_SINK.with(|cell| {
+        *cell.borrow_mut() = Some(sink);
+    });
+}
+
+pub(crate) fn clear_state_sink() {
+    STATE_SINK.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerStreamEvent {
@@ -115,7 +136,7 @@ pub(crate) enum WorkerStreamEvent {
         command: String,
     },
     StateChanged {
-        task_id: String,
+        _task_id: String,
         state: String,
         details: String,
     },
@@ -298,13 +319,19 @@ fn emit_worker_activity_state_with(
         }
     }
     let details_str = worker_state_details(state.as_str(), Some(&details));
+    let sink_details = details_str.clone();
     if let Some(on_event) = on_event {
         on_event(WorkerStreamEvent::StateChanged {
-            task_id: task_id.to_string(),
+            _task_id: task_id.to_string(),
             state: state.as_str().to_string(),
             details: details_str,
         });
     }
+    STATE_SINK.with(|cell| {
+        if let Some(sink) = cell.borrow().as_ref() {
+            sink(state.as_str(), task_id, &sink_details);
+        }
+    });
     append_run_log("info", "worker.activity.state_changed", payload);
 }
 
@@ -1151,36 +1178,75 @@ pub(crate) fn execute_merge_phase(
         match (&status.mergeable, &status.merge_state_status) {
             // Clean + Mergeable → attempt merge
             (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => {
-                if let Err(err) = run_repo_validation_with_quality_guard(
-                    &repo_root_git,
-                    runtime_file_system,
-                    runtime_clock,
-                    cfg,
-                    scope,
-                ) {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    append_run_log(
-                        "error",
-                        "worker.merging.pre_validation_failed",
-                        json!({
-                            "worker_id": worker_id,
-                            "task_id": task_id,
-                            "error": err.to_string()
-                        }),
-                    );
-                    return Ok(WorkerRunSummary {
-                        worker_id: req.worker_id.clone(),
-                        session_id: req.session_id.clone(),
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason: Some(format!("pre-merge validation failed: {err}")),
-                    });
+                let skip_pre_validation = match gh.required_checks_green(pr) {
+                    Ok(true) => {
+                        append_run_log(
+                            "info",
+                            "worker.merging.pre_validation.skipped",
+                            json!({
+                                "worker_id": worker_id,
+                                "pr_number": pr,
+                                "reason": "mergeable_clean_and_required_checks_green"
+                            }),
+                        );
+                        true
+                    }
+                    Ok(false) => {
+                        append_run_log(
+                            "debug",
+                            "worker.merging.pre_validation.required_checks_not_green",
+                            json!({
+                                "worker_id": worker_id,
+                                "pr_number": pr
+                            }),
+                        );
+                        false
+                    }
+                    Err(err) => {
+                        append_run_log(
+                            "warn",
+                            "worker.merging.pre_validation.gate_check_failed",
+                            json!({
+                                "worker_id": worker_id,
+                                "pr_number": pr,
+                                "error": err.to_string()
+                            }),
+                        );
+                        false
+                    }
+                };
+                if !skip_pre_validation {
+                    if let Err(err) = run_repo_validation_with_quality_guard(
+                        &repo_root_git,
+                        runtime_file_system,
+                        runtime_clock,
+                        cfg,
+                        scope,
+                    ) {
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Failed,
+                            on_event,
+                        );
+                        append_run_log(
+                            "error",
+                            "worker.merging.pre_validation_failed",
+                            json!({
+                                "worker_id": worker_id,
+                                "task_id": task_id,
+                                "error": err.to_string()
+                            }),
+                        );
+                        return Ok(WorkerRunSummary {
+                            worker_id: req.worker_id.clone(),
+                            session_id: req.session_id.clone(),
+                            final_state: WorkerState::Failed,
+                            logs,
+                            teardown: None,
+                            failure_reason: Some(format!("pre-merge validation failed: {err}")),
+                        });
+                    }
                 }
                 match gh.merge_pr(pr) {
                     Ok(()) => {

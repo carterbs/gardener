@@ -2,10 +2,18 @@
 
 This runbook documents manual backlog actions for agents.
 
+## Backlog path split: manual vs runtime artifacts
+
+Manual backlog operations and runtime cache artifacts intentionally use different files:
+
+- Manual CLI/manual task operations: `~/.gardener/backlog.sqlite` (or `GARDENER_DB_PATH`), including `scripts/backlog-db.sh`.
+- Runtime startup and worker artifacts: `{repo_root|working_dir}/.cache/gardener/backlog.sqlite`.
+- You can override runtime DB path with `GARDENER_RUNTIME_DB_PATH` and query a custom manual DB with `--db` / `GARDENER_DB_PATH`.
+
 ## Prerequisites
 
 - Run commands from the repository root.
-- For database operations, use the backlog database for the repo under
+- For manual database operations, use the backlog database under
   `~/.gardener/backlog.sqlite` by default.
 - Confirm `GARDENER_DB_PATH` if you need to target a different database.
 

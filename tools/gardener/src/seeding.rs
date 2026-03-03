@@ -1,9 +1,7 @@
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{
-    seeding_prompt_template, SEEDING_ACTION_CONTRACT_DRY_RUN, SEEDING_ACTION_CONTRACT_WRITE,
-};
+use crate::prompt_registry::{seeding_prompt_template, SEEDING_ACTION_CONTRACT_WRITE};
 use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
@@ -57,11 +55,32 @@ pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
 }
 
 fn build_seed_dry_run_prompt_v1(context: &SeedPromptContext) -> String {
-    render_seed_prompt_template(
-        seeding_prompt_template().body,
-        context,
-        SEEDING_ACTION_CONTRACT_DRY_RUN,
-    )
+    let mut quality_risks = context.quality_risks.clone();
+    if quality_risks.is_empty() {
+        quality_risks.push_str(
+            "No parseable coverage rows found in quality report; infer risk from repository signals.",
+        );
+    }
+
+    let mut out = String::new();
+    out.push_str("You are the Gardener backlog seeding worker.\n");
+    out.push_str("Goal: research the repository and recommend 10 actionable backlog tasks.\n");
+    out.push_str("Do not write to the backlog database.\n");
+    out.push_str("Do not implement code changes.\n");
+    out.push_str("Return a JSON envelope that matches the task schema.\n\n");
+
+    out.push_str("Quality risks extracted from report\n");
+    out.push_str(&quality_risks);
+    out.push('\n');
+
+    out.push_str("\nExisting active backlog snapshot\n");
+    out.push_str(&context.existing_backlog);
+    out.push('\n');
+
+    out.push_str("\nQuality doc\n");
+    out.push_str(&context.quality_doc);
+
+    out
 }
 
 fn render_seed_prompt_template(
@@ -630,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn build_seed_dry_run_prompt_uses_json_contract() {
+    fn build_seed_dry_run_prompt_contract() {
         let profile = sample_profile();
         let prompt = build_seed_dry_run_prompt(
             &profile,
@@ -643,7 +662,7 @@ mod tests {
             "No active backlog tasks.",
         );
 
-        assert!(prompt.contains("Return either:"));
-        assert!(prompt.contains("tasks"));
+        assert!(prompt.contains("Do not write to the backlog database."));
+        assert!(prompt.contains("Return a JSON envelope that matches the task schema."));
     }
 }

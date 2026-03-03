@@ -51,6 +51,52 @@ assert_file_not_contains() {
   fi
 }
 
+run_expect_exit_capture() {
+  local expected_exit=$1
+  local output=$2
+  shift 2
+
+  set +e
+  "$@" >"$output" 2>&1
+  local status=$?
+  set -e
+
+  if [[ $status -ne $expected_exit ]]; then
+    echo "command failed expectation" >&2
+    echo "expected exit code: $expected_exit" >&2
+    echo "actual exit code: $status" >&2
+    echo "command: $*" >&2
+    echo "output:" >&2
+    cat "$output" >&2
+    return 1
+  fi
+}
+
+create_backlog_db() {
+  local db_path=$1
+
+  sqlite3 "$db_path" <<'SQL'
+CREATE TABLE backlog_tasks (
+    task_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    details TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    priority TEXT NOT NULL CHECK(priority IN ('P0', 'P1', 'P2')),
+    status TEXT NOT NULL CHECK(status IN ('ready', 'leased', 'in_progress', 'merge_pending', 'complete', 'failed', 'unresolved')),
+    last_updated INTEGER NOT NULL,
+    lease_owner TEXT,
+    lease_expires_at INTEGER,
+    source TEXT NOT NULL,
+    related_pr INTEGER,
+    related_branch TEXT,
+    rationale TEXT NOT NULL DEFAULT '',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+SQL
+}
+
 # check-skills-sync fixtures
 run_expect_exit 0 env \
   GARDENER_REPO_ROOT="$SCRIPT_DIR/fixtures/check-skills-sync/passing" \
@@ -76,6 +122,39 @@ run_expect_exit 1 env \
   GARDENER_MIGRATIONS_DIR="$SCRIPT_DIR/fixtures/check-migrations-wired/missing-migration/migrations" \
   GARDENER_MIGRATIONS_STORE_FILE="$SCRIPT_DIR/fixtures/check-migrations-wired/missing-migration/src/backlog_store.rs" \
   "$SCRIPT_DIR/check-migrations-wired.sh"
+
+# check-binary-blobs fixtures
+run_expect_exit 0 "$SCRIPT_DIR/check-binary-blobs.sh" \
+  "$SCRIPT_DIR/fixtures/check-binary-blobs/passing/runtime-note.txt"
+
+binary_blob_dir="$(mktemp -d)"
+blocked_profraw="$binary_blob_dir/default_1234567890_0_00000.profraw"
+blocked_startup_diag_dir="$binary_blob_dir/startup-diagnostics"
+blocked_startup_diag="$blocked_startup_diag_dir/runtime-startup.md"
+
+printf "runtime profile data\n" > "$blocked_profraw"
+mkdir -p "$blocked_startup_diag_dir"
+printf "# Runtime startup diagnostics\n" > "$blocked_startup_diag"
+
+binary_blob_output="$(mktemp)"
+set +e
+"$SCRIPT_DIR/check-binary-blobs.sh" \
+  "$blocked_profraw" \
+  "$blocked_startup_diag" \
+  >"$binary_blob_output" 2>&1
+status=$?
+set -e
+if [[ $status -ne 1 ]]; then
+  echo "expected check-binary-blobs to reject generated runtime artifacts" >&2
+  sed -n '1,120p' "$binary_blob_output" >&2
+  rm -f "$binary_blob_output"
+  rm -rf "$binary_blob_dir"
+  exit 1
+fi
+assert_file_contains "$binary_blob_output" "default_1234567890_0_00000.profraw"
+assert_file_contains "$binary_blob_output" "runtime-startup.md"
+rm -f "$binary_blob_output"
+rm -rf "$binary_blob_dir"
 
 # startup-diagnostics fixtures
 start_diag_output_1="$(mktemp)"
@@ -149,5 +228,42 @@ else
 fi
 assert_file_contains "$doc_gardening_output" "Doc-gardening summary:"
 rm -f "$doc_gardening_output"
+
+tmp_backlog_dir="$(mktemp -d)"
+backlog_db="$tmp_backlog_dir/backlog.sqlite"
+missing_backlog_db="$tmp_backlog_dir/missing.sqlite"
+create_backlog_db "$backlog_db"
+
+backlog_output="$(mktemp)"
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" list --db "$missing_backlog_db"
+assert_file_contains "$backlog_output" "database file not found"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --db "$missing_backlog_db"
+assert_file_contains "$backlog_output" "database file not found"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --priority "P3" --details "details" --db "$backlog_db"
+assert_file_contains "$backlog_output" "invalid --priority"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --status "stale" --db "$backlog_db"
+assert_file_contains "$backlog_output" "invalid --status"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --details "details" --kind "Feature" --db "$backlog_db"
+assert_file_contains "$backlog_output" "invalid --kind"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --details "details" --db "$backlog_db"
+assert_file_contains "$backlog_output" "--title and --details are required for add"
+
+run_expect_exit_capture 1 "$backlog_output" \
+  "$SCRIPT_DIR/backlog-db.sh" add --title "Manual task" --db "$backlog_db"
+assert_file_contains "$backlog_output" "--title and --details are required for add"
+
+rm -f "$backlog_output"
+rm -rf "$tmp_backlog_dir"
 
 echo "Script lint fixture tests completed successfully."

@@ -42,6 +42,7 @@ fn handoff_evidence_bundle_path(
         .join(format!("{}-{}.json", worktree_slug_for_task(task_id), run_id))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn collect_handoff_evidence_bundle(
     scope: &RuntimeScope,
     task_id: &str,

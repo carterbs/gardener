@@ -657,8 +657,10 @@ pub(crate) fn execute_merge_phase(
             log_path: &fa_log_path,
         };
         match crate::friction_analysis::run_friction_analysis(&fa_input, cfg, process_runner, scope) {
-            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed { findings })
-                if !findings.is_empty() =>
+            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed {
+                findings,
+                smooth_run,
+            }) if !findings.is_empty() =>
             {
                 let db_path = crate::startup::backlog_db_path(cfg, scope);
                 if let Ok(store) = crate::backlog_store::BacklogStore::open(db_path) {
@@ -684,18 +686,21 @@ pub(crate) fn execute_merge_phase(
                     );
                 }
             }
+            Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed {
+                findings: _,
+                smooth_run: _,
+            }) => {
+                append_run_log(
+                    "debug",
+                    "friction_analysis.smooth_run",
+                    serde_json::json!({ "worker_id": worker_id }),
+                );
+            }
             Ok(crate::friction_analysis::FrictionAnalysisOutcome::Skipped { reason }) => {
                 append_run_log(
                     "debug",
                     "friction_analysis.skipped",
                     serde_json::json!({ "worker_id": worker_id, "reason": reason }),
-                );
-            }
-            Ok(_) => {
-                append_run_log(
-                    "debug",
-                    "friction_analysis.smooth_run",
-                    serde_json::json!({ "worker_id": worker_id }),
                 );
             }
             Err(e) => {

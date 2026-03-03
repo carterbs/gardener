@@ -589,31 +589,47 @@ impl<'a> GitClient<'a> {
         }
         let merge = self.run(["git", "merge", "--ff-only", "origin/main"])?;
         if merge.exit_code != 0 {
-            let merge_error = format!("{}\n{}", merge.stdout, merge.stderr);
-            if is_non_fast_forward_merge(&merge_error) {
+            if is_non_fast_forward_pull(&merge.stderr) {
                 append_run_log(
                     "warn",
-                    "git.pull_main.non_fast_forward",
+                    "git.pull_main.ff_only_merge_rejected",
                     json!({
                         "cwd": self.cwd.display().to_string(),
                         "stderr": merge.stderr
                     }),
                 );
-                let reset = self.run(["git", "checkout", "-B", "main", "origin/main"])?;
+                append_run_log(
+                    "info",
+                    "git.pull_main.reset_recovery.started",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "target": "origin/main"
+                    }),
+                );
+                let reset = self.run(["git", "reset", "--hard", "origin/main"])?;
                 if reset.exit_code != 0 {
                     append_run_log(
                         "error",
-                        "git.pull_main.reset_failed",
+                        "git.pull_main.reset_recovery.failed",
                         json!({
                             "cwd": self.cwd.display().to_string(),
+                            "exit_code": reset.exit_code,
                             "stderr": reset.stderr
                         }),
                     );
                     return Err(GardenerError::Process(format!(
-                        "failed to recover main sync after non-fast-forward: {}",
+                        "git reset --hard origin/main failed: {}",
                         reset.stderr
                     )));
                 }
+                append_run_log(
+                    "info",
+                    "git.pull_main.reset_recovery.succeeded",
+                    json!({
+                        "cwd": self.cwd.display().to_string(),
+                        "target": "origin/main"
+                    }),
+                );
             } else {
                 append_run_log(
                     "warn",
@@ -766,18 +782,16 @@ fn is_merge_conflict(stderr: &str) -> bool {
     lower.contains("conflict") || lower.contains("unmerged files")
 }
 
-fn is_non_fast_forward_merge(stderr: &str) -> bool {
-    let lower = stderr.to_lowercase();
-    lower.contains("not possible to fast-forward")
-        || lower.contains("not a fast-forward")
-        || lower.contains("could not fast-forward")
-}
-
 fn is_non_fast_forward_push(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("non-fast-forward")
         || lower.contains("tip of your current branch is behind")
         || lower.contains("failed to push some refs")
+}
+
+fn is_non_fast_forward_pull(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("not possible to fast-forward") || lower.contains("not a fast-forward")
 }
 
 #[cfg(test)]
@@ -1227,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_main_divergence_recovers_with_checkout_reset() {
+    fn pull_main_recovers_from_diverged_main_with_hard_reset() {
         let runner = FakeProcessRunner::default();
         // git config --bool --get core.bare
         runner.push_response(Ok(ProcessOutput {
@@ -1253,7 +1267,7 @@ mod tests {
             stdout: String::new(),
             stderr: "fatal: Not possible to fast-forward, aborting.\n".to_string(),
         }));
-        // git checkout -B main origin/main
+        // git reset --hard origin/main
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: String::new(),
@@ -1263,17 +1277,20 @@ mod tests {
         GitClient::new(&runner, "/repo")
             .pull_main()
             .expect("pull_main should recover from divergence");
+
         let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec!["config", "--bool", "--get", "core.bare"]
+        );
+        assert_eq!(spawned[1].args, vec!["rev-parse", "--is-bare-repository"]);
         assert_eq!(spawned[2].args, vec!["fetch", "origin", "main"]);
         assert_eq!(spawned[3].args, vec!["merge", "--ff-only", "origin/main"]);
-        assert_eq!(
-            spawned[4].args,
-            vec!["checkout", "-B", "main", "origin/main"]
-        );
+        assert_eq!(spawned[4].args, vec!["reset", "--hard", "origin/main"]);
     }
 
     #[test]
-    fn pull_main_bails_on_unrecoverable_merge_error() {
+    fn pull_main_errors_on_non_ff_merge_error() {
         let runner = FakeProcessRunner::default();
         // git config --bool --get core.bare
         runner.push_response(Ok(ProcessOutput {
@@ -1297,17 +1314,25 @@ mod tests {
         runner.push_response(Ok(ProcessOutput {
             exit_code: 1,
             stdout: String::new(),
-            stderr: "fatal: invalid object name something\n".to_string(),
+            stderr: "fatal: refusing to merge unrelated histories".to_string(),
         }));
 
         let err = GitClient::new(&runner, "/repo")
             .pull_main()
-            .expect_err("non-recoverable merge failure should not be swallowed");
+            .expect_err("should fail non-recoverable merge errors");
+
         assert!(err
             .to_string()
             .contains("git merge --ff-only origin/main failed"));
         let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec!["config", "--bool", "--get", "core.bare"]
+        );
+        assert_eq!(spawned[1].args, vec!["rev-parse", "--is-bare-repository"]);
+        assert_eq!(spawned[2].args, vec!["fetch", "origin", "main"]);
         assert_eq!(spawned[3].args, vec!["merge", "--ff-only", "origin/main"]);
+        assert_eq!(spawned.len(), 4);
     }
 
     #[test]

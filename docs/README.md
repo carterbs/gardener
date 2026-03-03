@@ -11,6 +11,7 @@ This directory is the canonical index for agent-oriented repository navigation. 
 ## Second: execution and workflow
 
 - [Workflow conventions](./conventions/workflow.md)
+- [Recurring doc-gardening maintenance](../scripts/doc-gardening.sh)
 - [Repository reference essay](./references/codex-agent-team-article.md)
 - [Triage and worktree workflow docs](./conventions/workflow.md)
 - [OTEL JSONL runtime failure triage cookbook](./runtime-failure-otel-jsonl-cookbook.md)

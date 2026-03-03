@@ -2,7 +2,7 @@ use crate::errors::GardenerError;
 use crate::hotkeys::{dashboard_controls_legend, report_controls_legend};
 use crate::logging::{current_run_id, current_run_log_path};
 use crate::seed_runner::SeedTask;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -1721,6 +1721,27 @@ pub fn render_seeding(activity: &[String], width: u16, height: u16) -> String {
     out
 }
 
+pub fn render_seed_review(task: &SeedTask, index: usize, total: usize, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
+    terminal
+        .draw(|frame| draw_seed_review_frame(frame, task, index, total))
+        .unwrap_or_else(|err| panic!("draw: {err}"));
+
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn draw_seed_review_frame(
     frame: &mut ratatui::Frame<'_>,
     task: &SeedTask,
@@ -1850,42 +1871,30 @@ pub fn run_seed_review_wizard(tasks: &[SeedTask]) -> Result<Vec<bool>, GardenerE
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
 
-    let total = tasks.len();
-    let mut kept = vec![false; total];
-    let mut current = 0usize;
+    let mut state = SeedReviewState::new(tasks.len());
 
     loop {
-        if current >= total {
+        if state.current >= state.total {
             break;
         }
         terminal
-            .draw(|frame| draw_seed_review_frame(frame, &tasks[current], current, total))
+            .draw(|frame| {
+                draw_seed_review_frame(frame, &tasks[state.current], state.current, state.total)
+            })
             .map_err(|e| GardenerError::Io(e.to_string()))?;
 
         if let Event::Key(key) = event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
-            match key.code {
-                KeyCode::Char('k') | KeyCode::Char('K') => {
-                    kept[current] = true;
-                    current += 1;
-                }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
-                    kept[current] = false;
-                    current += 1;
-                }
-                KeyCode::Char('q') | KeyCode::Char('Q') => {
-                    // Discard all remaining
-                    break;
-                }
-                KeyCode::Esc => {
-                    break;
-                }
-                _ => {}
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if state.handle_key(key.code) == ReviewAction::Finish {
+                break;
             }
         }
     }
 
     teardown_terminal(terminal)?;
-    Ok(kept)
+    Ok(state.kept)
 }
 
 pub fn draw_triage_live(activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
@@ -2296,6 +2305,135 @@ pub struct RepoHealthWizardAnswers {
     pub additional_context: String,
 }
 
+/// Return value from wizard key handling: what the loop should do next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WizardAction {
+    Continue,
+    Finish,
+}
+
+/// Mutable wizard state extracted for testability.
+#[derive(Debug, Clone)]
+struct WizardState {
+    step: usize,
+    parallelism_input: String,
+    validation: String,
+    docs_accessible: bool,
+    backlog_approval: bool,
+    notes: String,
+}
+
+impl WizardState {
+    fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> WizardAction {
+        if code == KeyCode::Esc {
+            return WizardAction::Finish;
+        }
+        match self.step {
+            0 => match code {
+                KeyCode::Enter => self.step = 1,
+                KeyCode::Backspace => {
+                    self.parallelism_input.pop();
+                }
+                KeyCode::Char(c)
+                    if !modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_digit() =>
+                {
+                    self.parallelism_input.push(c)
+                }
+                _ => {}
+            },
+            1 => match code {
+                KeyCode::Enter => self.step = 2,
+                KeyCode::Backspace => {
+                    self.validation.pop();
+                }
+                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.validation.push(c)
+                }
+                _ => {}
+            },
+            2 => match code {
+                KeyCode::Enter => self.step = 3,
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.docs_accessible = true,
+                KeyCode::Char('n') | KeyCode::Char('N') => self.docs_accessible = false,
+                _ => {}
+            },
+            3 => match code {
+                KeyCode::Enter => self.step = 4,
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    self.backlog_approval = false;
+                    self.step = 4;
+                }
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    self.backlog_approval = true;
+                    self.step = 4;
+                }
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                    self.backlog_approval = !self.backlog_approval
+                }
+                _ => {}
+            },
+            _ => match code {
+                KeyCode::Enter => return WizardAction::Finish,
+                KeyCode::Backspace => {
+                    self.notes.pop();
+                }
+                KeyCode::Char(c) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.notes.push(c)
+                }
+                _ => {}
+            },
+        }
+        WizardAction::Continue
+    }
+}
+
+/// Return value from seed review key handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewAction {
+    Continue,
+    Finish,
+}
+
+/// Mutable seed review state extracted for testability.
+#[derive(Debug, Clone)]
+struct SeedReviewState {
+    current: usize,
+    total: usize,
+    kept: Vec<bool>,
+}
+
+impl SeedReviewState {
+    fn new(total: usize) -> Self {
+        Self {
+            current: 0,
+            total,
+            kept: vec![false; total],
+        }
+    }
+
+    fn handle_key(&mut self, code: KeyCode) -> ReviewAction {
+        match code {
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                self.kept[self.current] = true;
+                self.current += 1;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.kept[self.current] = false;
+                self.current += 1;
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                return ReviewAction::Finish;
+            }
+            _ => {}
+        }
+        if self.current >= self.total {
+            ReviewAction::Finish
+        } else {
+            ReviewAction::Continue
+        }
+    }
+}
+
 pub fn run_repo_health_wizard(
     default_validation_command: &str,
 ) -> Result<RepoHealthWizardAnswers, GardenerError> {
@@ -2306,14 +2444,22 @@ pub fn run_repo_health_wizard(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
 
-    let mut step = 0usize;
-    let mut parallelism_input = "3".to_string();
-    let mut validation = default_validation_command.to_string();
-    let mut docs_accessible = true;
-    let mut backlog_approval = true;
-    let mut notes = String::new();
+    let mut ws = WizardState {
+        step: 0,
+        parallelism_input: "3".to_string(),
+        validation: default_validation_command.to_string(),
+        docs_accessible: true,
+        backlog_approval: true,
+        notes: String::new(),
+    };
 
     loop {
+        let step = ws.step;
+        let parallelism_input = &ws.parallelism_input;
+        let validation = &ws.validation;
+        let docs_accessible = ws.docs_accessible;
+        let backlog_approval = ws.backlog_approval;
+        let notes = &ws.notes;
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -2374,8 +2520,8 @@ pub fn run_repo_health_wizard(
                     ),
                     3 => (
                         "Backlog seeding",
-                        "Gardener seeds a backlog of tasks that make your repo more hospitable to coding agents. Review each task before it's added, or auto-seed?",
-                        format!("> {}", if backlog_approval { "review tasks" } else { "auto-seed" }),
+                        "Gardener seeds a backlog of tasks that make your repo more hospitable to coding agents.",
+                        String::new(), // options rendered separately below
                     ),
                     _ => (
                         "Additional constraints (optional)",
@@ -2383,7 +2529,12 @@ pub fn run_repo_health_wizard(
                         format!("> {}█", notes),
                     ),
                 };
-                let body = Paragraph::new(vec![
+                let selected_style = Style::default()
+                    .fg(Color::Rgb(85, 198, 255))
+                    .add_modifier(Modifier::BOLD);
+                let unselected_style = Style::default()
+                    .fg(Color::DarkGray);
+                let mut body_lines = vec![
                     Line::from(Span::styled(
                         label,
                         Style::default()
@@ -2396,11 +2547,36 @@ pub fn run_repo_health_wizard(
                         Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
                     )),
                     Line::from(""),
-                    Line::from(Span::styled(
+                ];
+                if step == 3 {
+                    let (review_dot, review_style) = if backlog_approval {
+                        ("● ", selected_style)
+                    } else {
+                        ("○ ", unselected_style)
+                    };
+                    let (auto_dot, auto_style) = if !backlog_approval {
+                        ("● ", selected_style)
+                    } else {
+                        ("○ ", unselected_style)
+                    };
+                    body_lines.push(Line::from(vec![
+                        Span::styled(review_dot, review_style),
+                        Span::styled("review tasks", review_style),
+                        Span::styled("  (r)", Style::default().fg(Color::DarkGray)),
+                    ]));
+                    body_lines.push(Line::from(""));
+                    body_lines.push(Line::from(vec![
+                        Span::styled(auto_dot, auto_style),
+                        Span::styled("auto-seed", auto_style),
+                        Span::styled("  (a)", Style::default().fg(Color::DarkGray)),
+                    ]));
+                } else {
+                    body_lines.push(Line::from(Span::styled(
                         value,
                         Style::default().fg(Color::Rgb(85, 198, 255)),
-                    )),
-                ])
+                    )));
+                }
+                let body = Paragraph::new(body_lines)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
@@ -2433,61 +2609,18 @@ pub fn run_repo_health_wizard(
             .map_err(|e| GardenerError::Io(e.to_string()))?;
 
         if let Event::Key(key) = event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
-            if key.code == KeyCode::Esc {
-                break;
+            if key.kind != KeyEventKind::Press {
+                continue;
             }
-            match step {
-                0 => match key.code {
-                    KeyCode::Enter => step = 1,
-                    KeyCode::Backspace => {
-                        parallelism_input.pop();
-                    }
-                    KeyCode::Char(c)
-                        if !key.modifiers.contains(KeyModifiers::CONTROL) && c.is_ascii_digit() =>
-                    {
-                        parallelism_input.push(c)
-                    }
-                    _ => {}
-                },
-                1 => match key.code {
-                    KeyCode::Enter => step = 2,
-                    KeyCode::Backspace => {
-                        validation.pop();
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        validation.push(c)
-                    }
-                    _ => {}
-                },
-                2 => match key.code {
-                    KeyCode::Enter => step = 3,
-                    KeyCode::Char('y') | KeyCode::Char('Y') => docs_accessible = true,
-                    KeyCode::Char('n') | KeyCode::Char('N') => docs_accessible = false,
-                    _ => {}
-                },
-                3 => match key.code {
-                    KeyCode::Enter => step = 4,
-                    KeyCode::Char('a') | KeyCode::Char('A') => backlog_approval = false,
-                    KeyCode::Char('r') | KeyCode::Char('R') => backlog_approval = true,
-                    _ => {}
-                },
-                _ => match key.code {
-                    KeyCode::Enter => break,
-                    KeyCode::Backspace => {
-                        notes.pop();
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        notes.push(c)
-                    }
-                    _ => {}
-                },
+            if ws.handle_key(key.code, key.modifiers) == WizardAction::Finish {
+                break;
             }
         }
     }
 
     teardown_terminal(terminal)?;
 
-    let preferred_parallelism = parallelism_input
+    let preferred_parallelism = ws.parallelism_input
         .trim()
         .parse::<u32>()
         .ok()
@@ -2496,14 +2629,14 @@ pub fn run_repo_health_wizard(
 
     Ok(RepoHealthWizardAnswers {
         preferred_parallelism,
-        validation_command: if validation.trim().is_empty() {
+        validation_command: if ws.validation.trim().is_empty() {
             default_validation_command.to_string()
         } else {
-            validation
+            ws.validation
         },
-        external_docs_accessible: docs_accessible,
-        backlog_approval,
-        additional_context: notes,
+        external_docs_accessible: ws.docs_accessible,
+        backlog_approval: ws.backlog_approval,
+        additional_context: ws.notes,
     })
 }
 
@@ -3206,5 +3339,309 @@ mod tests {
         let reset = render_dashboard(&workers, &stats, &backlog, 80, 24);
         assert!(reset.contains("> Worker 1"));
         assert!(!scroll_workers_up());
+    }
+
+    #[test]
+    fn wizard_step_labels_has_five_steps_with_backlog() {
+        assert_eq!(super::WIZARD_STEP_LABELS.len(), 5);
+        assert_eq!(super::WIZARD_STEP_LABELS[3], "Backlog");
+        assert_eq!(
+            super::WIZARD_STEP_LABELS,
+            ["Parallelism", "Validation", "Docs", "Backlog", "Notes"]
+        );
+    }
+
+    #[test]
+    fn wizard_step_indicator_highlights_backlog_at_step_3() {
+        let line = super::wizard_step_indicator(3);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("Backlog"), "step indicator should show Backlog");
+        assert!(text.contains("Parallelism"));
+        assert!(text.contains("Notes"));
+    }
+
+    #[test]
+    fn wizard_answers_includes_backlog_approval() {
+        let answers = super::RepoHealthWizardAnswers {
+            preferred_parallelism: 3,
+            validation_command: "cargo test".to_string(),
+            external_docs_accessible: true,
+            backlog_approval: true,
+            additional_context: String::new(),
+        };
+        assert!(answers.backlog_approval);
+
+        let auto = super::RepoHealthWizardAnswers {
+            backlog_approval: false,
+            ..answers
+        };
+        assert!(!auto.backlog_approval);
+    }
+
+    #[test]
+    fn seeding_screen_renders_header_and_activity() {
+        let activity = vec![
+            "Exploring repository structure".to_string(),
+            "Analyzing code quality signals".to_string(),
+        ];
+        let frame = super::render_seeding(&activity, 80, 20);
+        assert!(
+            frame.contains("seeding your backlog"),
+            "should show seeding header"
+        );
+        assert!(
+            frame.contains("Exploring repository"),
+            "should show activity lines"
+        );
+        assert!(
+            frame.contains("Analyzing code quality"),
+            "should show all activity"
+        );
+    }
+
+    #[test]
+    fn seeding_screen_renders_empty_activity() {
+        let frame = super::render_seeding(&[], 80, 20);
+        assert!(frame.contains("seeding your backlog"));
+    }
+
+    #[test]
+    fn seed_review_renders_task_card_with_all_fields() {
+        use crate::seed_runner::SeedTask;
+        let task = SeedTask {
+            title: "Add AGENTS.md configuration".to_string(),
+            details: "Create an AGENTS.md file with repo conventions".to_string(),
+            rationale: "Helps agents understand repo norms faster".to_string(),
+            domain: "agent_steering".to_string(),
+            priority: "P0".to_string(),
+        };
+        let frame = super::render_seed_review(&task, 0, 5, 100, 25);
+        assert!(
+            frame.contains("review backlog"),
+            "header should show review backlog"
+        );
+        assert!(frame.contains("(1/5)"), "should show 1-indexed counter");
+        assert!(
+            frame.contains("Add AGENTS.md"),
+            "should show task title"
+        );
+        assert!(
+            frame.contains("Helps agents understand"),
+            "should show rationale"
+        );
+        assert!(frame.contains("P0"), "should show priority badge");
+        assert!(
+            frame.contains("[k] Keep"),
+            "should show keep hotkey"
+        );
+        assert!(
+            frame.contains("[d] Discard"),
+            "should show discard hotkey"
+        );
+        assert!(
+            frame.contains("[q]"),
+            "should show quit hotkey"
+        );
+    }
+
+    #[test]
+    fn seed_review_renders_different_priorities() {
+        use crate::seed_runner::SeedTask;
+        for priority in &["P0", "P1", "P2"] {
+            let task = SeedTask {
+                title: "Task".to_string(),
+                details: "Details".to_string(),
+                rationale: "Rationale".to_string(),
+                domain: "testing".to_string(),
+                priority: priority.to_string(),
+            };
+            let frame = super::render_seed_review(&task, 2, 10, 80, 20);
+            assert!(frame.contains("(3/10)"), "counter should be 1-indexed");
+            assert!(frame.contains(priority), "should show {priority}");
+        }
+    }
+
+    // --- WizardState key handling tests ---
+
+    use super::{WizardAction, WizardState};
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn wizard_at_step(step: usize) -> WizardState {
+        WizardState {
+            step,
+            parallelism_input: "3".to_string(),
+            validation: "cargo test".to_string(),
+            docs_accessible: true,
+            backlog_approval: true,
+            notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn wizard_backlog_a_key_selects_auto_seed_and_advances() {
+        let mut ws = wizard_at_step(3);
+        assert!(ws.backlog_approval); // default: review
+        ws.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(!ws.backlog_approval, "'a' should select auto-seed");
+        assert_eq!(ws.step, 4, "'a' should advance to Notes");
+    }
+
+    #[test]
+    fn wizard_backlog_r_key_selects_review_and_advances() {
+        let mut ws = wizard_at_step(3);
+        ws.backlog_approval = false; // start at auto-seed
+        ws.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(ws.backlog_approval, "'r' should select review");
+        assert_eq!(ws.step, 4, "'r' should advance to Notes");
+    }
+
+    #[test]
+    fn wizard_backlog_uppercase_keys_select_and_advance() {
+        let mut ws = wizard_at_step(3);
+        ws.handle_key(KeyCode::Char('A'), KeyModifiers::NONE);
+        assert!(!ws.backlog_approval, "'A' should select auto-seed");
+        assert_eq!(ws.step, 4, "'A' should advance to Notes");
+    }
+
+    #[test]
+    fn wizard_backlog_arrow_keys_toggle() {
+        let mut ws = wizard_at_step(3);
+        assert!(ws.backlog_approval);
+        ws.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert!(!ws.backlog_approval, "Down should toggle to auto-seed");
+        ws.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        assert!(ws.backlog_approval, "Up should toggle back to review");
+    }
+
+    #[test]
+    fn wizard_backlog_tab_toggles() {
+        let mut ws = wizard_at_step(3);
+        assert!(ws.backlog_approval);
+        ws.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(!ws.backlog_approval, "Tab should toggle to auto-seed");
+        ws.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(ws.backlog_approval, "Tab should toggle back to review");
+    }
+
+    #[test]
+    fn wizard_backlog_enter_advances_to_notes() {
+        let mut ws = wizard_at_step(3);
+        let action = ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(action, WizardAction::Continue);
+        assert_eq!(ws.step, 4, "Enter should advance to step 4 (Notes)");
+    }
+
+    #[test]
+    fn wizard_backlog_tab_then_enter_preserves_selection() {
+        let mut ws = wizard_at_step(3);
+        ws.handle_key(KeyCode::Tab, KeyModifiers::NONE); // toggle to auto-seed
+        assert!(!ws.backlog_approval);
+        assert_eq!(ws.step, 3, "Tab should not advance");
+        ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ws.step, 4);
+        assert!(!ws.backlog_approval, "auto-seed selection should persist after Enter");
+    }
+
+    #[test]
+    fn wizard_esc_finishes_at_any_step() {
+        for step in 0..5 {
+            let mut ws = wizard_at_step(step);
+            let action = ws.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+            assert_eq!(action, WizardAction::Finish, "Esc at step {step} should finish");
+        }
+    }
+
+    #[test]
+    fn wizard_step_progression_through_all_steps() {
+        let mut ws = wizard_at_step(0);
+        ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ws.step, 1);
+        ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ws.step, 2);
+        ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ws.step, 3);
+        ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(ws.step, 4);
+        let action = ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(action, WizardAction::Finish, "Enter on Notes should finish");
+    }
+
+    #[test]
+    fn wizard_unrelated_keys_on_backlog_step_ignored() {
+        let mut ws = wizard_at_step(3);
+        ws.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(ws.backlog_approval, "unrelated key should not change selection");
+        assert_eq!(ws.step, 3, "unrelated key should not change step");
+    }
+
+    // --- SeedReviewState key handling tests ---
+
+    use super::{ReviewAction, SeedReviewState};
+
+    #[test]
+    fn review_keep_marks_task_and_advances() {
+        let mut state = SeedReviewState::new(3);
+        let action = state.handle_key(KeyCode::Char('k'));
+        assert_eq!(action, ReviewAction::Continue);
+        assert!(state.kept[0], "first task should be kept");
+        assert_eq!(state.current, 1);
+    }
+
+    #[test]
+    fn review_discard_skips_task_and_advances() {
+        let mut state = SeedReviewState::new(3);
+        let action = state.handle_key(KeyCode::Char('d'));
+        assert_eq!(action, ReviewAction::Continue);
+        assert!(!state.kept[0], "first task should be discarded");
+        assert_eq!(state.current, 1);
+    }
+
+    #[test]
+    fn review_quit_discards_remaining() {
+        let mut state = SeedReviewState::new(3);
+        state.handle_key(KeyCode::Char('k')); // keep first
+        let action = state.handle_key(KeyCode::Char('q'));
+        assert_eq!(action, ReviewAction::Finish);
+        assert!(state.kept[0], "first task was kept before quit");
+        assert!(!state.kept[1], "remaining tasks default to discard");
+        assert!(!state.kept[2], "remaining tasks default to discard");
+    }
+
+    #[test]
+    fn review_keeps_all_through_full_iteration() {
+        let mut state = SeedReviewState::new(2);
+        state.handle_key(KeyCode::Char('k'));
+        let action = state.handle_key(KeyCode::Char('k'));
+        assert_eq!(action, ReviewAction::Finish, "should finish after last task");
+        assert!(state.kept[0]);
+        assert!(state.kept[1]);
+    }
+
+    #[test]
+    fn review_uppercase_keys_work() {
+        let mut state = SeedReviewState::new(3);
+        state.handle_key(KeyCode::Char('K'));
+        assert!(state.kept[0], "'K' should keep");
+        state.handle_key(KeyCode::Char('D'));
+        assert!(!state.kept[1], "'D' should discard");
+        let action = state.handle_key(KeyCode::Char('Q'));
+        assert_eq!(action, ReviewAction::Finish, "'Q' should quit");
+    }
+
+    #[test]
+    fn review_esc_discards_remaining() {
+        let mut state = SeedReviewState::new(3);
+        state.handle_key(KeyCode::Char('k'));
+        let action = state.handle_key(KeyCode::Esc);
+        assert_eq!(action, ReviewAction::Finish);
+        assert!(!state.kept[1], "esc should leave remaining as discard");
+    }
+
+    #[test]
+    fn review_unrelated_keys_ignored() {
+        let mut state = SeedReviewState::new(2);
+        let action = state.handle_key(KeyCode::Char('x'));
+        assert_eq!(action, ReviewAction::Continue);
+        assert_eq!(state.current, 0, "unrelated key should not advance");
     }
 }

@@ -709,7 +709,11 @@ where
 
         let is_tty = runtime.terminal.stdin_is_tty();
         let mut activity_lines: Vec<String> = Vec::new();
-        const MAX_ACTIVITY_LINES: usize = 20;
+        let max_activity_lines = {
+            let (_, h) = runtime.terminal.draw_dimensions();
+            // reserve ~5 rows for header/footer/border chrome, fill the rest
+            (h as usize).saturating_sub(5).max(20)
+        };
         let mut waited_seconds = 0u64;
         let mut last_event: Option<String> = None;
         loop {
@@ -717,8 +721,8 @@ where
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
                         activity_lines.push(update.clone());
-                        if activity_lines.len() > MAX_ACTIVITY_LINES {
-                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                        if activity_lines.len() > max_activity_lines {
+                            activity_lines.drain(..activity_lines.len() - max_activity_lines);
                         }
                         if is_tty {
                             runtime.terminal.draw_seeding(&activity_lines)?;
@@ -738,8 +742,8 @@ where
                         "Backlog seeding agent still running ({waited_seconds}s elapsed); waiting for model output"
                     );
                     activity_lines.push(msg.clone());
-                    if activity_lines.len() > MAX_ACTIVITY_LINES {
-                        activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                    if activity_lines.len() > max_activity_lines {
+                        activity_lines.drain(..activity_lines.len() - max_activity_lines);
                     }
                     if is_tty {
                         runtime.terminal.draw_seeding(&activity_lines)?;
@@ -813,7 +817,10 @@ where
 
         let is_tty = runtime.terminal.stdin_is_tty();
         let mut activity_lines: Vec<String> = Vec::new();
-        const MAX_ACTIVITY_LINES: usize = 20;
+        let max_activity_lines = {
+            let (_, h) = runtime.terminal.draw_dimensions();
+            (h as usize).saturating_sub(5).max(20)
+        };
         let mut waited_seconds = 0u64;
         let mut last_event: Option<String> = None;
         loop {
@@ -821,8 +828,8 @@ where
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
                         activity_lines.push(update.clone());
-                        if activity_lines.len() > MAX_ACTIVITY_LINES {
-                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                        if activity_lines.len() > max_activity_lines {
+                            activity_lines.drain(..activity_lines.len() - max_activity_lines);
                         }
                         if is_tty {
                             runtime.terminal.draw_seeding(&activity_lines)?;
@@ -842,8 +849,8 @@ where
                         "Backlog seeding dry-run still running ({waited_seconds}s elapsed); waiting for model output"
                     );
                     activity_lines.push(msg.clone());
-                    if activity_lines.len() > MAX_ACTIVITY_LINES {
-                        activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                    if activity_lines.len() > max_activity_lines {
+                        activity_lines.drain(..activity_lines.len() - max_activity_lines);
                     }
                     if is_tty {
                         runtime.terminal.draw_seeding(&activity_lines)?;

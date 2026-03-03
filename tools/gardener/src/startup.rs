@@ -718,6 +718,7 @@ fn should_seed_backlog(
     run_seeding && !test_mode && (existing_backlog_count == 0 || force_seed_backlog)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_seed_with_heartbeat<F>(
     runtime: &ProductionRuntime,
     scope: &RuntimeScope,
@@ -828,6 +829,7 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_seed_recommendations_with_heartbeat<F>(
     runtime: &ProductionRuntime,
     scope: &RuntimeScope,

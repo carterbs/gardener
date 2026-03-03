@@ -189,9 +189,7 @@ fn count_functions(content: &str, language: &str) -> usize {
                 }
             }
             "TypeScript/JavaScript" => {
-                if starts_with_keyword(trimmed, "function ") {
-                    count += 1;
-                } else if trimmed.contains("=> {") {
+                if starts_with_keyword(trimmed, "function ") || trimmed.contains("=> {") {
                     count += 1;
                 }
             }

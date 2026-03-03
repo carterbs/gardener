@@ -46,7 +46,7 @@ pub fn compute_grade_report(payload: AssessmentPayload) -> GradeReport {
         })
         .collect();
     // Sort by score ascending (worst first)
-    domain_grades.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    domain_grades.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let (repo_score, repo_grade) = compute_repo_grade(&payload.repo_wide);
 

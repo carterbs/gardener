@@ -183,11 +183,7 @@ pub fn truncate_bundle_for_agent(
         serde_json::to_string(&base).unwrap_or_default().len()
     };
 
-    let remaining_budget = if char_budget > base_bundle {
-        char_budget - base_bundle
-    } else {
-        0
-    };
+    let remaining_budget = char_budget.saturating_sub(base_bundle);
 
     // Add files back within budget
     let mut used = 0usize;

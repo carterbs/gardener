@@ -312,7 +312,7 @@ fn read_signature(path: &Path) -> (Vec<String>, usize) {
     let mut signature = Vec::new();
     let mut line_count = 0;
 
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         line_count += 1;
         if signature.len() < 20 && !line.trim().is_empty() {
             signature.push(line);
@@ -617,6 +617,7 @@ fn render_tree_collapsed(
 }
 
 /// Recursive DFS render of a directory node.
+#[allow(clippy::too_many_arguments)]
 fn render_node(
     dir: &str,
     prefix: &str,
@@ -853,7 +854,11 @@ mod tests {
     #[test]
     fn generate_tree_diagram_real_repo_under_budget() {
         // Walk the actual repo and verify the diagram stays compact.
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("manifest parent")
+            .parent()
+            .expect("repo root");
         let tree = walk_repo(repo);
         let result = generate_tree_diagram(&tree, 5000);
         assert!(

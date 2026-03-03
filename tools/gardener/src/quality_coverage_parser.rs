@@ -97,12 +97,12 @@ pub fn parse_coverage(repo_path: &Path) -> CoverageParserOutput {
                 // Merge per-file coverage (highest coverage wins)
                 for fc in &parsed.per_file {
                     let existing = all_file_coverage.get(&fc.path);
-                    if existing.map_or(true, |e| fc.coverage_percent > e.coverage_percent) {
+                    if existing.is_none_or(|e| fc.coverage_percent > e.coverage_percent) {
                         all_file_coverage.insert(fc.path.clone(), fc.clone());
                     }
                 }
                 // Precedence: Istanbul JSON (0) > lcov (1) > Cobertura (2) > Tarpaulin (3) > Go (4)
-                if best_summary.as_ref().map_or(true, |(p, _)| parsed.precedence < *p) {
+                if best_summary.as_ref().is_none_or(|(p, _)| parsed.precedence < *p) {
                     best_summary = Some((parsed.precedence, parsed.summary));
                 }
             }
@@ -609,7 +609,7 @@ mod tests {
         fs::write(dir.path().join("cobertura.xml"), xml).expect("write");
         let output = parse_coverage(dir.path());
         assert!(output.coverage_available);
-        let summary = output.summary.unwrap();
+        let summary = output.summary.expect("summary should be present");
         assert_eq!(summary.total_lines, 100);
         assert_eq!(summary.covered_lines, 85);
     }

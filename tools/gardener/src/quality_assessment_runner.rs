@@ -333,7 +333,7 @@ fn run_multi_agent_assessment(
                             );
                             reports
                                 .lock()
-                                .unwrap()
+                                .expect("reports mutex poisoned")
                                 .push((dim.to_string(), output));
                         }
                         Err(e) => {
@@ -347,7 +347,7 @@ fn run_multi_agent_assessment(
                             );
                             errors
                                 .lock()
-                                .unwrap()
+                                .expect("errors mutex poisoned")
                                 .push(format!("{dim}: {e}"));
                         }
                     }
@@ -360,7 +360,7 @@ fn run_multi_agent_assessment(
         }
     });
 
-    let errors = errors.into_inner().unwrap();
+    let errors = errors.into_inner().expect("errors mutex poisoned");
     if !errors.is_empty() {
         return Err(GardenerError::Process(format!(
             "Dimension agent(s) failed: {}",
@@ -368,7 +368,7 @@ fn run_multi_agent_assessment(
         )));
     }
 
-    let reports = reports.into_inner().unwrap();
+    let reports = reports.into_inner().expect("reports mutex poisoned");
     let parallel_elapsed = start_time.elapsed();
     append_run_log(
         "info",
@@ -1144,8 +1144,7 @@ fn discover_domains(bundle: &EvidenceBundle) -> BTreeMap<String, Vec<String>> {
         for manifest in sub_manifests.iter().chain(root_manifests.iter()) {
             let domain_name = manifest
                 .name
-                .as_ref()
-                .map(|n| n.clone())
+                .clone()
                 .unwrap_or_else(|| {
                     let p = Path::new(&manifest.path);
                     p.parent()

@@ -152,11 +152,11 @@ fn detect_linters(repo_path: &Path) -> ToolPresence {
     let cargo_toml = repo_path.join("Cargo.toml");
     if cargo_toml.is_file() {
         if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
-            if content.contains("[lints") || content.contains("clippy") {
-                if !files.iter().any(|f| f.contains("Cargo.toml")) {
-                    files.push("Cargo.toml".to_string());
-                    details.push("Clippy lints configured in Cargo.toml".to_string());
-                }
+            if (content.contains("[lints") || content.contains("clippy"))
+                && !files.iter().any(|f| f.contains("Cargo.toml"))
+            {
+                files.push("Cargo.toml".to_string());
+                details.push("Clippy lints configured in Cargo.toml".to_string());
             }
         }
     }

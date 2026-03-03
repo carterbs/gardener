@@ -76,11 +76,11 @@ mod tests {
         assert_eq!(tasks.len(), 2);
 
         // Verify scope keys are constructed correctly
-        let auth_task = tasks.iter().find(|t| t.title == "Add auth tests").unwrap();
+        let auth_task = tasks.iter().find(|t| t.title == "Add auth tests").expect("auth task");
         assert_eq!(auth_task.scope_key, "quality:auth:coverage-gap");
         assert_eq!(auth_task.source, "quality-grading");
 
-        let repo_task = tasks.iter().find(|t| t.title == "Add linter").unwrap();
+        let repo_task = tasks.iter().find(|t| t.title == "Add linter").expect("linter task");
         assert_eq!(repo_task.scope_key, "quality:repo:missing-tooling");
     }
 

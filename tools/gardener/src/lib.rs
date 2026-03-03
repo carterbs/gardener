@@ -392,9 +392,10 @@ pub fn run_with_runtime(
                     ..quality_assessment_runner::QualityAssessmentConfig::default()
                 };
             // quality-grades-only is read-only: no backlog store to avoid side effects
+            let factory = AdapterFactory::with_defaults();
             let (doc, _report) = quality_pipeline::run_quality_pipeline(
                 repo_root,
-                None,
+                Some(&factory),
                 runtime.process_runner.as_ref(),
                 None,
                 &assessment_config,

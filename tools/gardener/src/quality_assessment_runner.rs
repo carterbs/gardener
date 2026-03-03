@@ -114,6 +114,11 @@ fn try_agent_assessment(
 ) -> Option<AssessmentPayload> {
     let adapter = factory.get(config.backend)?;
 
+    let output_file = repo_path.join(".cache/gardener/quality-last-message.json");
+    if let Some(parent) = output_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
     let context = AdapterContext {
         worker_id: "quality-assessor".to_string(),
         session_id: "quality-assessment-session".to_string(),
@@ -123,15 +128,23 @@ fn try_agent_assessment(
         prompt_version: "quality-assessment-v1".to_string(),
         context_manifest_hash: "quality-assessment-context".to_string(),
         output_schema: None,
-        output_file: None,
+        output_file: Some(output_file.clone()),
         permissive_mode: true,
         max_turns: Some(config.max_turns),
     };
 
     // First attempt
-    let result = adapter
-        .execute(process_runner, &context, prompt, None)
-        .ok()?;
+    let result = match adapter.execute(process_runner, &context, prompt, None) {
+        Ok(r) => r,
+        Err(e) => {
+            append_run_log(
+                "warn",
+                "quality_assessment.agent_execute_error",
+                json!({ "error": e.to_string() }),
+            );
+            return None;
+        }
+    };
 
     if result.terminal == AgentTerminal::Failure {
         append_run_log(
@@ -146,8 +159,8 @@ fn try_agent_assessment(
         return None;
     }
 
-    // Try to parse from agent output
-    let raw_output = extract_text_from_result(&result.payload);
+    // Try to parse from agent output — check event payload first, then output file
+    let raw_output = extract_text_from_result_or_file(&result.payload, &output_file);
     match parse_assessment_payload(&raw_output) {
         Ok(payload) => match validate_payload(payload) {
             Ok(validated) => return Some(validated),
@@ -196,7 +209,7 @@ fn try_agent_assessment(
         return None;
     }
 
-    let retry_output = extract_text_from_result(&retry_result.payload);
+    let retry_output = extract_text_from_result_or_file(&retry_result.payload, &output_file);
     match parse_assessment_payload(&retry_output) {
         Ok(payload) => match validate_payload(payload) {
             Ok(validated) => Some(validated),
@@ -220,10 +233,43 @@ fn try_agent_assessment(
     }
 }
 
-/// Extract text content from the agent's result payload.
+/// Extract text content from the agent's result payload, falling back to the output file.
 ///
-/// The payload may be a string, or it may be an object with various text fields.
-fn extract_text_from_result(payload: &serde_json::Value) -> String {
+/// The Codex adapter writes the agent's last message to an output file via `-o`. The event
+/// payload's `result` field is often null, so we must read the file as a fallback.
+fn extract_text_from_result_or_file(payload: &serde_json::Value, output_file: &Path) -> String {
+    let from_payload = extract_text_from_payload(payload);
+    if !from_payload.is_empty() && from_payload != "null" {
+        return from_payload;
+    }
+
+    // Fall back to reading the output file written by the adapter's -o flag
+    match std::fs::read_to_string(output_file) {
+        Ok(content) if !content.trim().is_empty() => {
+            append_run_log(
+                "debug",
+                "quality_assessment.read_output_file",
+                json!({
+                    "path": output_file.display().to_string(),
+                    "len": content.len(),
+                }),
+            );
+            // The output file may contain JSON with a "message" or text field, or raw text
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                let from_file = extract_text_from_payload(&parsed);
+                if !from_file.is_empty() && from_file != "null" {
+                    return from_file;
+                }
+            }
+            // Use raw content as-is
+            content
+        }
+        _ => from_payload,
+    }
+}
+
+/// Extract text content from a JSON payload.
+fn extract_text_from_payload(payload: &serde_json::Value) -> String {
     // If the payload itself is a string, use it directly
     if let Some(s) = payload.as_str() {
         return s.to_string();

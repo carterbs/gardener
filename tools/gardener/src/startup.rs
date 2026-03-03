@@ -1,3 +1,4 @@
+use crate::agent::factory::AdapterFactory;
 use crate::backlog_store::{BacklogStore, NewTask};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
@@ -157,11 +158,10 @@ fn try_pipeline_quality_report(
         ..QualityAssessmentConfig::default()
     };
 
-    // Use deterministic-only mode (no factory) for startup to keep it fast and
-    // avoid requiring agent credentials just for the quality report refresh.
+    let factory = AdapterFactory::with_defaults();
     let (doc, _report) = run_quality_pipeline(
         repo_root,
-        None, // no factory — deterministic fallback
+        Some(&factory),
         runtime.process_runner.as_ref(),
         None, // no store — backlog emission is handled separately during seeding
         &assessment_config,

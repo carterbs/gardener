@@ -37,7 +37,7 @@ struct FrictionOutputEnvelope {
     schema_version: Option<usize>,
     #[serde(default)]
     state: Option<String>,
-    payload: Option<FrictionAnalysisResponse>,
+    payload: FrictionAnalysisResponse,
 }
 
 pub struct FrictionAnalysisInput<'a> {
@@ -396,7 +396,10 @@ pub fn run_friction_analysis(
     let output_schema = friction_output_schema_path(scope)?;
     let output_file = scope
         .working_dir
-        .join(".cache/gardener/friction-analysis-output.json");
+        .join(format!(
+            ".cache/gardener/friction-analysis-output-{}.json",
+            input.run_id
+        ));
     if let Some(parent) = output_file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             crate::errors::GardenerError::Io(format!("create_dir_all {}: {e}", parent.display()))
@@ -520,10 +523,7 @@ fn parse_friction_payload(
         return Ok(payload);
     }
     let envelope: FrictionOutputEnvelope = serde_json::from_value(value)?;
-    Ok(envelope.payload.unwrap_or(FrictionAnalysisResponse {
-        findings: vec![],
-        smooth_run: false,
-    }))
+    Ok(envelope.payload)
 }
 
 fn parse_friction_payload_from_file(
@@ -841,15 +841,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_friction_payload_accepts_null_envelope_payload() {
+    fn parse_friction_payload_errors_on_null_envelope_payload() {
         let val = serde_json::json!({
             "schema_version": 1,
             "state": "friction_analysis",
             "payload": null
         });
-        let payload = parse_friction_payload(val).expect("parse envelope payload");
-        assert!(payload.findings.is_empty());
-        assert!(!payload.smooth_run);
+        assert!(parse_friction_payload(val).is_err());
     }
 
     #[test]
@@ -909,7 +907,7 @@ mod tests {
         };
         let output_file = scope
             .working_dir
-            .join(".cache/gardener/friction-analysis-output.json");
+            .join(".cache/gardener/friction-analysis-output-run-1.json");
         if let Some(parent) = output_file.parent() {
             std::fs::create_dir_all(parent).expect("create output dir");
         }
@@ -972,6 +970,69 @@ mod tests {
     }
 
     #[test]
+    fn run_friction_analysis_recovers_from_null_envelope_payload_with_output_file() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let scope = RuntimeScope {
+            process_cwd: PathBuf::from("/cwd"),
+            repo_root: None,
+            working_dir: dir.path().to_path_buf(),
+        };
+        let output_file = scope
+            .working_dir
+            .join(".cache/gardener/friction-analysis-output-run-1.json");
+        if let Some(parent) = output_file.parent() {
+            std::fs::create_dir_all(parent).expect("create output dir");
+        }
+        std::fs::write(
+            &output_file,
+            r#"{"schema_version":1,"state":"friction_analysis","payload":{"findings":[{"category":"documentation_gap","title":"Recover from null envelope","description":"Output event had null payload inside an envelope.","severity":"high","evidence_events":["adapter.payload.null"]}],"smooth_run":false}}"#,
+        )
+        .expect("write friction output file");
+
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":{\"schema_version\":1,\"state\":\"friction_analysis\",\"payload\":null}}\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let log_path = write_log_file(
+            dir.path(),
+            &[otel_line("run-1", "worker-1", "worker.started", "INFO", 5)],
+        );
+        let input = FrictionAnalysisInput {
+            worker_id: "worker-1",
+            task_id: "task-1",
+            task_summary: "Test summary",
+            merge_sha: None,
+            run_id: "run-1",
+            log_path: &log_path,
+        };
+        let outcome = run_friction_analysis(&input, &AppConfig::default(), &runner, &scope)
+            .expect("run friction analysis");
+        let (findings, smooth_run) = match outcome {
+            FrictionAnalysisOutcome::Completed {
+                findings,
+                smooth_run,
+            } => (findings, smooth_run),
+            FrictionAnalysisOutcome::Skipped { reason } => {
+                panic!("did not expect skip: {reason}")
+            }
+        };
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].title, "Recover from null envelope");
+        assert!(!smooth_run);
+        let spawned = runner.spawned();
+        assert_eq!(spawned.len(), 1);
+        let args = &spawned[0].args;
+        let schema_index = args
+            .iter()
+            .position(|arg| arg == "--output-schema")
+            .expect("schema arg missing");
+        assert!(args[schema_index + 1].ends_with("friction_analysis_output_schema.json"));
+    }
+
+    #[test]
     fn run_friction_analysis_keeps_smooth_run_false_when_payload_is_null() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let scope = RuntimeScope {
@@ -1028,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_friction_payload_from_file_treats_null_payload_as_non_smooth() {
+    fn parse_friction_payload_from_file_errors_on_null_payload() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("friction-analysis-output.json");
         std::fs::write(
@@ -1036,9 +1097,7 @@ mod tests {
             r#"{"schema_version":1,"state":"friction_analysis","payload":null}"#,
         )
         .expect("write output file");
-        let payload = parse_friction_payload_from_file(&path).expect("payload from file");
-        assert!(payload.findings.is_empty());
-        assert!(!payload.smooth_run);
+        assert!(parse_friction_payload_from_file(&path).is_err());
     }
 
     #[test]

@@ -35,7 +35,7 @@ fn rejects_binary_file_arguments() {
         "binary fixture should fail the checker"
     );
     let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(stderr.contains("error: blocked binary blob(s)"));
+    assert!(stderr.contains("error: blocked artifact(s)"));
 }
 
 #[test]
@@ -56,4 +56,35 @@ fn allows_text_file_arguments() {
     assert!(result.status.success(), "text-only input should pass");
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(stdout.contains("no staged binary blobs"));
+}
+
+#[test]
+fn rejects_runtime_artifacts_by_name() {
+    let repo_root = repo_root();
+    let root_script = repo_root.join("scripts").join("check-binary-blobs.sh");
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let default_profraw = temp.path().join("default_9876543210_0_12345.profraw");
+    let startup_diagnostics_dir = temp.path().join("startup-diagnostics");
+    let startup_diag = startup_diagnostics_dir.join("startup-notes.md");
+
+    fs::write(&default_profraw, b"not-a-real-binary payload\n").expect("write profiling artifact");
+    fs::create_dir_all(&startup_diagnostics_dir).expect("startup diagnostics fixture dir");
+    fs::write(&startup_diag, b"# Startup diagnostics").expect("write startup diagnostics artifact");
+
+    let result = Command::new("bash")
+        .arg(&root_script)
+        .arg(&default_profraw)
+        .arg(&startup_diag)
+        .output()
+        .expect("run binary blob checker");
+
+    assert!(
+        !result.status.success(),
+        "runtime artifact fixtures should fail the checker"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("blocked artifact(s)"));
+    assert!(stderr.contains("default_9876543210_0_12345.profraw"));
+    assert!(stderr.contains("startup-notes.md"));
 }

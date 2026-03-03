@@ -1,4 +1,4 @@
-use crate::backlog_store::{system_time_unix, BacklogStore, NewTask};
+use crate::backlog_store::{BacklogStore, NewTask};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
@@ -263,9 +263,7 @@ where
     // Open the store at most once, only when needed.
     let needs_store = cfg.startup.validate_on_boot || (run_seeding && !cfg.execution.test_mode);
     let store = if needs_store {
-        let s = BacklogStore::open(&db_path)?;
-        s.recover_stale_leases(system_time_unix())?;
-        Some(s)
+        Some(BacklogStore::open(&db_path)?)
     } else {
         None
     };

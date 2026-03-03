@@ -611,6 +611,17 @@ pub fn default_log_path(scope: &RuntimeScope) -> PathBuf {
 fn parse_friction_payload(
     value: serde_json::Value,
 ) -> Result<FrictionAnalysisResponse, serde_json::Error> {
+    if value.is_null() {
+        return Err(serde_json::Error::custom(
+            "friction output payload was null; expected structured payload",
+        ));
+    }
+    if value.as_object().is_some_and(|map| map.is_empty()) {
+        return Err(serde_json::Error::custom(
+            "friction output payload was empty object; expected structured payload",
+        ));
+    }
+
     if let Ok(payload) = serde_json::from_value::<FrictionAnalysisResponse>(value.clone()) {
         return Ok(payload);
     }
@@ -946,6 +957,22 @@ mod tests {
             "payload": null
         });
         assert!(parse_friction_payload(val).is_err());
+    }
+
+    #[test]
+    fn parse_friction_payload_errors_on_null_payload() {
+        let val = serde_json::json!(null);
+        let err = parse_friction_payload(val).expect_err("parse should fail for null payload");
+        let msg = err.to_string();
+        assert!(msg.contains("friction output payload was null"));
+    }
+
+    #[test]
+    fn parse_friction_payload_errors_on_empty_payload() {
+        let val = serde_json::json!({});
+        let err = parse_friction_payload(val).expect_err("parse should fail for empty payload");
+        let msg = err.to_string();
+        assert!(msg.contains("friction output payload was empty object"));
     }
 
     #[test]

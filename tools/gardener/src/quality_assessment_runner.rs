@@ -83,13 +83,13 @@ pub fn run_assessment(
                 Ok((payload, bundle, true))
             }
             Err(e) => {
-                // Multi-agent pipeline failed — fail the assessment entirely (no silent fallback)
+                // Multi-agent pipeline failed — fall back to deterministic assessment
                 append_run_log(
-                    "error",
-                    "quality_assessment.multi_agent_failed",
+                    "warn",
+                    "quality_assessment.multi_agent_failed_fallback",
                     json!({ "error": e.to_string() }),
                 );
-                Err(e)
+                Ok((deterministic_fallback(&bundle), bundle, false))
             }
         }
     } else {
@@ -451,6 +451,12 @@ fn execute_agent(
         max_turns: Some(config.max_turns),
     };
 
+    append_run_log(
+        "info",
+        "quality_assessment.execute_agent",
+        json!({ "agent_id": agent_id, "backend": format!("{:?}", config.backend) }),
+    );
+
     let result = adapter.execute(process_runner, &context, prompt, None)?;
 
     if result.terminal == AgentTerminal::Failure {
@@ -789,6 +795,12 @@ fn parse_assessment_payload(raw_text: &str) -> Result<AssessmentPayload, String>
 
 /// Validate and clamp an AssessmentPayload. Fixes out-of-range scores, fills defaults.
 fn validate_payload(mut payload: AssessmentPayload) -> Result<AssessmentPayload, String> {
+    append_run_log(
+        "info",
+        "quality_assessment.validate_payload",
+        json!({ "domain_count": payload.domains.len() }),
+    );
+
     if payload.domains.is_empty() {
         return Err("domains array is empty".to_string());
     }

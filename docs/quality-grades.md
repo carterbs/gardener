@@ -8,17 +8,19 @@ Readiness: 10/100 (F)
 - readiness_grade: F
 - primary_gap: agent_steering
 
+## Discovery Status
+Discovery was unavailable during triage; scores in Agent Readiness are marked as `unknown`.
+
 ## Agent Readiness
 | Dimension | Score |
 | --- | --- |
-| agent_steering | 2 |
-| knowledge_accessible | 2 |
-| mechanical_guardrails | 2 |
-| local_feedback_loop | 2 |
-| coverage_signal | 2 |
+| agent_steering | unknown |
+| knowledge_accessible | unknown |
+| mechanical_guardrails | unknown |
+| local_feedback_loop | unknown |
+| coverage_signal | unknown |
 
 ## Coverage Detail
 | Domain | Score | Grade |
 | --- | --- | --- |
 | infrastructure | 60 | C |
-

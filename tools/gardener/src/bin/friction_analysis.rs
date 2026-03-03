@@ -153,10 +153,13 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
     };
 
     match run_friction_analysis(&input, &cfg, runtime.process_runner.as_ref(), &scope)? {
-        FrictionAnalysisOutcome::Completed { findings } => {
+        FrictionAnalysisOutcome::Completed { findings, smooth_run } => {
             if findings.is_empty() {
-                eprintln!("Smooth run — no friction findings.");
-                println!("{{\"findings\": [], \"smooth_run\": true}}");
+                eprintln!("No friction findings.");
+                println!(
+                    "{{\"findings\": [], \"smooth_run\": {}}}",
+                    if smooth_run { "true" } else { "false" }
+                );
                 return Ok(0);
             }
 

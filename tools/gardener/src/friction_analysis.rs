@@ -37,7 +37,7 @@ struct FrictionOutputEnvelope {
     schema_version: Option<usize>,
     #[serde(default)]
     state: Option<String>,
-    payload: FrictionAnalysisResponse,
+    payload: Option<FrictionAnalysisResponse>,
 }
 
 pub struct FrictionAnalysisInput<'a> {
@@ -51,7 +51,10 @@ pub struct FrictionAnalysisInput<'a> {
 
 #[derive(Debug)]
 pub enum FrictionAnalysisOutcome {
-    Completed { findings: Vec<FrictionFinding> },
+    Completed {
+        findings: Vec<FrictionFinding>,
+        smooth_run: bool,
+    },
     Skipped { reason: String },
 }
 
@@ -467,6 +470,7 @@ pub fn run_friction_analysis(
 
     Ok(FrictionAnalysisOutcome::Completed {
         findings: response.findings,
+        smooth_run: response.smooth_run,
     })
 }
 
@@ -516,7 +520,10 @@ fn parse_friction_payload(
         return Ok(payload);
     }
     let envelope: FrictionOutputEnvelope = serde_json::from_value(value)?;
-    Ok(envelope.payload)
+    Ok(envelope.payload.unwrap_or(FrictionAnalysisResponse {
+        findings: vec![],
+        smooth_run: false,
+    }))
 }
 
 fn parse_friction_payload_from_file(
@@ -834,6 +841,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_friction_payload_accepts_null_envelope_payload() {
+        let val = serde_json::json!({
+            "schema_version": 1,
+            "state": "friction_analysis",
+            "payload": null
+        });
+        let payload = parse_friction_payload(val).expect("parse envelope payload");
+        assert!(payload.findings.is_empty());
+        assert!(!payload.smooth_run);
+    }
+
+    #[test]
     fn findings_to_tasks_maps_severity_to_priority() {
         let findings = vec![
             FrictionFinding {
@@ -921,14 +940,18 @@ mod tests {
         };
         let outcome = run_friction_analysis(&input, &AppConfig::default(), &runner, &scope)
             .expect("run friction analysis");
-        let findings = match outcome {
-            FrictionAnalysisOutcome::Completed { findings } => findings,
+        let (findings, smooth_run) = match outcome {
+            FrictionAnalysisOutcome::Completed {
+                findings,
+                smooth_run,
+            } => (findings, smooth_run),
             FrictionAnalysisOutcome::Skipped { reason } => {
                 panic!("did not expect skip: {reason}")
             }
         };
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].title, "Persisted output fallback");
+        assert!(!smooth_run);
 
         let spawned = runner.spawned();
         assert_eq!(spawned.len(), 1);
@@ -949,6 +972,48 @@ mod tests {
     }
 
     #[test]
+    fn run_friction_analysis_keeps_smooth_run_false_when_payload_is_null() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let scope = RuntimeScope {
+            process_cwd: PathBuf::from("/cwd"),
+            repo_root: None,
+            working_dir: dir.path().to_path_buf(),
+        };
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "{\"type\":\"turn.completed\",\"result\":null}\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let log_path = write_log_file(
+            dir.path(),
+            &[otel_line("run-1", "worker-1", "worker.started", "INFO", 5)],
+        );
+        let input = FrictionAnalysisInput {
+            worker_id: "worker-1",
+            task_id: "task-1",
+            task_summary: "Test summary",
+            merge_sha: None,
+            run_id: "run-1",
+            log_path: &log_path,
+        };
+        let outcome = run_friction_analysis(&input, &AppConfig::default(), &runner, &scope)
+            .expect("run friction analysis");
+        let (findings, smooth_run) = match outcome {
+            FrictionAnalysisOutcome::Completed {
+                findings,
+                smooth_run,
+            } => (findings, smooth_run),
+            FrictionAnalysisOutcome::Skipped { reason } => {
+                panic!("did not expect skip: {reason}")
+            }
+        };
+        assert!(findings.is_empty());
+        assert!(!smooth_run);
+    }
+
+    #[test]
     fn parse_friction_payload_from_file_reads_and_parses_output() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let path = dir.path().join("friction-analysis-output.json");
@@ -960,6 +1025,20 @@ mod tests {
         let payload = parse_friction_payload_from_file(&path).expect("payload from file");
         assert!(payload.smooth_run);
         assert!(payload.findings.is_empty());
+    }
+
+    #[test]
+    fn parse_friction_payload_from_file_treats_null_payload_as_non_smooth() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let path = dir.path().join("friction-analysis-output.json");
+        std::fs::write(
+            &path,
+            r#"{"schema_version":1,"state":"friction_analysis","payload":null}"#,
+        )
+        .expect("write output file");
+        let payload = parse_friction_payload_from_file(&path).expect("payload from file");
+        assert!(payload.findings.is_empty());
+        assert!(!payload.smooth_run);
     }
 
     #[test]

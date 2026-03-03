@@ -26,6 +26,7 @@ pub struct SeedPromptContext {
     pub quality_risks: String,
     pub backlog_skill_md: String,
     pub existing_backlog: String,
+    pub rejected_tasks: String,
 }
 
 pub fn build_seed_prompt(
@@ -33,8 +34,9 @@ pub fn build_seed_prompt(
     quality_doc: &str,
     scope: &RuntimeScope,
     existing_backlog: &str,
+    rejected_tasks: &str,
 ) -> String {
-    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
+    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog, rejected_tasks);
     build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE)
 }
 
@@ -43,8 +45,9 @@ pub fn build_seed_dry_run_prompt(
     quality_doc: &str,
     scope: &RuntimeScope,
     existing_backlog: &str,
+    rejected_tasks: &str,
 ) -> String {
-    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
+    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog, rejected_tasks);
     build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_DRY_RUN)
 }
 
@@ -87,6 +90,14 @@ fn render_seed_prompt_template(
     } else {
         format!("{}\n", context.backlog_skill_md)
     };
+    let rejected_tasks = if context.rejected_tasks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nPreviously rejected seed tasks — do NOT suggest these again\n{}\n",
+            context.rejected_tasks
+        )
+    };
     template_body
         .replace("{ACTION_CONTRACT}", action_contract)
         .replace("{PRIMARY_GAP}", &context.primary_gap)
@@ -98,6 +109,7 @@ fn render_seed_prompt_template(
         .replace("{DOCS_LISTING}", &docs_listing)
         .replace("{BACKLOG_SKILL_MD}", &backlog_skill_md)
         .replace("{EXISTING_BACKLOG}", &context.existing_backlog)
+        .replace("{REJECTED_TASKS}", &rejected_tasks)
         .replace("{QUALITY_DOC}", &context.quality_doc)
 }
 
@@ -108,6 +120,7 @@ pub fn seed_backlog_if_needed(
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
     existing_backlog: &str,
+    rejected_tasks: &str,
 ) -> Result<(), GardenerError> {
     seed_backlog_if_needed_with_events(
         process_runner,
@@ -116,8 +129,129 @@ pub fn seed_backlog_if_needed(
         profile,
         quality_doc,
         existing_backlog,
+        rejected_tasks,
         None,
     )
+}
+
+pub fn build_seed_refine_prompt(
+    tasks_with_feedback: &[(SeedTask, String)],
+    profile: &RepoIntelligenceProfile,
+    quality_doc: &str,
+    scope: &RuntimeScope,
+    existing_backlog: &str,
+    rejected_tasks: &str,
+) -> String {
+    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog, rejected_tasks);
+    let mut out = String::new();
+    out.push_str("You are the Gardener backlog seeding worker.\n");
+    out.push_str("The user has reviewed your previously suggested tasks and provided feedback.\n");
+    out.push_str("Revise each task below based on the user's feedback.\n");
+    out.push_str("Return a JSON envelope matching the same schema, with exactly ");
+    out.push_str(&tasks_with_feedback.len().to_string());
+    out.push_str(" revised tasks in the same order.\n\n");
+
+    out.push_str(SEEDING_ACTION_CONTRACT_DRY_RUN);
+    out.push_str("\n\n");
+
+    for (i, (task, feedback)) in tasks_with_feedback.iter().enumerate() {
+        let _ = write!(
+            &mut out,
+            "Task {}:\nTitle: {}\nDetails: {}\nRationale: {}\nDomain: {}\nPriority: {}\n\nUser feedback: \"{}\"\n\n---\n\n",
+            i + 1, task.title, task.details, task.rationale, task.domain, task.priority, feedback
+        );
+    }
+
+    out.push_str("Context for reference:\n\n");
+    if !context.quality_risks.is_empty() {
+        out.push_str("Quality risks:\n");
+        out.push_str(&context.quality_risks);
+        out.push_str("\n\n");
+    }
+    if !context.existing_backlog.is_empty() {
+        out.push_str("Existing backlog:\n");
+        out.push_str(&context.existing_backlog);
+        out.push_str("\n\n");
+    }
+    if !context.rejected_tasks.is_empty() {
+        out.push_str("Previously rejected tasks — do NOT suggest these:\n");
+        out.push_str(&context.rejected_tasks);
+        out.push_str("\n\n");
+    }
+
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn refine_seed_tasks_with_events(
+    process_runner: &dyn ProcessRunner,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    profile: &RepoIntelligenceProfile,
+    quality_doc: &str,
+    existing_backlog: &str,
+    rejected_tasks: &str,
+    tasks_with_feedback: &[(SeedTask, String)],
+    mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+) -> Result<Vec<SeedTask>, GardenerError> {
+    append_run_log(
+        "info",
+        "seeding.refine.started",
+        json!({
+            "backend": format!("{:?}", cfg.seeding.backend),
+            "model": cfg.seeding.model,
+            "task_count": tasks_with_feedback.len(),
+        }),
+    );
+
+    let prompt = build_seed_refine_prompt(
+        tasks_with_feedback,
+        profile,
+        quality_doc,
+        scope,
+        existing_backlog,
+        rejected_tasks,
+    );
+    let task_count = tasks_with_feedback.len();
+    let result = if let Some(sink) = on_event.as_mut() {
+        run_legacy_seed_runner_v1_with_events_and_task_count(
+            process_runner,
+            scope,
+            cfg.seeding.backend,
+            &cfg.seeding.model,
+            &prompt,
+            task_count,
+            Some(*sink),
+        )
+    } else {
+        run_legacy_seed_runner_v1_with_events_and_task_count(
+            process_runner,
+            scope,
+            cfg.seeding.backend,
+            &cfg.seeding.model,
+            &prompt,
+            task_count,
+            None,
+        )
+    };
+
+    match &result {
+        Ok(tasks) => append_run_log(
+            "info",
+            "seeding.refine.completed",
+            json!({
+                "task_count": tasks.len(),
+            }),
+        ),
+        Err(e) => append_run_log(
+            "error",
+            "seeding.refine.failed",
+            json!({
+                "error": e.to_string(),
+            }),
+        ),
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -128,6 +262,7 @@ pub fn recommend_seed_tasks_with_events(
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
     existing_backlog: &str,
+    rejected_tasks: &str,
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
 ) -> Result<Vec<SeedTask>, GardenerError> {
     append_run_log(
@@ -142,7 +277,7 @@ pub fn recommend_seed_tasks_with_events(
         }),
     );
 
-    let prompt = build_seed_dry_run_prompt(profile, quality_doc, scope, existing_backlog);
+    let prompt = build_seed_dry_run_prompt(profile, quality_doc, scope, existing_backlog, rejected_tasks);
     const DRY_RUN_TASK_COUNT: usize = 10;
     let result = if let Some(sink) = on_event.as_mut() {
         run_legacy_seed_runner_v1_with_events_and_task_count(
@@ -197,6 +332,7 @@ pub fn seed_backlog_if_needed_with_events(
     profile: &RepoIntelligenceProfile,
     quality_doc: &str,
     existing_backlog: &str,
+    rejected_tasks: &str,
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
 ) -> Result<(), GardenerError> {
     append_run_log(
@@ -211,7 +347,7 @@ pub fn seed_backlog_if_needed_with_events(
         }),
     );
 
-    let prompt = build_seed_prompt(profile, quality_doc, scope, existing_backlog);
+    let prompt = build_seed_prompt(profile, quality_doc, scope, existing_backlog, rejected_tasks);
     let result = if let Some(sink) = on_event.as_mut() {
         run_seed_agent_direct_v2_with_events(
             process_runner,
@@ -263,6 +399,7 @@ fn build_seed_prompt_context(
     quality_doc: &str,
     scope: &RuntimeScope,
     existing_backlog: &str,
+    rejected_tasks: &str,
 ) -> SeedPromptContext {
     let repo_root = scope
         .repo_root
@@ -286,6 +423,7 @@ fn build_seed_prompt_context(
         quality_risks,
         backlog_skill_md,
         existing_backlog: existing_backlog.to_string(),
+        rejected_tasks: rejected_tasks.to_string(),
     }
 }
 
@@ -448,6 +586,7 @@ mod tests {
             quality_risks: "| startup | 40 | C |\n".to_string(),
             backlog_skill_md: String::new(),
             existing_backlog: "No active backlog tasks.".to_string(),
+            rejected_tasks: String::new(),
         };
         let prompt = super::build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE);
         assert!(prompt.contains("Seed-generation contract"));
@@ -586,6 +725,7 @@ mod tests {
             "Quality report",
             &scope,
             "No active backlog tasks.",
+            "",
         );
 
         assert_eq!(context.primary_gap, "coverage_signal");
@@ -617,6 +757,7 @@ mod tests {
                 working_dir: std::env::current_dir().expect("cwd"),
             },
             "No active backlog tasks.",
+            "",
         );
 
         assert!(prompt.contains("No AGENTS.md found."));
@@ -639,6 +780,7 @@ mod tests {
                 working_dir: std::env::current_dir().expect("cwd"),
             },
             "No active backlog tasks.",
+            "",
         );
 
         assert!(prompt.contains("Output contract"));

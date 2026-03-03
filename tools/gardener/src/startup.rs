@@ -9,7 +9,9 @@ use crate::quality_grades::render_quality_grade_document;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner, ProductionRuntime};
 use crate::seed_runner::SeedTask;
-use crate::seeding::{recommend_seed_tasks_with_events, seed_backlog_if_needed_with_events};
+use crate::seeding::{
+    recommend_seed_tasks_with_events, refine_seed_tasks_with_events, seed_backlog_if_needed_with_events,
+};
 use crate::task_identity::TaskKind;
 use crate::triage::profile_path;
 use crate::types::RuntimeScope;
@@ -435,6 +437,7 @@ where
             ))?;
         }
         let backlog_snapshot = summarize_active_backlog(store)?;
+        let rejected_tasks_fmt = format_rejected_seeds(store);
         if seed_dry_run {
             append_run_log(
                 "info",
@@ -451,6 +454,7 @@ where
                 &profile,
                 &quality_doc,
                 &backlog_snapshot,
+                &rejected_tasks_fmt,
                 &mut progress,
             )?;
             print_seed_recommendations(runtime, &recommendations)?;
@@ -473,6 +477,7 @@ where
                 &profile,
                 &quality_doc,
                 &backlog_snapshot,
+                &rejected_tasks_fmt,
                 &mut progress,
             ) {
                 append_run_log(
@@ -669,6 +674,7 @@ fn run_seed_with_heartbeat<F>(
     profile: &crate::repo_intelligence::RepoIntelligenceProfile,
     quality_doc: &str,
     backlog_snapshot: &str,
+    rejected_tasks: &str,
     progress: &mut F,
 ) -> Result<(), GardenerError>
 where
@@ -702,6 +708,7 @@ where
                 profile,
                 quality_doc,
                 backlog_snapshot,
+                rejected_tasks,
                 Some(&mut on_event),
             );
             let _ = tx.send(SeedProgressMessage::Done(result));
@@ -773,6 +780,7 @@ fn run_seed_recommendations_with_heartbeat<F>(
     profile: &crate::repo_intelligence::RepoIntelligenceProfile,
     quality_doc: &str,
     backlog_snapshot: &str,
+    rejected_tasks: &str,
     progress: &mut F,
 ) -> Result<Vec<SeedTask>, GardenerError>
 where
@@ -806,6 +814,7 @@ where
                 profile,
                 quality_doc,
                 backlog_snapshot,
+                rejected_tasks,
                 Some(&mut on_event),
             );
             let _ = tx.send(SeedProgressMessage::Done(result));
@@ -870,6 +879,90 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_seed_refinement_with_heartbeat(
+    runtime: &ProductionRuntime,
+    scope: &RuntimeScope,
+    cfg: &AppConfig,
+    profile: &crate::repo_intelligence::RepoIntelligenceProfile,
+    quality_doc: &str,
+    backlog_snapshot: &str,
+    rejected_tasks: &str,
+    tasks_with_feedback: &[(SeedTask, String)],
+) -> Result<Vec<SeedTask>, GardenerError> {
+    append_run_log(
+        "debug",
+        "startup.backlog_seed.refine.heartbeat.started",
+        json!({
+            "task_count": tasks_with_feedback.len(),
+        }),
+    );
+    enum SeedProgressMessage {
+        AgentUpdate(String),
+        Done(Result<Vec<SeedTask>, GardenerError>),
+    }
+    let (tx, rx) = mpsc::channel::<SeedProgressMessage>();
+
+    std::thread::scope(|thread_scope| {
+        thread_scope.spawn(|| {
+            let mut on_event = |event: &AgentEvent| {
+                if let Some(summary) = summarize_seed_agent_event(event) {
+                    let _ = tx.send(SeedProgressMessage::AgentUpdate(summary));
+                }
+            };
+            let result = refine_seed_tasks_with_events(
+                runtime.process_runner.as_ref(),
+                scope,
+                cfg,
+                profile,
+                quality_doc,
+                backlog_snapshot,
+                rejected_tasks,
+                tasks_with_feedback,
+                Some(&mut on_event),
+            );
+            let _ = tx.send(SeedProgressMessage::Done(result));
+        });
+
+        let is_tty = runtime.terminal.stdin_is_tty();
+        let mut activity_lines: Vec<String> = Vec::new();
+        const MAX_ACTIVITY_LINES: usize = 20;
+        let mut last_event: Option<String> = None;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(SeedProgressMessage::AgentUpdate(update)) => {
+                    if last_event.as_deref() != Some(update.as_str()) {
+                        activity_lines.push(update.clone());
+                        if activity_lines.len() > MAX_ACTIVITY_LINES {
+                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                        }
+                        if is_tty {
+                            runtime.terminal.draw_seeding(&activity_lines)?;
+                        }
+                        last_event = Some(update);
+                    }
+                }
+                Ok(SeedProgressMessage::Done(result)) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if is_tty {
+                        activity_lines
+                            .push("Refining tasks… (waiting)".to_string());
+                        if activity_lines.len() > MAX_ACTIVITY_LINES {
+                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
+                        }
+                        runtime.terminal.draw_seeding(&activity_lines)?;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(GardenerError::Process(
+                        "backlog seeding refinement worker channel disconnected".to_string(),
+                    ));
+                }
+            }
+        }
+    })
+}
+
 fn print_seed_recommendations(
     runtime: &ProductionRuntime,
     recommendations: &[SeedTask],
@@ -915,6 +1008,7 @@ pub fn run_interactive_seeding(
     let quality_path = quality_report_path(cfg, scope);
     let quality_doc = runtime.file_system.read_to_string(&quality_path)?;
     let backlog_snapshot = summarize_active_backlog(store)?;
+    let rejected_tasks_formatted = format_rejected_seeds(store);
     let existing_count = store.count_active_tasks()?;
 
     if !should_seed_backlog(true, cfg.execution.test_mode, existing_count, force_seed_backlog) {
@@ -941,18 +1035,20 @@ pub fn run_interactive_seeding(
 
     if backlog_approval {
         // Review mode: dry-run to get recommendations, then show review wizard.
+        // Supports a refinement loop: tasks marked Refine go back to the agent.
         let mut progress = |_detail: &str| -> Result<(), GardenerError> { Ok(()) };
-        let recommendations = run_seed_recommendations_with_heartbeat(
+        let mut pending_tasks: Vec<SeedTask> = run_seed_recommendations_with_heartbeat(
             runtime,
             scope,
             cfg,
             &profile,
             &quality_doc,
             &backlog_snapshot,
+            &rejected_tasks_formatted,
             &mut progress,
         )?;
 
-        if recommendations.is_empty() {
+        if pending_tasks.is_empty() {
             append_run_log(
                 "info",
                 "startup.interactive_seeding.review.empty",
@@ -961,37 +1057,85 @@ pub fn run_interactive_seeding(
             return Ok(0);
         }
 
-        // Close the live seeding TUI before launching the blocking review wizard.
-        let _ = runtime.terminal.close_ui();
+        let mut round = 0usize;
+        loop {
+            // Close the live seeding TUI before launching the blocking review wizard.
+            let _ = runtime.terminal.close_ui();
 
-        let kept = crate::tui::run_seed_review_wizard(&recommendations)?;
-        for (index, keep) in kept.iter().enumerate() {
-            if *keep {
-                let task = &recommendations[index];
-                let priority = match task.priority.as_str() {
-                    "P0" => Priority::P0,
-                    "P2" => Priority::P2,
-                    _ => Priority::P1,
-                };
-                store.upsert_task(NewTask {
-                    kind: TaskKind::Maintenance,
-                    title: task.title.clone(),
-                    details: task.details.clone(),
-                    scope_key: task.domain.clone(),
-                    rationale: task.rationale.clone(),
-                    priority,
-                    source: "interactive_seed_review".to_string(),
-                    related_pr: None,
-                    related_branch: None,
-                })?;
-                seeded += 1;
+            let decisions = crate::tui::run_seed_review_wizard(&pending_tasks, round)?;
+            let mut to_refine: Vec<(SeedTask, String)> = Vec::new();
+
+            for (index, decision) in decisions.into_iter().enumerate() {
+                match decision {
+                    crate::tui::ReviewDecision::Keep => {
+                        let task = &pending_tasks[index];
+                        let priority = match task.priority.as_str() {
+                            "P0" => Priority::P0,
+                            "P2" => Priority::P2,
+                            _ => Priority::P1,
+                        };
+                        store.upsert_task(NewTask {
+                            kind: TaskKind::Maintenance,
+                            title: task.title.clone(),
+                            details: task.details.clone(),
+                            scope_key: task.domain.clone(),
+                            rationale: task.rationale.clone(),
+                            priority,
+                            source: "interactive_seed_review".to_string(),
+                            related_pr: None,
+                            related_branch: None,
+                        })?;
+                        seeded += 1;
+                    }
+                    crate::tui::ReviewDecision::Discard(reason) => {
+                        let _ = store.insert_rejected_seed(
+                            &pending_tasks[index],
+                            reason.as_deref(),
+                        );
+                    }
+                    crate::tui::ReviewDecision::Refine(feedback) => {
+                        to_refine.push((pending_tasks[index].clone(), feedback));
+                    }
+                }
+            }
+
+            append_run_log(
+                "info",
+                "startup.interactive_seeding.review.round_completed",
+                json!({
+                    "round": round,
+                    "kept": seeded,
+                    "to_refine": to_refine.len(),
+                }),
+            );
+
+            if to_refine.is_empty() {
+                break;
+            }
+
+            // Re-seed with refinement feedback
+            round += 1;
+            pending_tasks = run_seed_refinement_with_heartbeat(
+                runtime,
+                scope,
+                cfg,
+                &profile,
+                &quality_doc,
+                &backlog_snapshot,
+                &rejected_tasks_formatted,
+                &to_refine,
+            )?;
+
+            if pending_tasks.is_empty() {
+                break;
             }
         }
+
         append_run_log(
             "info",
             "startup.interactive_seeding.review.completed",
             json!({
-                "total_recommended": recommendations.len(),
+                "total_rounds": round + 1,
                 "kept": seeded,
             }),
         );
@@ -1005,6 +1149,7 @@ pub fn run_interactive_seeding(
             &profile,
             &quality_doc,
             &backlog_snapshot,
+            &rejected_tasks_formatted,
             &mut progress,
         ) {
             append_run_log(
@@ -1064,6 +1209,26 @@ fn summarize_active_backlog(store: &BacklogStore) -> Result<String, GardenerErro
         Ok("No active backlog tasks.".to_string())
     } else {
         Ok(lines.join("\n"))
+    }
+}
+
+fn format_rejected_seeds(store: &BacklogStore) -> String {
+    match store.list_rejected_seeds() {
+        Ok(seeds) if !seeds.is_empty() => {
+            let mut lines = Vec::new();
+            for seed in &seeds {
+                if seed.rejection_reason.is_empty() {
+                    lines.push(format!("- \"{}\" ({}) — rejected (no reason given)", seed.title, seed.domain));
+                } else {
+                    lines.push(format!(
+                        "- \"{}\" ({}) — rejected because: \"{}\"",
+                        seed.title, seed.domain, seed.rejection_reason
+                    ));
+                }
+            }
+            lines.join("\n")
+        }
+        _ => String::new(),
     }
 }
 

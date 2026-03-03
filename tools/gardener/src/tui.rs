@@ -2,7 +2,7 @@ use crate::errors::GardenerError;
 use crate::hotkeys::{dashboard_controls_legend, report_controls_legend};
 use crate::logging::{current_run_id, current_run_log_path};
 use crate::seed_runner::SeedTask;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -1726,16 +1726,30 @@ fn draw_seed_review_frame(
     task: &SeedTask,
     index: usize,
     total: usize,
+    round: usize,
+    input_mode: Option<&InputMode>,
+    input_text: &str,
 ) {
+    let footer_height = if input_mode.is_some() { 4 } else { 2 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(2),
+            Constraint::Length(footer_height),
         ])
         .split(frame.area());
 
+    let counter = if round == 0 {
+        format!("review backlog  ({}/{})", index + 1, total)
+    } else {
+        format!(
+            "review backlog  round {}  ({}/{})",
+            round + 1,
+            index + 1,
+            total
+        )
+    };
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             "GARDENER ",
@@ -1744,7 +1758,7 @@ fn draw_seed_review_frame(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("review backlog  ({}/{})", index + 1, total),
+            counter,
             Style::default()
                 .fg(Color::Rgb(245, 196, 95))
                 .add_modifier(Modifier::BOLD),
@@ -1814,35 +1828,89 @@ fn draw_seed_review_frame(
         chunks[1],
     );
 
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "[k] Keep",
-            Style::default()
-                .fg(Color::Rgb(126, 231, 135))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("    "),
-        Span::styled(
-            "[d] Discard",
-            Style::default()
-                .fg(Color::Rgb(255, 122, 122))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("    "),
-        Span::styled(
-            "[q] Discard remaining & finish",
-            Style::default().fg(Color::Gray),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
-    );
-    frame.render_widget(footer, chunks[2]);
+    if let Some(mode) = input_mode {
+        let (label, hint) = match mode {
+            InputMode::DiscardReason => (
+                "Why discard? (optional — Enter to skip, Esc to cancel)",
+                Color::Rgb(255, 122, 122),
+            ),
+            InputMode::RefineFeedback => (
+                "How should this task change? (Enter to submit, Esc to cancel)",
+                Color::Rgb(245, 196, 95),
+            ),
+        };
+        let footer = Paragraph::new(vec![
+            Line::from(Span::styled(
+                label,
+                Style::default().fg(hint).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("> {input_text}\u{2588}"),
+                Style::default().fg(Color::White),
+            )),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        );
+        frame.render_widget(footer, chunks[2]);
+    } else {
+        let footer = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "[k] Keep",
+                Style::default()
+                    .fg(Color::Rgb(126, 231, 135))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    "),
+            Span::styled(
+                "[d] Discard",
+                Style::default()
+                    .fg(Color::Rgb(255, 122, 122))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    "),
+            Span::styled(
+                "[r] Refine",
+                Style::default()
+                    .fg(Color::Rgb(245, 196, 95))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    "),
+            Span::styled(
+                "[q] Discard remaining & finish",
+                Style::default().fg(Color::Gray),
+            ),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        );
+        frame.render_widget(footer, chunks[2]);
+    }
 }
 
-pub fn run_seed_review_wizard(tasks: &[SeedTask]) -> Result<Vec<bool>, GardenerError> {
+/// Decision made for a single seed task during interactive review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewDecision {
+    Keep,
+    Discard(Option<String>),
+    Refine(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    DiscardReason,
+    RefineFeedback,
+}
+
+pub fn run_seed_review_wizard(
+    tasks: &[SeedTask],
+    round: usize,
+) -> Result<Vec<ReviewDecision>, GardenerError> {
     let mut stdout = io::stdout();
     enable_raw_mode().map_err(|e| GardenerError::Io(e.to_string()))?;
     execute!(stdout, EnterAlternateScreen).map_err(|e| GardenerError::Io(e.to_string()))?;
@@ -1851,41 +1919,103 @@ pub fn run_seed_review_wizard(tasks: &[SeedTask]) -> Result<Vec<bool>, GardenerE
     let mut terminal = Terminal::new(backend).map_err(|e| GardenerError::Io(e.to_string()))?;
 
     let total = tasks.len();
-    let mut kept = vec![false; total];
+    let mut decisions: Vec<Option<ReviewDecision>> = vec![None; total];
     let mut current = 0usize;
+    let mut input_mode: Option<InputMode> = None;
+    let mut input_buffer = String::new();
 
     loop {
         if current >= total {
             break;
         }
         terminal
-            .draw(|frame| draw_seed_review_frame(frame, &tasks[current], current, total))
+            .draw(|frame| {
+                draw_seed_review_frame(
+                    frame,
+                    &tasks[current],
+                    current,
+                    total,
+                    round,
+                    input_mode.as_ref(),
+                    &input_buffer,
+                )
+            })
             .map_err(|e| GardenerError::Io(e.to_string()))?;
 
         if let Event::Key(key) = event::read().map_err(|e| GardenerError::Io(e.to_string()))? {
-            match key.code {
-                KeyCode::Char('k') | KeyCode::Char('K') => {
-                    kept[current] = true;
-                    current += 1;
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if let Some(mode) = input_mode {
+                match key.code {
+                    KeyCode::Enter => {
+                        match mode {
+                            InputMode::DiscardReason => {
+                                let reason = if input_buffer.trim().is_empty() {
+                                    None
+                                } else {
+                                    Some(input_buffer.clone())
+                                };
+                                decisions[current] = Some(ReviewDecision::Discard(reason));
+                                current += 1;
+                                input_mode = None;
+                                input_buffer.clear();
+                            }
+                            InputMode::RefineFeedback => {
+                                if input_buffer.trim().is_empty() {
+                                    // Feedback required — stay in input mode
+                                } else {
+                                    decisions[current] =
+                                        Some(ReviewDecision::Refine(input_buffer.clone()));
+                                    current += 1;
+                                    input_mode = None;
+                                    input_buffer.clear();
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Esc => {
+                        input_mode = None;
+                        input_buffer.clear();
+                    }
+                    KeyCode::Backspace => {
+                        input_buffer.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        input_buffer.push(c);
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
-                    kept[current] = false;
-                    current += 1;
+            } else {
+                match key.code {
+                    KeyCode::Char('k') | KeyCode::Char('K') => {
+                        decisions[current] = Some(ReviewDecision::Keep);
+                        current += 1;
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('D') => {
+                        input_mode = Some(InputMode::DiscardReason);
+                        input_buffer.clear();
+                    }
+                    KeyCode::Char('r') | KeyCode::Char('R') => {
+                        input_mode = Some(InputMode::RefineFeedback);
+                        input_buffer.clear();
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                        break;
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('q') | KeyCode::Char('Q') => {
-                    // Discard all remaining
-                    break;
-                }
-                KeyCode::Esc => {
-                    break;
-                }
-                _ => {}
             }
         }
     }
 
     teardown_terminal(terminal)?;
-    Ok(kept)
+
+    // Convert None decisions (from early exit) to Discard(None)
+    Ok(decisions
+        .into_iter()
+        .map(|d| d.unwrap_or(ReviewDecision::Discard(None)))
+        .collect())
 }
 
 pub fn draw_triage_live(activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {

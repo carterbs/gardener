@@ -19,7 +19,7 @@ use crate::tui::{
 use crate::types::RuntimeScope;
 use crate::worker::{
     execute_merge_phase, execute_task, worktree_branch_for, worktree_path_for, MergeRequest,
-    WorkerOutcome, WorkerStreamEvent,
+    clear_state_sink, install_state_sink, WorkerOutcome, WorkerStreamEvent,
 };
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 const WORKER_POOL_ID: &str = "worker_pool";
 const MERGE_WORKER_ID: &str = "merge-worker";
-const WORKER_COMMAND_HISTORY_LIMIT: usize = 32;
+const WORKER_COMMAND_HISTORY_LIMIT: usize = 20;
 const COPY_SHORTCUT_KEY: char = 'c';
 const IDLE_WORKER_POLL_DELAY_MS: u64 = 250;
 const IDLE_WORKER_POLL_ATTEMPTS: usize = 4;
@@ -385,27 +385,24 @@ pub fn run_worker_pool_fsm(
                 let process_runner = runtime.process_runner.clone();
                 let worker_scope = runtime_scope.clone();
                 scope_guard.spawn(move || {
+                    let state_ui_tx = event_tx.clone();
                     let on_event = move |event: WorkerStreamEvent| {
-                        let _ = event_tx.send(match event {
-                            WorkerStreamEvent::ToolCommand { task_id, command } => {
-                                PoolStreamEvent::ToolCommand {
-                                    slot_idx: idx,
-                                    task_id,
-                                    command,
-                                }
-                            }
-                            WorkerStreamEvent::StateChanged {
-                                task_id,
-                                state,
-                                details,
-                            } => PoolStreamEvent::StateChanged {
+                        if let WorkerStreamEvent::ToolCommand { task_id, command } = event {
+                            let _ = event_tx.send(PoolStreamEvent::ToolCommand {
                                 slot_idx: idx,
                                 task_id,
-                                state,
-                                details,
-                            },
-                        });
+                                command,
+                            });
+                        }
                     };
+                    install_state_sink(Box::new(move |state, task_id, details| {
+                        let _ = state_ui_tx.send(PoolStreamEvent::StateChanged {
+                            slot_idx: idx,
+                            task_id: task_id.to_string(),
+                            state: state.to_string(),
+                            details: details.to_string(),
+                        });
+                    }));
                     let result = execute_task(
                         &cfg,
                         process_runner.as_ref(),
@@ -420,6 +417,7 @@ pub fn run_worker_pool_fsm(
                         task_last_updated,
                         Some(&on_event),
                     );
+                    clear_state_sink();
                     let _ = tx.send(PoolResultMessage::DoingResult {
                         slot_idx: idx,
                         task_id,
@@ -440,29 +438,26 @@ pub fn run_worker_pool_fsm(
                 scope_guard.spawn(move || {
                     let event_tx = event_tx.clone();
                     while let Ok(req) = merge_rx.recv() {
+                        let state_ui_tx = event_tx.clone();
                         let event_tx = event_tx.clone();
                         let task_id = req.task_id.clone();
                         let on_event = move |event: WorkerStreamEvent| {
-                            let _ = event_tx.send(match event {
-                                WorkerStreamEvent::ToolCommand { task_id, command } => {
-                                    PoolStreamEvent::ToolCommand {
-                                        slot_idx: merge_row_idx,
-                                        task_id,
-                                        command,
-                                    }
-                                }
-                                WorkerStreamEvent::StateChanged {
-                                    task_id,
-                                    state,
-                                    details,
-                                } => PoolStreamEvent::StateChanged {
+                            if let WorkerStreamEvent::ToolCommand { task_id, command } = event {
+                                let _ = event_tx.send(PoolStreamEvent::ToolCommand {
                                     slot_idx: merge_row_idx,
                                     task_id,
-                                    state,
-                                    details,
-                                },
-                            });
+                                    command,
+                                });
+                            }
                         };
+                        install_state_sink(Box::new(move |state, task_id, details| {
+                            let _ = state_ui_tx.send(PoolStreamEvent::StateChanged {
+                                slot_idx: merge_row_idx,
+                                task_id: task_id.to_string(),
+                                state: state.to_string(),
+                                details: details.to_string(),
+                            });
+                        }));
                         let result = execute_merge_phase(
                             &req,
                             &merge_cfg,
@@ -472,6 +467,7 @@ pub fn run_worker_pool_fsm(
                             &merge_scope,
                             Some(&on_event),
                         );
+                        clear_state_sink();
                         let _ = merge_result_tx
                             .send(PoolResultMessage::MergeResult { task_id, result });
                     }
@@ -483,11 +479,12 @@ pub fn run_worker_pool_fsm(
             let mut merge_tx = merge_tx;
 
             while active_doing > 0 || active_merging > 0 {
-                while let Ok(event) = event_rx.try_recv() {
-                    if apply_pool_stream_event(&mut workers, &mut last_activity_pulse, event) {
-                        event_sequence = event_sequence.saturating_add(1);
-                    }
-                }
+                let mut updated = drain_pool_events(
+                    &mut workers,
+                    &mut last_activity_pulse,
+                    &mut event_sequence,
+                    &event_rx,
+                );
                 if handle_hotkeys(&mut HotkeyState {
                     runtime,
                     scope: &runtime_scope,
@@ -784,27 +781,24 @@ pub fn run_worker_pool_fsm(
                                 let worker_scope = runtime_scope.clone();
                                 let event_tx = event_tx.clone();
                                 scope_guard.spawn(move || {
+                                    let state_ui_tx = event_tx.clone();
                                     let on_event = move |event: WorkerStreamEvent| {
-                                        let _ = event_tx.send(match event {
-                                            WorkerStreamEvent::ToolCommand { task_id, command } => {
-                                                PoolStreamEvent::ToolCommand {
-                                                    slot_idx: idx,
-                                                    task_id,
-                                                    command,
-                                                }
-                                            }
-                                            WorkerStreamEvent::StateChanged {
-                                                task_id,
-                                                state,
-                                                details,
-                                            } => PoolStreamEvent::StateChanged {
+                                        if let WorkerStreamEvent::ToolCommand { task_id, command } = event {
+                                            let _ = event_tx.send(PoolStreamEvent::ToolCommand {
                                                 slot_idx: idx,
                                                 task_id,
-                                                state,
-                                                details,
-                                            },
-                                        });
+                                                command,
+                                            });
+                                        }
                                     };
+                                    install_state_sink(Box::new(move |state, task_id, details| {
+                                        let _ = state_ui_tx.send(PoolStreamEvent::StateChanged {
+                                            slot_idx: idx,
+                                            task_id: task_id.to_string(),
+                                            state: state.to_string(),
+                                            details: details.to_string(),
+                                        });
+                                    }));
                                     let result = execute_task(
                                         &cfg,
                                         process_runner.as_ref(),
@@ -819,6 +813,7 @@ pub fn run_worker_pool_fsm(
                                         task_last_updated,
                                         Some(&on_event),
                                     );
+                                    clear_state_sink();
                                     let _ = tx.send(PoolResultMessage::DoingResult {
                                         slot_idx: idx,
                                         task_id,
@@ -961,16 +956,13 @@ pub fn run_worker_pool_fsm(
                         last_render_completed = Some(Instant::now());
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        let mut updated = false;
-                        while let Ok(event) = event_rx.try_recv() {
-                            if apply_pool_stream_event(
-                                &mut workers,
-                                &mut last_activity_pulse,
-                                event,
-                            ) {
-                                event_sequence = event_sequence.saturating_add(1);
-                                updated = true;
-                            }
+                        if drain_pool_events(
+                            &mut workers,
+                            &mut last_activity_pulse,
+                            &mut event_sequence,
+                            &event_rx,
+                        ) {
+                            updated = true;
                         }
                         if last_worker_state_line < event_sequence {
                             last_worker_state_line = event_sequence;
@@ -1135,6 +1127,22 @@ fn apply_pool_stream_event(
             true
         }
     }
+}
+
+fn drain_pool_events(
+    workers: &mut [WorkerRow],
+    last_activity_pulse: &mut [Instant],
+    event_sequence: &mut usize,
+    event_rx: &mpsc::Receiver<PoolStreamEvent>,
+) -> bool {
+    let mut updated = false;
+    while let Ok(event) = event_rx.try_recv() {
+        if apply_pool_stream_event(workers, last_activity_pulse, event) {
+            *event_sequence = event_sequence.saturating_add(1);
+            updated = true;
+        }
+    }
+    updated
 }
 
 fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(), GardenerError> {

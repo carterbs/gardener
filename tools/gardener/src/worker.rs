@@ -27,6 +27,7 @@ use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde::Serialize;
 use serde_json::json;
+use std::cell::RefCell;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -110,6 +111,24 @@ pub const MAX_MERGE_REMEDIATION: u32 = 3;
 pub const MERGEABILITY_POLL_MAX: u32 = 12;
 pub const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+type WorkerStateSink = Box<dyn Fn(&str, &str, &str)>;
+
+thread_local! {
+    static STATE_SINK: RefCell<Option<WorkerStateSink>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn install_state_sink(sink: WorkerStateSink) {
+    STATE_SINK.with(|cell| {
+        *cell.borrow_mut() = Some(sink);
+    });
+}
+
+pub(crate) fn clear_state_sink() {
+    STATE_SINK.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum WorkerStreamEvent {
     ToolCommand {
@@ -117,9 +136,9 @@ pub(crate) enum WorkerStreamEvent {
         command: String,
     },
     StateChanged {
-        task_id: String,
-        state: String,
-        details: String,
+        _task_id: String,
+        _state: String,
+        _details: String,
     },
 }
 
@@ -300,13 +319,19 @@ fn emit_worker_activity_state_with(
         }
     }
     let details_str = worker_state_details(state.as_str(), Some(&details));
+    let sink_details = details_str.clone();
     if let Some(on_event) = on_event {
         on_event(WorkerStreamEvent::StateChanged {
-            task_id: task_id.to_string(),
-            state: state.as_str().to_string(),
-            details: details_str,
+            _task_id: task_id.to_string(),
+            _state: state.as_str().to_string(),
+            _details: details_str,
         });
     }
+    STATE_SINK.with(|cell| {
+        if let Some(sink) = cell.borrow().as_ref() {
+            sink(state.as_str(), task_id, &sink_details);
+        }
+    });
     append_run_log("info", "worker.activity.state_changed", payload);
 }
 

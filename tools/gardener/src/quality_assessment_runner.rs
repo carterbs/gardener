@@ -5,23 +5,30 @@ use crate::logging::append_run_log;
 use crate::output_envelope::{END_MARKER, START_MARKER};
 use crate::priority::Priority;
 use crate::protocol::AgentTerminal;
-use crate::quality_assessment_prompt::{build_assessment_prompt, truncate_bundle_for_agent};
 use crate::quality_assessment_types::{
     AssessmentPayload, DeficiencyCategory, DomainAssessment, DomainScores, RepoWideAssessment,
     StructuralDeficiency,
 };
+use crate::quality_complexity_analyzer::analyze_complexity;
+use crate::quality_dimension_prompts;
 use crate::quality_evidence_bundle::{collect_evidence_bundle, EvidenceBundle};
+use crate::quality_file_sampler::{
+    format_sampled_files, rank_files_by_complexity, rank_test_files_by_assertions, sample_files,
+};
+use crate::quality_tree_walker::generate_tree_diagram;
 use crate::runtime::ProcessRunner;
 use crate::types::AgentKind;
 use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::Mutex;
 
 pub struct QualityAssessmentConfig {
     pub backend: AgentKind,
     pub model: String,
     pub max_turns: u32,
     pub token_budget: usize,
+    pub total_timeout_secs: u64,
 }
 
 impl Default for QualityAssessmentConfig {
@@ -31,15 +38,16 @@ impl Default for QualityAssessmentConfig {
             model: "gpt-5-codex".to_string(),
             max_turns: 10,
             token_budget: 80_000,
+            total_timeout_secs: 90,
         }
     }
 }
 
-/// Run the quality assessment pipeline: collect evidence, invoke agent, parse result.
+/// Run the quality assessment pipeline: collect evidence, invoke agents, parse result.
 ///
-/// Falls back to deterministic scoring when the agent is unavailable or fails.
-/// Result of running the assessment pipeline.
-/// The boolean indicates whether the agent was used (true) or the deterministic fallback (false).
+/// When a factory is provided, runs the multi-agent v2 pipeline (parallel dimension agents).
+/// When no factory is provided, falls back to deterministic scoring.
+/// The boolean indicates whether agents were used (true) or the deterministic fallback (false).
 pub fn run_assessment(
     repo_path: &Path,
     factory: Option<&AdapterFactory>,
@@ -53,79 +61,389 @@ pub fn run_assessment(
             "repo_path": repo_path.display().to_string(),
             "backend": format!("{:?}", config.backend),
             "model": config.model,
-            "token_budget": config.token_budget,
+            "total_timeout_secs": config.total_timeout_secs,
         }),
     );
 
-    // Step 1: Collect evidence bundle
+    // Step 0: Collect evidence bundle (deterministic pre-computation)
     let bundle = collect_evidence_bundle(repo_path)?;
 
-    // Step 2: Truncate for agent context if needed
-    let agent_bundle = truncate_bundle_for_agent(&bundle, config.token_budget);
-
-    // Step 3: Build prompt
-    let prompt = build_assessment_prompt(&agent_bundle);
-
-    // Step 4: Try agent execution
-    let agent_result = if let Some(factory) = factory {
-        try_agent_assessment(factory, process_runner, config, repo_path, &prompt)
+    // Route to multi-agent pipeline or deterministic fallback
+    if let Some(factory) = factory {
+        match run_multi_agent_assessment(repo_path, factory, process_runner, config, &bundle) {
+            Ok(payload) => {
+                append_run_log(
+                    "info",
+                    "quality_assessment.multi_agent_succeeded",
+                    json!({
+                        "domain_count": payload.domains.len(),
+                        "deficiency_count": payload.deficiencies.len(),
+                    }),
+                );
+                Ok((payload, bundle, true))
+            }
+            Err(e) => {
+                // Multi-agent pipeline failed — fail the assessment entirely (no silent fallback)
+                append_run_log(
+                    "error",
+                    "quality_assessment.multi_agent_failed",
+                    json!({ "error": e.to_string() }),
+                );
+                Err(e)
+            }
+        }
     } else {
         append_run_log(
             "info",
-            "quality_assessment.no_factory",
-            json!({ "reason": "no adapter factory provided, using deterministic fallback" }),
+            "quality_assessment.deterministic_fallback",
+            json!({ "reason": "no adapter factory provided" }),
         );
-        None
-    };
-
-    // Step 5: Use agent result or fall back to deterministic
-    let (payload, agent_used) = match agent_result {
-        Some(payload) => {
-            append_run_log(
-                "info",
-                "quality_assessment.agent_succeeded",
-                json!({
-                    "domain_count": payload.domains.len(),
-                    "deficiency_count": payload.deficiencies.len(),
-                }),
-            );
-            (payload, true)
-        }
-        None => {
-            append_run_log(
-                "info",
-                "quality_assessment.deterministic_fallback",
-                json!({ "reason": "agent unavailable or failed" }),
-            );
-            (deterministic_fallback(&bundle), false)
-        }
-    };
-
-    Ok((payload, bundle, agent_used))
+        Ok((deterministic_fallback(&bundle), bundle, false))
+    }
 }
 
-/// Attempt to run the assessment through the agent. Returns None on any failure.
-fn try_agent_assessment(
+/// Run the multi-agent v2 assessment pipeline.
+///
+/// Step 0: Deterministic pre-computation (already done — bundle passed in)
+/// Step 1: Domain discovery agent (sequential)
+/// Step 2: 9 dimension agents (parallel)
+/// Step 3: Synthesizer agent (sequential)
+fn run_multi_agent_assessment(
+    repo_path: &Path,
+    factory: &AdapterFactory,
+    process_runner: &dyn ProcessRunner,
+    config: &QualityAssessmentConfig,
+    bundle: &EvidenceBundle,
+) -> Result<AssessmentPayload, GardenerError> {
+    let start_time = std::time::Instant::now();
+
+    // --- Step 0b: Additional deterministic pre-computation ---
+    let complexity = analyze_complexity(repo_path, &bundle.tree);
+    let tree_diagram = generate_tree_diagram(&bundle.tree, 3000);
+
+    // Build shared context
+    let manifest_names: Vec<(String, String)> = bundle
+        .package_manifests
+        .iter()
+        .map(|m| {
+            let name = m.name.clone().unwrap_or_else(|| m.manifest_type.clone());
+            (name, m.path.clone())
+        })
+        .collect();
+    let shared_context = quality_dimension_prompts::build_shared_context(
+        &tree_diagram,
+        &bundle.tree.language_summary,
+        &manifest_names,
+    );
+
+    // Pre-sample files for hybrid agents
+    let test_assertion_pairs: Vec<(String, usize)> = bundle
+        .assertions
+        .files
+        .iter()
+        .map(|f| (f.path.clone(), f.assertion_count))
+        .collect();
+    let ranked_test_paths = rank_test_files_by_assertions(&test_assertion_pairs);
+    let sampled_test_files = sample_files(repo_path, &ranked_test_paths, 500);
+    let sampled_test_files_str = format_sampled_files(&sampled_test_files);
+
+    let complexity_pairs: Vec<(String, f64)> = complexity
+        .files
+        .iter()
+        .map(|f| (f.path.clone(), f.complexity_score))
+        .collect();
+    let ranked_risk_paths = rank_files_by_complexity(&complexity_pairs);
+    let sampled_risk_files = sample_files(repo_path, &ranked_risk_paths, 500);
+    let sampled_risk_files_str = format_sampled_files(&sampled_risk_files);
+
+    let precompute_elapsed = start_time.elapsed();
+    append_run_log(
+        "info",
+        "quality_assessment.precompute_done",
+        json!({
+            "elapsed_ms": precompute_elapsed.as_millis() as u64,
+            "complexity_files": complexity.summary.total_files,
+            "sampled_test_files": sampled_test_files.len(),
+            "sampled_risk_files": sampled_risk_files.len(),
+        }),
+    );
+
+    // --- Step 1: Domain discovery agent ---
+    let domain_prompt = quality_dimension_prompts::build_domain_discovery_prompt(&shared_context);
+    let domain_output = execute_agent(
+        factory,
+        process_runner,
+        config,
+        repo_path,
+        "domain-discovery",
+        &domain_prompt,
+    )?;
+    let domain_list = parse_domain_list(&domain_output);
+
+    let discovery_elapsed = start_time.elapsed();
+    append_run_log(
+        "info",
+        "quality_assessment.domain_discovery_done",
+        json!({
+            "elapsed_ms": discovery_elapsed.as_millis() as u64,
+            "domain_list_len": domain_list.len(),
+        }),
+    );
+
+    // --- Step 2: Build dimension prompts ---
+    let test_detector_summary = format_test_detector_summary(bundle);
+    let deterministic_test_metrics = format_deterministic_test_metrics(bundle);
+    let complexity_metrics = format_complexity_metrics(&complexity);
+    let debt_summary = format_debt_summary(bundle);
+    let untested_summary = format_untested_summary(bundle);
+    let steering_doc_paths = format_steering_doc_paths(bundle);
+    let linter_config_paths = format_linter_config_paths(bundle);
+    let ci_lint_summary = format_ci_lint_summary(bundle);
+    let coverage_summary = format_coverage_summary(bundle);
+    let doc_inventory = format_doc_inventory(bundle);
+
+    let dimension_prompts: Vec<(&str, String)> = vec![
+        (
+            "test_coverage",
+            quality_dimension_prompts::build_test_coverage_prompt(
+                &shared_context,
+                &domain_list,
+                &test_detector_summary,
+            ),
+        ),
+        (
+            "test_quality",
+            quality_dimension_prompts::build_test_quality_prompt(
+                &shared_context,
+                &domain_list,
+                &deterministic_test_metrics,
+                &sampled_test_files_str,
+            ),
+        ),
+        (
+            "risk_exposure",
+            quality_dimension_prompts::build_risk_exposure_prompt(
+                &shared_context,
+                &domain_list,
+                &complexity_metrics,
+                &debt_summary,
+                &untested_summary,
+                &sampled_risk_files_str,
+            ),
+        ),
+        (
+            "convention_adherence",
+            quality_dimension_prompts::build_convention_adherence_prompt(
+                &shared_context,
+                &domain_list,
+                &steering_doc_paths,
+                &linter_config_paths,
+            ),
+        ),
+        (
+            "agent_steering",
+            quality_dimension_prompts::build_agent_steering_prompt(
+                &shared_context,
+                &domain_list,
+                &steering_doc_paths,
+            ),
+        ),
+        (
+            "mechanical_guardrails",
+            quality_dimension_prompts::build_mechanical_guardrails_prompt(
+                &shared_context,
+                &domain_list,
+                &ci_lint_summary,
+            ),
+        ),
+        (
+            "local_feedback_loop",
+            quality_dimension_prompts::build_local_feedback_loop_prompt(
+                &shared_context,
+                &domain_list,
+                &ci_lint_summary,
+            ),
+        ),
+        (
+            "coverage_infrastructure",
+            quality_dimension_prompts::build_coverage_infrastructure_prompt(
+                &shared_context,
+                &domain_list,
+                &coverage_summary,
+            ),
+        ),
+        (
+            "documentation_quality",
+            quality_dimension_prompts::build_documentation_quality_prompt(
+                &shared_context,
+                &domain_list,
+                &doc_inventory,
+            ),
+        ),
+    ];
+
+    // --- Step 2b: Execute all dimension agents in parallel ---
+    let cache_dir = repo_path.join(".cache/gardener/quality");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let errors: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let reports: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    std::thread::scope(|s| {
+        let handles: Vec<_> = dimension_prompts
+            .iter()
+            .map(|(dim_name, prompt)| {
+                let errors = &errors;
+                let reports = &reports;
+                let cache_dir = &cache_dir;
+                s.spawn(move || {
+                    let dim = *dim_name;
+                    append_run_log(
+                        "info",
+                        "quality_assessment.dimension_started",
+                        json!({ "dimension": dim }),
+                    );
+
+                    match execute_agent(
+                        factory,
+                        process_runner,
+                        config,
+                        repo_path,
+                        &format!("quality-{dim}"),
+                        prompt,
+                    ) {
+                        Ok(output) => {
+                            // Write report to cache
+                            let report_path = cache_dir.join(format!("{dim}.md"));
+                            let _ = std::fs::write(&report_path, &output);
+
+                            // Also persist to docs/quality-grades/ for seeding agent
+                            let stable_dir = repo_path.join("docs").join("quality-grades");
+                            let _ = std::fs::create_dir_all(&stable_dir);
+                            let stable_path = stable_dir.join(format!("{dim}.md"));
+                            let _ = std::fs::write(&stable_path, &output);
+
+                            append_run_log(
+                                "info",
+                                "quality_assessment.dimension_completed",
+                                json!({
+                                    "dimension": dim,
+                                    "output_len": output.len(),
+                                }),
+                            );
+                            reports
+                                .lock()
+                                .unwrap()
+                                .push((dim.to_string(), output));
+                        }
+                        Err(e) => {
+                            append_run_log(
+                                "error",
+                                "quality_assessment.dimension_failed",
+                                json!({
+                                    "dimension": dim,
+                                    "error": e.to_string(),
+                                }),
+                            );
+                            errors
+                                .lock()
+                                .unwrap()
+                                .push(format!("{dim}: {e}"));
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            let _ = handle.join();
+        }
+    });
+
+    let errors = errors.into_inner().unwrap();
+    if !errors.is_empty() {
+        return Err(GardenerError::Process(format!(
+            "Dimension agent(s) failed: {}",
+            errors.join("; ")
+        )));
+    }
+
+    let reports = reports.into_inner().unwrap();
+    let parallel_elapsed = start_time.elapsed();
+    append_run_log(
+        "info",
+        "quality_assessment.dimensions_all_done",
+        json!({
+            "elapsed_ms": parallel_elapsed.as_millis() as u64,
+            "report_count": reports.len(),
+        }),
+    );
+
+    // --- Step 3: Synthesizer agent ---
+    let report_refs: Vec<(&str, &str)> = reports
+        .iter()
+        .map(|(name, content)| (name.as_str(), content.as_str()))
+        .collect();
+    let synthesizer_prompt =
+        quality_dimension_prompts::build_synthesizer_prompt(&report_refs, &domain_list);
+    let synthesizer_output = execute_agent(
+        factory,
+        process_runner,
+        config,
+        repo_path,
+        "quality-synthesizer",
+        &synthesizer_prompt,
+    )?;
+
+    // Parse and validate the final payload
+    let payload = parse_assessment_payload(&synthesizer_output)
+        .map_err(|e| GardenerError::Process(format!("Synthesizer output parse failed: {e}")))?;
+    let validated = validate_payload(payload)
+        .map_err(|e| GardenerError::Process(format!("Synthesizer output validation failed: {e}")))?;
+
+    let total_elapsed = start_time.elapsed();
+    append_run_log(
+        "info",
+        "quality_assessment.pipeline_complete",
+        json!({
+            "total_elapsed_ms": total_elapsed.as_millis() as u64,
+            "total_elapsed_secs": total_elapsed.as_secs(),
+        }),
+    );
+
+    Ok(validated)
+}
+
+/// Execute a single agent call and return the text output.
+fn execute_agent(
     factory: &AdapterFactory,
     process_runner: &dyn ProcessRunner,
     config: &QualityAssessmentConfig,
     repo_path: &Path,
+    agent_id: &str,
     prompt: &str,
-) -> Option<AssessmentPayload> {
-    let adapter = factory.get(config.backend)?;
+) -> Result<String, GardenerError> {
+    let adapter = factory.get(config.backend).ok_or_else(|| {
+        GardenerError::Process(format!(
+            "No adapter available for backend {:?}",
+            config.backend
+        ))
+    })?;
 
-    let output_file = repo_path.join(".cache/gardener/quality-last-message.json");
+    let output_file = repo_path.join(format!(
+        ".cache/gardener/quality-{agent_id}-last-message.json"
+    ));
     if let Some(parent) = output_file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
     let context = AdapterContext {
-        worker_id: "quality-assessor".to_string(),
-        session_id: "quality-assessment-session".to_string(),
-        sandbox_id: "quality-assessment-sandbox".to_string(),
+        worker_id: agent_id.to_string(),
+        session_id: format!("quality-{agent_id}-session"),
+        sandbox_id: format!("quality-{agent_id}-sandbox"),
         model: config.model.clone(),
         cwd: repo_path.to_path_buf(),
-        prompt_version: "quality-assessment-v1".to_string(),
+        prompt_version: "quality-assessment-v2".to_string(),
         context_manifest_hash: "quality-assessment-context".to_string(),
         output_schema: None,
         output_file: Some(output_file.clone()),
@@ -133,104 +451,267 @@ fn try_agent_assessment(
         max_turns: Some(config.max_turns),
     };
 
-    // First attempt
-    let result = match adapter.execute(process_runner, &context, prompt, None) {
-        Ok(r) => r,
-        Err(e) => {
-            append_run_log(
-                "warn",
-                "quality_assessment.agent_execute_error",
-                json!({ "error": e.to_string() }),
-            );
-            return None;
-        }
-    };
+    let result = adapter.execute(process_runner, &context, prompt, None)?;
 
     if result.terminal == AgentTerminal::Failure {
-        append_run_log(
-            "warn",
-            "quality_assessment.agent_failed",
-            json!({
-                "terminal": "failure",
-                "payload": result.payload,
-                "diagnostics": result.diagnostics,
-            }),
-        );
-        return None;
+        return Err(GardenerError::Process(format!(
+            "Agent '{agent_id}' terminated with failure"
+        )));
     }
 
-    // Try to parse from agent output — check event payload first, then output file
-    let raw_output = extract_text_from_result_or_file(&result.payload, &output_file);
-    match parse_assessment_payload(&raw_output) {
-        Ok(payload) => match validate_payload(payload) {
-            Ok(validated) => return Some(validated),
-            Err(validation_err) => {
-                append_run_log(
-                    "warn",
-                    "quality_assessment.validation_failed",
-                    json!({
-                        "error": validation_err,
-                        "attempt": 1,
-                    }),
-                );
+    let output = extract_text_from_result_or_file(&result.payload, &output_file);
+    if output.is_empty() || output == "null" {
+        return Err(GardenerError::Process(format!(
+            "Agent '{agent_id}' produced empty output"
+        )));
+    }
+
+    Ok(output)
+}
+
+/// Parse the domain discovery agent's output into a formatted domain list string.
+fn parse_domain_list(raw_output: &str) -> String {
+    // Try to extract JSON from the output
+    let json_str = if let Some(start) = raw_output.find('{') {
+        if let Some(end) = raw_output.rfind('}') {
+            &raw_output[start..=end]
+        } else {
+            raw_output
+        }
+    } else {
+        raw_output
+    };
+
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
+        if let Some(domains) = parsed.get("domains").and_then(|d| d.as_array()) {
+            let mut out = String::new();
+            for domain in domains {
+                let name = domain
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                let description = domain
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("");
+                let paths = domain
+                    .get("paths")
+                    .and_then(|p| p.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                out.push_str(&format!("- **{name}**: {description} (paths: {paths})\n"));
             }
-        },
-        Err(parse_err) => {
-            append_run_log(
-                "warn",
-                "quality_assessment.parse_failed",
-                json!({
-                    "error": parse_err,
-                    "attempt": 1,
-                    "raw_output_len": raw_output.len(),
-                }),
-            );
+            return out;
         }
     }
 
-    // Retry once with error context appended
-    let retry_prompt = format!(
-        "{prompt}\n\n## IMPORTANT: Previous attempt failed\n\
-         Your previous response could not be parsed. Make sure your JSON is valid and \
-         appears between the <<GARDENER_JSON_START>> and <<GARDENER_JSON_END>> markers. \
-         All score values must be integers 0-100. The domains array must not be empty."
-    );
+    // If parsing fails, return the raw output as-is
+    raw_output.to_string()
+}
 
-    let retry_result = adapter
-        .execute(process_runner, &context, &retry_prompt, None)
-        .ok()?;
+// --- Formatting helpers for dimension prompt inputs ---
 
-    if retry_result.terminal == AgentTerminal::Failure {
-        append_run_log(
-            "warn",
-            "quality_assessment.retry_agent_failed",
-            json!({ "terminal": "failure" }),
-        );
-        return None;
+fn format_test_detector_summary(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Total test files: {}\nTotal source files: {}\n",
+        bundle.tree.total_test_files, bundle.tree.total_source_files
+    ));
+    for (lang, count) in &bundle.tests.summary {
+        out.push_str(&format!("- {lang}: {count} test files\n"));
     }
-
-    let retry_output = extract_text_from_result_or_file(&retry_result.payload, &output_file);
-    match parse_assessment_payload(&retry_output) {
-        Ok(payload) => match validate_payload(payload) {
-            Ok(validated) => Some(validated),
-            Err(err) => {
-                append_run_log(
-                    "error",
-                    "quality_assessment.retry_validation_failed",
-                    json!({ "error": err }),
-                );
-                None
-            }
-        },
-        Err(err) => {
-            append_run_log(
-                "error",
-                "quality_assessment.retry_parse_failed",
-                json!({ "error": err }),
-            );
-            None
+    if !bundle.tests.test_files.is_empty() {
+        out.push_str("\nTest files:\n");
+        for tf in &bundle.tests.test_files {
+            out.push_str(&format!(
+                "- {} ({}, {})\n",
+                tf.path, tf.language, tf.test_type
+            ));
         }
     }
+    out
+}
+
+fn format_deterministic_test_metrics(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    let totals = &bundle.assertions.totals;
+    out.push_str(&format!(
+        "Total test files analyzed: {}\n\
+         Total assertions found: {}\n\
+         Average assertions per test file: {:.1}\n",
+        totals.total_test_files, totals.total_assertions, totals.avg_assertions_per_file
+    ));
+
+    let base_score = (totals.avg_assertions_per_file * 20.0).min(100.0) as u8;
+    out.push_str(&format!("\nDeterministic base score: {base_score}/100\n"));
+
+    if !bundle.assertions.files.is_empty() {
+        out.push_str("\nPer-file assertion counts (top 10):\n");
+        for (i, f) in bundle.assertions.files.iter().take(10).enumerate() {
+            out.push_str(&format!(
+                "{}. {} — {} assertions\n",
+                i + 1,
+                f.path,
+                f.assertion_count
+            ));
+        }
+    }
+    out
+}
+
+fn format_complexity_metrics(
+    complexity: &crate::quality_complexity_analyzer::ComplexityAnalyzerOutput,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Total files analyzed: {}\nAverage complexity score: {:.1}\n",
+        complexity.summary.total_files, complexity.summary.avg_complexity
+    ));
+    if let Some(ref max_file) = complexity.summary.max_complexity_file {
+        out.push_str(&format!("Most complex file: {max_file}\n"));
+    }
+
+    out.push_str("\nTop 15 most complex files:\n");
+    for (i, f) in complexity.files.iter().take(15).enumerate() {
+        out.push_str(&format!(
+            "{}. {} — score: {:.1}, branches: {}, nesting: {}, functions: {}, lines: {}\n",
+            i + 1,
+            f.path,
+            f.complexity_score,
+            f.branch_count,
+            f.max_nesting_depth,
+            f.function_count,
+            f.line_count,
+        ));
+    }
+    out
+}
+
+fn format_debt_summary(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Total debt markers: {}\n",
+        bundle.debt.total
+    ));
+
+    // Count by keyword type
+    let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
+    for marker in &bundle.debt.markers {
+        *by_kind.entry(marker.keyword.as_str()).or_default() += 1;
+    }
+    for (kind, count) in &by_kind {
+        out.push_str(&format!("- {kind}: {count}\n"));
+    }
+
+    if !bundle.debt.per_file_counts.is_empty() {
+        out.push_str("\nFiles with most debt markers:\n");
+        let mut sorted: Vec<_> = bundle.debt.per_file_counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (i, (path, count)) in sorted.iter().take(10).enumerate() {
+            out.push_str(&format!("{}. {} — {count} markers\n", i + 1, path));
+        }
+    }
+    out
+}
+
+fn format_untested_summary(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Total source files: {}\nUntested: {}\n",
+        bundle.untested.total_count, bundle.untested.untested_count
+    ));
+    let untested: Vec<_> = bundle
+        .untested
+        .files
+        .iter()
+        .filter(|f| !f.has_corresponding_test && !f.has_inline_tests)
+        .take(20)
+        .collect();
+    if !untested.is_empty() {
+        out.push_str("\nUntested source files (first 20):\n");
+        for f in untested {
+            out.push_str(&format!("- {}\n", f.path));
+        }
+    }
+    out
+}
+
+fn format_steering_doc_paths(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Steering documents found: {}\n",
+        bundle.docs.steering_doc_count
+    ));
+    for doc in &bundle.docs.docs {
+        if doc.doc_type == "steering" {
+            out.push_str(&format!("- {} ({} lines)\n", doc.path, doc.line_count));
+        }
+    }
+    out
+}
+
+fn format_linter_config_paths(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Linter detected: {}\n",
+        bundle.ci_lint.linters.detected
+    ));
+    for path in &bundle.ci_lint.linters.files {
+        out.push_str(&format!("- {path}\n"));
+    }
+    out
+}
+
+fn format_ci_lint_summary(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "CI detected: {} (files: {:?})\n\
+         Linters detected: {} (files: {:?})\n\
+         Pre-commit detected: {} (files: {:?})\n\
+         Coverage thresholds detected: {}\n",
+        bundle.ci_lint.ci.detected,
+        bundle.ci_lint.ci.files,
+        bundle.ci_lint.linters.detected,
+        bundle.ci_lint.linters.files,
+        bundle.ci_lint.pre_commit.detected,
+        bundle.ci_lint.pre_commit.files,
+        bundle.ci_lint.coverage_thresholds.detected,
+    ));
+    out
+}
+
+fn format_coverage_summary(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Coverage data available: {}\n",
+        bundle.coverage.coverage_available
+    ));
+    if let Some(ref summary) = bundle.coverage.summary {
+        out.push_str(&format!("Overall coverage: {:.1}%\n", summary.coverage_percent));
+    }
+    out.push_str(&format!(
+        "Coverage thresholds detected: {}\n",
+        bundle.ci_lint.coverage_thresholds.detected
+    ));
+    out
+}
+
+fn format_doc_inventory(bundle: &EvidenceBundle) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Total doc files: {}\n\
+         Steering docs: {}\n",
+        bundle.docs.total_doc_files, bundle.docs.steering_doc_count,
+    ));
+    for doc in &bundle.docs.docs {
+        out.push_str(&format!("- {} ({})\n", doc.path, doc.doc_type));
+    }
+    out
 }
 
 /// Extract text content from the agent's result payload, falling back to the output file.
@@ -406,6 +887,24 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
                 assertion_density
             );
 
+            let mut dim_rationale = BTreeMap::new();
+            dim_rationale.insert(
+                "test_coverage".to_string(),
+                format!("{tested} of {total} files have corresponding tests."),
+            );
+            dim_rationale.insert(
+                "test_quality".to_string(),
+                format!("Assertion density is {assertion_density:.1} per test file."),
+            );
+            dim_rationale.insert(
+                "risk_exposure".to_string(),
+                "Defaulted to 50 — deterministic fallback cannot assess risk exposure without agent analysis.".to_string(),
+            );
+            dim_rationale.insert(
+                "convention_adherence".to_string(),
+                "Defaulted to 50 — deterministic fallback cannot assess convention adherence without agent analysis.".to_string(),
+            );
+
             DomainAssessment {
                 name: domain_name.clone(),
                 languages,
@@ -416,6 +915,7 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
                     convention_adherence: 50,
                 },
                 notes: vec![note],
+                dimension_rationale: dim_rationale,
             }
         })
         .collect();
@@ -536,6 +1036,55 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
         .cloned()
         .collect();
 
+    // Repo-wide rationale
+    let mut repo_wide_rationale = BTreeMap::new();
+    repo_wide_rationale.insert(
+        "agent_steering".to_string(),
+        format!(
+            "{} steering document(s) found (AGENTS.md, CLAUDE.md, etc.). {}",
+            steering_doc_count,
+            if steering_doc_count == 0 {
+                "No guidance for autonomous agents."
+            } else if steering_doc_count >= 3 {
+                "Good coverage of agent instructions."
+            } else {
+                "Some steering docs present but could be more comprehensive."
+            }
+        ),
+    );
+    repo_wide_rationale.insert(
+        "mechanical_guardrails".to_string(),
+        format!(
+            "Linter: {}. Pre-commit hooks: {}. CI: {}.",
+            if has_linter { "detected" } else { "not found" },
+            if has_pre_commit { "detected" } else { "not found" },
+            if has_ci { "detected" } else { "not found" },
+        ),
+    );
+    repo_wide_rationale.insert(
+        "local_feedback_loop".to_string(),
+        format!(
+            "CI: {}. Tests: {}.",
+            if has_ci { "detected" } else { "not found" },
+            if has_tests { "present" } else { "none found" },
+        ),
+    );
+    repo_wide_rationale.insert(
+        "coverage_infrastructure".to_string(),
+        format!(
+            "Coverage tooling: {}. Coverage thresholds: {}.",
+            if coverage_available { "available" } else { "not detected" },
+            if has_coverage_thresholds { "configured" } else { "not configured" },
+        ),
+    );
+    repo_wide_rationale.insert(
+        "documentation_quality".to_string(),
+        format!(
+            "{} documentation file(s) found.",
+            total_doc_files,
+        ),
+    );
+
     AssessmentPayload {
         domains,
         repo_wide,
@@ -543,6 +1092,7 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
         domain_file_map,
         primary_gap,
         languages_detected,
+        repo_wide_rationale,
     }
 }
 
@@ -839,6 +1389,7 @@ Some text after"#;
                     convention_adherence: 100,
                 },
                 notes: vec!["over max".to_string()],
+                dimension_rationale: BTreeMap::new(),
             }],
             repo_wide: RepoWideAssessment {
                 agent_steering: 200,
@@ -851,6 +1402,7 @@ Some text after"#;
             domain_file_map: BTreeMap::new(),
             primary_gap: "gap".to_string(),
             languages_detected: vec!["Rust".to_string()],
+            repo_wide_rationale: BTreeMap::new(),
         };
 
         let validated = validate_payload(payload).expect("should validate");
@@ -875,6 +1427,7 @@ Some text after"#;
             domain_file_map: BTreeMap::new(),
             primary_gap: "gap".to_string(),
             languages_detected: vec!["Rust".to_string()],
+            repo_wide_rationale: BTreeMap::new(),
         };
 
         assert!(validate_payload(payload).is_err());

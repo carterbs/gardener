@@ -11,6 +11,9 @@ pub struct AssessmentPayload {
     pub domain_file_map: BTreeMap<String, Vec<String>>,
     pub primary_gap: String,
     pub languages_detected: Vec<String>,
+    /// Per repo-wide dimension rationale (e.g. "agent_steering" -> "2-4 sentence explanation").
+    #[serde(default)]
+    pub repo_wide_rationale: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +22,9 @@ pub struct DomainAssessment {
     pub languages: Vec<String>,
     pub scores: DomainScores,
     pub notes: Vec<String>,
+    /// Per-dimension rationale (e.g. "test_coverage" -> "1-2 sentence explanation").
+    #[serde(default)]
+    pub dimension_rationale: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

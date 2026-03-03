@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::quality_assessment_types::*;
 
 pub fn compute_domain_grade(scores: &DomainScores) -> (f64, Grade) {
@@ -31,6 +33,7 @@ pub struct GradeReport {
     pub deficiencies: Vec<StructuralDeficiency>,
     pub primary_gap: String,
     pub languages_detected: Vec<String>,
+    pub repo_wide_rationale: BTreeMap<String, String>,
 }
 
 pub fn compute_grade_report(payload: AssessmentPayload) -> GradeReport {
@@ -61,6 +64,7 @@ pub fn compute_grade_report(payload: AssessmentPayload) -> GradeReport {
         deficiencies,
         primary_gap: payload.primary_gap,
         languages_detected: payload.languages_detected,
+        repo_wide_rationale: payload.repo_wide_rationale,
     }
 }
 
@@ -68,6 +72,7 @@ pub fn compute_grade_report(payload: AssessmentPayload) -> GradeReport {
 mod tests {
     use super::*;
     use crate::priority::Priority;
+    use std::collections::BTreeMap;
 
     fn domain_scores(coverage: u8, quality: u8, risk: u8, convention: u8) -> DomainScores {
         DomainScores {
@@ -248,12 +253,14 @@ mod tests {
                     languages: vec!["Rust".to_string()],
                     scores: domain_scores(100, 100, 0, 100),
                     notes: vec!["excellent".to_string()],
+                    dimension_rationale: BTreeMap::new(),
                 },
                 DomainAssessment {
                     name: "bad".to_string(),
                     languages: vec!["Python".to_string()],
                     scores: domain_scores(0, 0, 100, 0),
                     notes: vec!["terrible".to_string()],
+                    dimension_rationale: BTreeMap::new(),
                 },
             ],
             repo_wide: repo_wide(80, 80, 80, 80, 80),
@@ -261,6 +268,7 @@ mod tests {
             domain_file_map: Default::default(),
             primary_gap: "coverage".to_string(),
             languages_detected: vec!["Rust".to_string()],
+            repo_wide_rationale: BTreeMap::new(),
         };
         let report = compute_grade_report(payload);
         assert_eq!(report.domain_grades[0].0.name, "bad");
@@ -301,6 +309,7 @@ mod tests {
             domain_file_map: Default::default(),
             primary_gap: "coverage".to_string(),
             languages_detected: vec![],
+            repo_wide_rationale: BTreeMap::new(),
         };
         let report = compute_grade_report(payload);
         // P0 first, then P1 sorted by category

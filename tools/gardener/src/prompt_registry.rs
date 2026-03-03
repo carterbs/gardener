@@ -94,7 +94,7 @@ Prioritization policy (effort vs impact)
 - Avoid filler tasks to reach count; every task must clear a clear impact threshold for this repository.
 
 Seed-generation contract
-1. Read docs/quality-grades.md, AGENTS.md, docs/conventions/, and docs/references/codex-agent-team-article.md.
+1. Read docs/quality-grades.md, docs/quality-grades/*.md (if present), AGENTS.md, docs/conventions/, and docs/references/codex-agent-team-article.md.
 2. Inspect docs/ and repository structure for concrete, non-duplicate work that helps agents move faster safely.
 3. Generate exactly 10 tasks.
 4. Ensure at least 2 tasks map to primary_gap.

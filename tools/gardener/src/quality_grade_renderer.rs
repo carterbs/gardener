@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::priority::Priority;
 use crate::quality_assessment_types::Grade;
 use crate::quality_grade_compute::GradeReport;
@@ -94,12 +96,17 @@ pub fn render_grade_document(report: &GradeReport, assessed_by: &str) -> String 
                 "- **[{}]** {}{}\n",
                 d.category.as_str(),
                 domain_prefix,
-                d.description,
-            ));
-            out.push_str(&format!(
-                "  - *Suggested*: {}\n",
                 d.suggested_task_title,
             ));
+            for sentence in split_description(&d.description) {
+                out.push_str(&format!("  - {sentence}\n"));
+            }
+            if !d.suggested_task_details.is_empty() {
+                out.push_str(&format!(
+                    "  - *Remediation*: {}\n",
+                    d.suggested_task_details,
+                ));
+            }
         }
         out.push('\n');
     }
@@ -126,6 +133,39 @@ pub fn render_grade_document(report: &GradeReport, assessed_by: &str) -> String 
     ));
 
     out
+}
+
+/// Split a multi-sentence description into individual bullet points.
+/// If the description is a single sentence, returns it as-is.
+fn split_description(description: &str) -> Vec<String> {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    // Split on sentence-ending punctuation followed by a space and uppercase letter
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let len = chars.len();
+
+    for i in 0..len {
+        current.push(chars[i]);
+        // Check for sentence boundary: period/exclamation/question followed by space + uppercase
+        if (chars[i] == '.' || chars[i] == '!' || chars[i] == '?')
+            && i + 2 < len
+            && chars[i + 1] == ' '
+            && chars[i + 2].is_uppercase()
+        {
+            sentences.push(current.trim().to_string());
+            current = String::new();
+        }
+    }
+    if !current.trim().is_empty() {
+        sentences.push(current.trim().to_string());
+    }
+
+    sentences
 }
 
 fn severity_label(p: Priority) -> &'static str {
@@ -171,6 +211,15 @@ pub fn render_grade_document_with_repo_wide(
     repo_wide: &crate::quality_assessment_types::RepoWideAssessment,
     assessed_by: &str,
 ) -> String {
+    render_grade_document_full(report, repo_wide, &report.repo_wide_rationale, assessed_by)
+}
+
+fn render_grade_document_full(
+    report: &GradeReport,
+    repo_wide: &crate::quality_assessment_types::RepoWideAssessment,
+    repo_wide_rationale: &BTreeMap<String, String>,
+    assessed_by: &str,
+) -> String {
     let now = chrono_timestamp();
     let mut out = String::with_capacity(2048);
 
@@ -203,11 +252,32 @@ pub fn render_grade_document_with_repo_wide(
         ("Coverage Infrastructure", repo_wide.coverage_infrastructure),
         ("Documentation Quality", repo_wide.documentation_quality),
     ];
+    let dimension_keys: [&str; 5] = [
+        "agent_steering",
+        "mechanical_guardrails",
+        "local_feedback_loop",
+        "coverage_infrastructure",
+        "documentation_quality",
+    ];
     for (name, score) in &dimensions {
         let grade = Grade::from_score(*score as f64);
         out.push_str(&format!("| {} | {} | {} |\n", name, score, grade.as_str()));
     }
     out.push('\n');
+
+    // --- Dimension details (repo-wide rationale) ---
+    if !repo_wide_rationale.is_empty() {
+        out.push_str("### Dimension Details\n\n");
+        for ((name, score), key) in dimensions.iter().zip(dimension_keys.iter()) {
+            if let Some(rationale) = repo_wide_rationale.get(*key) {
+                let grade = Grade::from_score(*score as f64);
+                out.push_str(&format!(
+                    "**{}** ({} / {}): {}\n\n",
+                    name, score, grade.as_str(), rationale
+                ));
+            }
+        }
+    }
 
     // --- Domain coverage table ---
     out.push_str("## Domain Coverage\n\n");
@@ -227,6 +297,36 @@ pub fn render_grade_document_with_repo_wide(
         ));
     }
     out.push('\n');
+
+    // --- Domain score details (per-domain dimension rationale) ---
+    let has_any_domain_rationale = report
+        .domain_grades
+        .iter()
+        .any(|(d, _, _)| !d.dimension_rationale.is_empty());
+    if has_any_domain_rationale {
+        out.push_str("### Domain Score Details\n\n");
+        let domain_dim_keys: [(&str, &str); 4] = [
+            ("test_coverage", "Coverage"),
+            ("test_quality", "Quality"),
+            ("risk_exposure", "Risk"),
+            ("convention_adherence", "Convention"),
+        ];
+        for (domain, composite, grade) in &report.domain_grades {
+            if domain.dimension_rationale.is_empty() {
+                continue;
+            }
+            out.push_str(&format!(
+                "**{}** ({:.1} / {})\n\n",
+                domain.name, composite, grade.as_str()
+            ));
+            for (key, label) in &domain_dim_keys {
+                if let Some(rationale) = domain.dimension_rationale.get(*key) {
+                    out.push_str(&format!("- **{}**: {}\n", label, rationale));
+                }
+            }
+            out.push('\n');
+        }
+    }
 
     // --- Structural deficiencies ---
     out.push_str("## Structural Deficiencies\n\n");
@@ -249,12 +349,17 @@ pub fn render_grade_document_with_repo_wide(
                 "- **[{}]** {}{}\n",
                 d.category.as_str(),
                 domain_prefix,
-                d.description,
-            ));
-            out.push_str(&format!(
-                "  - *Suggested*: {}\n",
                 d.suggested_task_title,
             ));
+            for sentence in split_description(&d.description) {
+                out.push_str(&format!("  - {sentence}\n"));
+            }
+            if !d.suggested_task_details.is_empty() {
+                out.push_str(&format!(
+                    "  - *Remediation*: {}\n",
+                    d.suggested_task_details,
+                ));
+            }
         }
         out.push('\n');
     }
@@ -310,6 +415,7 @@ mod tests {
                     },
                     notes: vec!["Authentication module handles JWT validation with no test coverage"
                         .to_string()],
+                    dimension_rationale: BTreeMap::new(),
                 },
                 DomainAssessment {
                     name: "api".to_string(),
@@ -322,6 +428,7 @@ mod tests {
                     },
                     notes: vec!["API layer is well tested with comprehensive integration tests"
                         .to_string()],
+                    dimension_rationale: BTreeMap::new(),
                 },
             ],
             repo_wide: repo_wide.clone(),
@@ -348,6 +455,7 @@ mod tests {
             domain_file_map: Default::default(),
             primary_gap: "No coverage tooling configured".to_string(),
             languages_detected: vec!["Rust".to_string(), "TypeScript".to_string()],
+            repo_wide_rationale: BTreeMap::new(),
         };
         let report = compute_grade_report(payload);
         (report, repo_wide)
@@ -393,7 +501,8 @@ mod tests {
         assert!(doc.contains("## Structural Deficiencies"));
         assert!(doc.contains("### P0 --- Critical"));
         assert!(doc.contains("**[coverage-gap]**"));
-        assert!(doc.contains("*Suggested*: Add unit tests for auth token validation"));
+        assert!(doc.contains("Add unit tests for auth token validation"));
+        assert!(doc.contains("*Remediation*:"));
     }
 
     #[test]
@@ -428,6 +537,7 @@ mod tests {
             domain_file_map: Default::default(),
             primary_gap: "none".to_string(),
             languages_detected: vec![],
+            repo_wide_rationale: BTreeMap::new(),
         };
         let report = compute_grade_report(payload);
         let doc = render_grade_document_with_repo_wide(&report, &repo_wide, "agent");
@@ -440,5 +550,106 @@ mod tests {
         let doc = render_grade_document(&report, "agent");
         assert!(doc.contains("# Quality Grade Report"));
         assert!(doc.contains("## Domain Coverage"));
+    }
+
+    #[test]
+    fn render_shows_dimension_details_when_rationale_present() {
+        let repo_wide = RepoWideAssessment {
+            agent_steering: 71,
+            mechanical_guardrails: 85,
+            local_feedback_loop: 60,
+            coverage_infrastructure: 50,
+            documentation_quality: 70,
+        };
+        let mut rw_rationale = BTreeMap::new();
+        rw_rationale.insert(
+            "agent_steering".to_string(),
+            "AGENTS.md exists but lacks architecture pointers.".to_string(),
+        );
+        rw_rationale.insert(
+            "mechanical_guardrails".to_string(),
+            "Linter and CI configured, no pre-commit hooks.".to_string(),
+        );
+        let payload = AssessmentPayload {
+            domains: vec![DomainAssessment {
+                name: "core".to_string(),
+                languages: vec!["Rust".to_string()],
+                scores: DomainScores {
+                    test_coverage: 60,
+                    test_quality: 50,
+                    risk_exposure: 40,
+                    convention_adherence: 70,
+                },
+                notes: vec!["decent".to_string()],
+                dimension_rationale: BTreeMap::new(),
+            }],
+            repo_wide: repo_wide.clone(),
+            deficiencies: vec![],
+            domain_file_map: Default::default(),
+            primary_gap: "steering".to_string(),
+            languages_detected: vec!["Rust".to_string()],
+            repo_wide_rationale: rw_rationale,
+        };
+        let report = compute_grade_report(payload);
+        let doc = render_grade_document_with_repo_wide(&report, &repo_wide, "agent");
+        assert!(doc.contains("### Dimension Details"));
+        assert!(doc.contains("**Agent Steering** (71 / C+)"));
+        assert!(doc.contains("AGENTS.md exists but lacks architecture pointers."));
+        assert!(doc.contains("**Mechanical Guardrails** (85 / B)"));
+    }
+
+    #[test]
+    fn render_shows_domain_score_details_when_rationale_present() {
+        let repo_wide = RepoWideAssessment {
+            agent_steering: 80,
+            mechanical_guardrails: 80,
+            local_feedback_loop: 80,
+            coverage_infrastructure: 80,
+            documentation_quality: 80,
+        };
+        let mut dim_rationale = BTreeMap::new();
+        dim_rationale.insert(
+            "test_coverage".to_string(),
+            "12 of 15 files have tests.".to_string(),
+        );
+        dim_rationale.insert(
+            "test_quality".to_string(),
+            "Assertion density is good at 4.2 per file.".to_string(),
+        );
+        let payload = AssessmentPayload {
+            domains: vec![DomainAssessment {
+                name: "api".to_string(),
+                languages: vec!["Rust".to_string()],
+                scores: DomainScores {
+                    test_coverage: 80,
+                    test_quality: 70,
+                    risk_exposure: 30,
+                    convention_adherence: 85,
+                },
+                notes: vec!["solid".to_string()],
+                dimension_rationale: dim_rationale,
+            }],
+            repo_wide: repo_wide.clone(),
+            deficiencies: vec![],
+            domain_file_map: Default::default(),
+            primary_gap: "none".to_string(),
+            languages_detected: vec!["Rust".to_string()],
+            repo_wide_rationale: BTreeMap::new(),
+        };
+        let report = compute_grade_report(payload);
+        let doc = render_grade_document_with_repo_wide(&report, &repo_wide, "agent");
+        assert!(doc.contains("### Domain Score Details"));
+        assert!(doc.contains("**api**"));
+        assert!(doc.contains("- **Coverage**: 12 of 15 files have tests."));
+        assert!(doc.contains("- **Quality**: Assertion density is good at 4.2 per file."));
+    }
+
+    #[test]
+    fn render_skips_rationale_sections_when_empty() {
+        let (report, repo_wide) = sample_report();
+        let doc = render_grade_document_with_repo_wide(&report, &repo_wide, "agent");
+        // sample_report has empty rationale maps
+        assert!(!doc.contains("### Dimension Details"));
+        assert!(!doc.contains("### Domain Score Details"));
     }
 }

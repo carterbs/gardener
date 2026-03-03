@@ -1,6 +1,6 @@
 use crate::quality_language_registry::identify_language;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
@@ -370,6 +370,339 @@ pub fn resolve_path(repo_path: &Path, relative: &str) -> PathBuf {
     repo_path.join(relative)
 }
 
+/// Generate a compact ls-R style tree diagram suitable for agent prompts.
+/// Groups files with common prefixes and collapses when over budget.
+pub fn generate_tree_diagram(tree: &TreeWalkerOutput, max_chars: usize) -> String {
+    // Build a set of all directory paths and a map of dir -> file names.
+    let mut dir_set: BTreeSet<String> = BTreeSet::new();
+    let mut dir_files: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut dir_file_counts: BTreeMap<String, usize> = BTreeMap::new();
+
+    for dir_entry in &tree.directories {
+        let dir_path = if dir_entry.path.is_empty() {
+            ".".to_string()
+        } else {
+            dir_entry.path.clone()
+        };
+
+        // Register the directory and all ancestors.
+        register_ancestors(&dir_path, &mut dir_set);
+
+        let file_count = dir_entry.source_files.len() + dir_entry.test_files.len();
+        dir_file_counts.insert(dir_path.clone(), file_count);
+
+        let file_names: Vec<String> = dir_entry
+            .source_files
+            .iter()
+            .chain(dir_entry.test_files.iter())
+            .filter_map(|f| {
+                f.path
+                    .rsplit_once('/')
+                    .map(|(_, name)| name.to_string())
+                    .or_else(|| Some(f.path.clone()))
+            })
+            .collect();
+
+        dir_files.insert(dir_path, file_names);
+    }
+
+    if dir_set.is_empty() && dir_files.is_empty() {
+        return ".\n".to_string();
+    }
+
+    // Build parent -> sorted children map.
+    let mut children_map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for dir in &dir_set {
+        if dir == "." {
+            continue;
+        }
+        let parent = match dir.rsplit_once('/') {
+            Some((p, _)) => p.to_string(),
+            None => ".".to_string(),
+        };
+        children_map
+            .entry(parent)
+            .or_default()
+            .insert(dir.clone());
+    }
+
+    // Render with progressive collapse.
+    let result = render_tree(".", &children_map, &dir_files, &dir_file_counts, max_chars);
+
+    // If over budget, try collapsing deeper levels.
+    if result.len() > max_chars {
+        return render_tree_collapsed(
+            ".",
+            &children_map,
+            &dir_files,
+            &dir_file_counts,
+            max_chars,
+        );
+    }
+
+    result
+}
+
+/// Register a directory path and all its ancestors into the set.
+fn register_ancestors(path: &str, dir_set: &mut BTreeSet<String>) {
+    if path == "." || path.is_empty() {
+        dir_set.insert(".".to_string());
+        return;
+    }
+    dir_set.insert(path.to_string());
+    let mut current = path;
+    while let Some((parent, _)) = current.rsplit_once('/') {
+        dir_set.insert(parent.to_string());
+        current = parent;
+    }
+    dir_set.insert(".".to_string());
+}
+
+/// Compute the depth of a directory path (. = 0, src = 1, src/foo = 2).
+fn dir_depth(path: &str) -> usize {
+    if path == "." {
+        0
+    } else {
+        path.matches('/').count() + 1
+    }
+}
+
+/// Count total files in a subtree rooted at `dir`.
+fn count_subtree_files(
+    dir: &str,
+    children_map: &BTreeMap<String, BTreeSet<String>>,
+    dir_file_counts: &BTreeMap<String, usize>,
+) -> usize {
+    let own = dir_file_counts.get(dir).copied().unwrap_or(0);
+    let child_sum: usize = children_map
+        .get(dir)
+        .map(|kids| {
+            kids.iter()
+                .map(|k| count_subtree_files(k, children_map, dir_file_counts))
+                .sum()
+        })
+        .unwrap_or(0);
+    own + child_sum
+}
+
+/// Group file names by common prefix (before `_` or `.`). Returns display lines.
+fn group_files(files: &[String]) -> Vec<String> {
+    if files.len() <= 5 {
+        let mut sorted = files.to_vec();
+        sorted.sort();
+        return sorted;
+    }
+
+    // Find prefix groups: split each file on first `_` or `.` to get prefix.
+    let mut prefix_counts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for f in files {
+        let prefix = extract_prefix(f);
+        prefix_counts.entry(prefix).or_default().push(f.clone());
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut ungrouped: Vec<String> = Vec::new();
+
+    for (prefix, members) in &prefix_counts {
+        if members.len() >= 3 {
+            // Find common extension if any.
+            let ext = common_extension(members);
+            let ext_str = ext.map(|e| format!(".{e}")).unwrap_or_default();
+            lines.push(format!("{prefix}_*{ext_str} ({} files)", members.len()));
+        } else {
+            ungrouped.extend(members.iter().cloned());
+        }
+    }
+
+    ungrouped.sort();
+    lines.extend(ungrouped);
+    lines.sort();
+    lines
+}
+
+/// Extract the grouping prefix from a filename (everything before the first `_` or `.`).
+fn extract_prefix(name: &str) -> String {
+    // Try underscore first for names like quality_foo.rs
+    if let Some(idx) = name.find('_') {
+        return name[..idx].to_string();
+    }
+    // Fall back to dot for names like foo.rs
+    if let Some(idx) = name.find('.') {
+        return name[..idx].to_string();
+    }
+    name.to_string()
+}
+
+/// Find common file extension among a group of files, if they all share one.
+fn common_extension(files: &[String]) -> Option<String> {
+    let mut ext: Option<String> = None;
+    for f in files {
+        let e = f.rsplit_once('.').map(|(_, e)| e.to_string());
+        match (&ext, &e) {
+            (None, Some(e)) => ext = Some(e.clone()),
+            (Some(prev), Some(cur)) if prev == cur => {}
+            _ => return None,
+        }
+    }
+    ext
+}
+
+/// Render the tree with full expansion.
+fn render_tree(
+    root: &str,
+    children_map: &BTreeMap<String, BTreeSet<String>>,
+    dir_files: &BTreeMap<String, Vec<String>>,
+    dir_file_counts: &BTreeMap<String, usize>,
+    max_chars: usize,
+) -> String {
+    let mut out = String::from(".\n");
+    render_node(
+        root,
+        "",
+        true,
+        children_map,
+        dir_files,
+        dir_file_counts,
+        &mut out,
+        max_chars,
+        usize::MAX, // no depth limit
+    );
+    out
+}
+
+/// Render with progressive collapse: try depth 4, 3, then 2.
+fn render_tree_collapsed(
+    root: &str,
+    children_map: &BTreeMap<String, BTreeSet<String>>,
+    dir_files: &BTreeMap<String, Vec<String>>,
+    dir_file_counts: &BTreeMap<String, usize>,
+    max_chars: usize,
+) -> String {
+    for max_depth in (2..=4).rev() {
+        let mut out = String::from(".\n");
+        render_node(
+            root,
+            "",
+            true,
+            children_map,
+            dir_files,
+            dir_file_counts,
+            &mut out,
+            max_chars,
+            max_depth,
+        );
+        if out.len() <= max_chars {
+            return out;
+        }
+    }
+
+    // Final fallback: depth 2, hard-truncate.
+    let mut out = String::from(".\n");
+    render_node(
+        root,
+        "",
+        true,
+        children_map,
+        dir_files,
+        dir_file_counts,
+        &mut out,
+        max_chars,
+        2,
+    );
+    if out.len() > max_chars {
+        out.truncate(max_chars.saturating_sub(4));
+        out.push_str("...\n");
+    }
+    out
+}
+
+/// Recursive DFS render of a directory node.
+fn render_node(
+    dir: &str,
+    prefix: &str,
+    _is_root: bool,
+    children_map: &BTreeMap<String, BTreeSet<String>>,
+    dir_files: &BTreeMap<String, Vec<String>>,
+    dir_file_counts: &BTreeMap<String, usize>,
+    out: &mut String,
+    max_chars: usize,
+    max_depth: usize,
+) {
+    let kids: Vec<String> = children_map
+        .get(dir)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    let files = dir_files.get(dir).cloned().unwrap_or_default();
+
+    // Collect all items to render: subdirs then files.
+    let mut items: Vec<TreeItem> = Vec::new();
+    for kid in &kids {
+        let name = kid.rsplit_once('/').map(|(_, n)| n).unwrap_or(kid);
+        let depth = dir_depth(kid);
+
+        if depth >= max_depth {
+            // Collapse this subtree.
+            let count = count_subtree_files(kid, children_map, dir_file_counts);
+            items.push(TreeItem::CollapsedDir(name.to_string(), count));
+        } else {
+            items.push(TreeItem::ExpandedDir(name.to_string(), kid.clone()));
+        }
+    }
+
+    // Add files (grouped if needed).
+    let file_lines = group_files(&files);
+    for line in &file_lines {
+        items.push(TreeItem::File(line.clone()));
+    }
+
+    let total = items.len();
+    for (i, item) in items.iter().enumerate() {
+        if out.len() >= max_chars {
+            return;
+        }
+        let is_last = i + 1 == total;
+        let connector = if is_last { "└── " } else { "├── " };
+        let child_prefix = if is_last {
+            format!("{prefix}    ")
+        } else {
+            format!("{prefix}│   ")
+        };
+
+        match item {
+            TreeItem::ExpandedDir(name, full_path) => {
+                out.push_str(&format!("{prefix}{connector}{name}/\n"));
+                render_node(
+                    full_path,
+                    &child_prefix,
+                    false,
+                    children_map,
+                    dir_files,
+                    dir_file_counts,
+                    out,
+                    max_chars,
+                    max_depth,
+                );
+            }
+            TreeItem::CollapsedDir(name, count) => {
+                if *count > 0 {
+                    out.push_str(&format!("{prefix}{connector}{name}/ ({count} files)\n"));
+                } else {
+                    out.push_str(&format!("{prefix}{connector}{name}/\n"));
+                }
+            }
+            TreeItem::File(line) => {
+                out.push_str(&format!("{prefix}{connector}{line}\n"));
+            }
+        }
+    }
+}
+
+enum TreeItem {
+    ExpandedDir(String, String),
+    CollapsedDir(String, usize),
+    File(String),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +746,122 @@ mod tests {
         fs::write(dir.path().join("foo_test.go"), "package foo\n").expect("write");
         let output = walk_repo(dir.path());
         assert_eq!(output.total_test_files, 1);
+    }
+
+    fn make_tree(dirs: Vec<(&str, Vec<&str>)>) -> TreeWalkerOutput {
+        let directories = dirs
+            .into_iter()
+            .map(|(path, files)| {
+                let source_files = files
+                    .iter()
+                    .map(|f| {
+                        let full = if path.is_empty() {
+                            f.to_string()
+                        } else {
+                            format!("{path}/{f}")
+                        };
+                        FileEntry {
+                            path: full,
+                            language: "Rust".to_string(),
+                            signature: Vec::new(),
+                            line_count: 10,
+                        }
+                    })
+                    .collect();
+                DirectoryEntry {
+                    path: path.to_string(),
+                    source_files,
+                    test_files: Vec::new(),
+                }
+            })
+            .collect();
+        TreeWalkerOutput {
+            directories,
+            language_summary: BTreeMap::new(),
+            total_source_files: 0,
+            total_test_files: 0,
+            excluded_directories: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn generate_tree_diagram_empty() {
+        let tree = TreeWalkerOutput {
+            directories: Vec::new(),
+            language_summary: BTreeMap::new(),
+            total_source_files: 0,
+            total_test_files: 0,
+            excluded_directories: Vec::new(),
+        };
+        let result = generate_tree_diagram(&tree, 10000);
+        assert_eq!(result, ".\n");
+    }
+
+    #[test]
+    fn generate_tree_diagram_simple_directory() {
+        let tree = make_tree(vec![("src", vec!["main.rs", "lib.rs"])]);
+        let result = generate_tree_diagram(&tree, 10000);
+        assert!(result.starts_with(".\n"));
+        assert!(result.contains("src/"));
+        assert!(result.contains("main.rs"));
+        assert!(result.contains("lib.rs"));
+    }
+
+    #[test]
+    fn generate_tree_diagram_file_grouping() {
+        let tree = make_tree(vec![(
+            "src",
+            vec![
+                "quality_a.rs",
+                "quality_b.rs",
+                "quality_c.rs",
+                "quality_d.rs",
+                "quality_e.rs",
+                "quality_f.rs",
+                "other.rs",
+            ],
+        )]);
+        let result = generate_tree_diagram(&tree, 10000);
+        // Should group quality_* files since there are 6 of them (>= 3) and > 5 total files.
+        assert!(
+            result.contains("quality_*"),
+            "Expected grouping, got:\n{result}"
+        );
+        assert!(result.contains("other.rs"));
+    }
+
+    #[test]
+    fn generate_tree_diagram_max_chars_truncation() {
+        // Build a tree with many directories to exceed budget.
+        let dirs: Vec<(&str, Vec<&str>)> = (0..20)
+            .map(|i| {
+                // Leak strings so we get &str with 'static lifetime for the test.
+                let dir: &str = Box::leak(format!("dir{i}").into_boxed_str());
+                let file: &str = Box::leak(format!("file{i}.rs").into_boxed_str());
+                (dir, vec![file])
+            })
+            .collect();
+        let tree = make_tree(dirs);
+        let result = generate_tree_diagram(&tree, 200);
+        assert!(
+            result.len() <= 204, // small tolerance for final "...\n"
+            "Expected <= 204 chars, got {}:\n{result}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn generate_tree_diagram_real_repo_under_budget() {
+        // Walk the actual repo and verify the diagram stays compact.
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+        let tree = walk_repo(repo);
+        let result = generate_tree_diagram(&tree, 5000);
+        assert!(
+            result.len() <= 5000,
+            "Tree diagram is {} chars, expected <= 5000:\n{}",
+            result.len(),
+            &result[..result.len().min(500)]
+        );
+        assert!(result.starts_with(".\n"));
     }
 }

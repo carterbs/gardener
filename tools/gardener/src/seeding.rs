@@ -1,7 +1,9 @@
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{seeding_prompt_template, SEEDING_ACTION_CONTRACT_WRITE};
+use crate::prompt_registry::{
+    seeding_prompt_template, SEEDING_ACTION_CONTRACT_DRY_RUN, SEEDING_ACTION_CONTRACT_WRITE,
+};
 use crate::protocol::AgentEvent;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
@@ -33,7 +35,7 @@ pub fn build_seed_prompt(
     existing_backlog: &str,
 ) -> String {
     let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
-    build_seed_prompt_v2(&context)
+    build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE)
 }
 
 pub fn build_seed_dry_run_prompt(
@@ -43,44 +45,15 @@ pub fn build_seed_dry_run_prompt(
     existing_backlog: &str,
 ) -> String {
     let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog);
-    build_seed_dry_run_prompt_v1(&context)
+    build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_DRY_RUN)
 }
 
-pub fn build_seed_prompt_v2(context: &SeedPromptContext) -> String {
+pub fn build_seed_prompt_v2(context: &SeedPromptContext, action_contract: &str) -> String {
     render_seed_prompt_template(
         seeding_prompt_template().body,
         context,
-        SEEDING_ACTION_CONTRACT_WRITE,
+        action_contract,
     )
-}
-
-fn build_seed_dry_run_prompt_v1(context: &SeedPromptContext) -> String {
-    let mut quality_risks = context.quality_risks.clone();
-    if quality_risks.is_empty() {
-        quality_risks.push_str(
-            "No parseable coverage rows found in quality report; infer risk from repository signals.",
-        );
-    }
-
-    let mut out = String::new();
-    out.push_str("You are the Gardener backlog seeding worker.\n");
-    out.push_str("Goal: research the repository and recommend 10 actionable backlog tasks.\n");
-    out.push_str("Do not write to the backlog database.\n");
-    out.push_str("Do not implement code changes.\n");
-    out.push_str("Return a JSON envelope that matches the task schema.\n\n");
-
-    out.push_str("Quality risks extracted from report\n");
-    out.push_str(&quality_risks);
-    out.push('\n');
-
-    out.push_str("\nExisting active backlog snapshot\n");
-    out.push_str(&context.existing_backlog);
-    out.push('\n');
-
-    out.push_str("\nQuality doc\n");
-    out.push_str(&context.quality_doc);
-
-    out
 }
 
 fn render_seed_prompt_template(
@@ -399,10 +372,11 @@ fn extract_quality_risks(quality_doc: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_seed_dry_run_prompt, build_seed_prompt, build_seed_prompt_context,
-        build_seed_prompt_v2, collect_docs_listing, extract_quality_risks, read_optional_file,
+        build_seed_dry_run_prompt, build_seed_prompt, build_seed_prompt_context, build_seed_prompt_v2,
+        collect_docs_listing, extract_quality_risks, read_optional_file,
         walk_docs, SeedPromptContext,
     };
+    use crate::prompt_registry::SEEDING_ACTION_CONTRACT_WRITE;
     use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
     use crate::{repo_intelligence, repo_intelligence::RepoIntelligenceProfile};
@@ -472,7 +446,7 @@ mod tests {
             backlog_skill_md: String::new(),
             existing_backlog: "No active backlog tasks.".to_string(),
         };
-        let prompt = super::build_seed_prompt_v2(&context);
+        let prompt = super::build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE);
         assert!(prompt.contains("Seed-generation contract"));
         assert!(prompt.contains("primary_gap"));
         assert!(prompt.contains("Quality risks extracted from report"));
@@ -622,7 +596,7 @@ mod tests {
         assert!(context.backlog_skill_md.is_empty());
         assert_eq!(context.existing_backlog, "No active backlog tasks.");
 
-        let prompt = build_seed_prompt_v2(&context);
+        let prompt = build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE);
         assert!(prompt.contains("# AGENTS"));
         assert!(prompt.contains("# CLAUDE compatibility"));
         assert!(prompt.contains("[AGENTS.md](./AGENTS.md)"));
@@ -664,7 +638,9 @@ mod tests {
             "No active backlog tasks.",
         );
 
-        assert!(prompt.contains("Do not write to the backlog database."));
-        assert!(prompt.contains("Return a JSON envelope that matches the task schema."));
+        assert!(prompt.contains("Output contract"));
+        assert!(prompt.contains("Emit JSON only."));
+        assert!(prompt.contains("Seed-generation contract"));
+        assert!(prompt.contains("Relevant repo anchors"));
     }
 }

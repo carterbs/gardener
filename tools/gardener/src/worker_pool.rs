@@ -63,6 +63,36 @@ enum PoolStreamEvent {
     },
 }
 
+struct ShutdownSummary {
+    completed: usize,
+    target: usize,
+    merged: usize,
+    failed: usize,
+    total_runtime_secs: u64,
+}
+
+impl ShutdownSummary {
+    fn format_message(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Tasks completed: {} / {}",
+            self.completed, self.target
+        ));
+        lines.push(format!("Tasks merged (PRs landed): {}", self.merged));
+        if self.failed > 0 {
+            lines.push(format!("Tasks failed / unresolved: {}", self.failed));
+        }
+        let mins = self.total_runtime_secs / 60;
+        let secs = self.total_runtime_secs % 60;
+        if mins > 0 {
+            lines.push(format!("Total runtime: {}m {}s", mins, secs));
+        } else {
+            lines.push(format!("Total runtime: {}s", secs));
+        }
+        lines.join("\n")
+    }
+}
+
 struct HotkeyState<'a> {
     runtime: &'a ProductionRuntime,
     scope: &'a RuntimeScope,
@@ -144,6 +174,9 @@ pub fn run_worker_pool_fsm(
     let mut event_sequence = 0usize;
     let mut last_activity_pulse = vec![Instant::now(); workers.len()];
     let mut completed = 0usize;
+    let mut merged = 0usize;
+    let mut failed = 0usize;
+    let run_started = Instant::now();
     let run_started_at_ms = now_unix_millis();
 
     let claim_tasks_for_available_workers =
@@ -676,6 +709,7 @@ pub fn run_worker_pool_fsm(
                                         append_worker_command(&mut workers[idx], &failed_message);
                                         workers[idx].breadcrumb = "failed".to_string();
                                         workers[idx].lease_held = false;
+                                        failed = failed.saturating_add(1);
                                         append_run_log(
                                             "error",
                                             "worker.task.failed",
@@ -866,6 +900,7 @@ pub fn run_worker_pool_fsm(
                                 }
                                 Err(err) => {
                                     let msg = err.to_string();
+                                    failed = failed.saturating_add(1);
                                     append_run_log(
                                         "error",
                                         "merge_worker.task.process_error",
@@ -889,6 +924,7 @@ pub fn run_worker_pool_fsm(
                                     if summary.final_state == crate::types::WorkerState::Complete {
                                         let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
                                         completed = completed.saturating_add(1);
+                                        merged = merged.saturating_add(1);
                                         workers[merge_row_idx].state = "complete".to_string();
                                         workers[merge_row_idx].task_id = Some(task_id.clone());
                                         workers[merge_row_idx].last_state_line =
@@ -912,6 +948,7 @@ pub fn run_worker_pool_fsm(
                                         );
                                     } else {
                                         let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID)?;
+                                        failed = failed.saturating_add(1);
                                         workers[merge_row_idx].state = "failed".to_string();
                                         workers[merge_row_idx].task_id = Some(task_id.clone());
                                         workers[merge_row_idx].last_state_line =
@@ -1018,45 +1055,80 @@ pub fn run_worker_pool_fsm(
             Ok(())
         })?;
 
+        let summary = ShutdownSummary {
+            completed,
+            target,
+            merged,
+            failed,
+            total_runtime_secs: run_started.elapsed().as_secs(),
+        };
+
         if let Some((worker_id, task_id, reason)) = shutdown_error {
-            let shutdown_message = worker_failure_prompt(&worker_id, &task_id, &reason);
+            let error_detail = worker_failure_prompt(&worker_id, &task_id, &reason);
+            let shutdown_message =
+                format!("{}\n\n{}", error_detail, summary.format_message());
             if terminal.stdin_is_tty() {
                 terminal.draw_shutdown_screen("Error", &shutdown_message)?;
             } else {
                 terminal.write_line(&format!(
-                    "Error: worker {worker_id} task {task_id}: {reason}"
+                    "Error: worker {worker_id} task {task_id}: {reason}\n{}",
+                    summary.format_message()
                 ))?;
             }
             wait_for_quit(terminal, Some(&shutdown_message))?;
             return Ok(completed);
         }
         if quit_requested {
+            append_run_log(
+                "info",
+                "worker_pool.quit_requested",
+                json!({
+                    "worker_id": WORKER_POOL_ID,
+                    "completed": completed,
+                    "target": target,
+                    "merged": merged,
+                    "failed": failed
+                }),
+            );
+            let shutdown_title = "Session Interrupted";
+            let shutdown_message = summary.format_message();
+            if terminal.stdin_is_tty() {
+                terminal.draw_shutdown_screen(shutdown_title, &shutdown_message)?;
+            } else {
+                terminal.write_line(&format!("{shutdown_title}: {shutdown_message}"))?;
+            }
+            wait_for_quit(terminal, None)?;
             return Ok(completed);
         }
     }
+    let summary = ShutdownSummary {
+        completed,
+        target,
+        merged,
+        failed,
+        total_runtime_secs: run_started.elapsed().as_secs(),
+    };
     append_run_log(
         "info",
         "worker_pool.completed",
         json!({
             "worker_id": WORKER_POOL_ID,
             "completed": completed,
-            "target": target
+            "target": target,
+            "merged": merged,
+            "failed": failed
         }),
     );
     let shutdown_title = if completed >= target {
-        "All Tasks Complete".to_string()
-    } else {
-        "No More Work".to_string()
-    };
-    let shutdown_message = if completed >= target {
-        format!("Completed {completed} of {target} task(s).")
+        "All Tasks Complete"
     } else if completed == 0 {
-        "No tasks were available in the backlog.".to_string()
+        "Empty Backlog"
     } else {
-        format!("Completed {completed} task(s). Backlog is empty.")
+        "No More Work"
     };
+    let shutdown_message = summary.format_message();
     if terminal.stdin_is_tty() {
-        terminal.draw_shutdown_screen(&shutdown_title, &shutdown_message)?;
+        terminal.draw_shutdown_screen(shutdown_title, &shutdown_message)?;
     } else {
         terminal.write_line(&format!("{shutdown_title}: {shutdown_message}"))?;
     }

@@ -106,7 +106,11 @@ fn quit_after_zero_shows_shutdown_screen() {
     let shutdown_screens = terminal.shutdown_screens();
     let shutdown = shutdown_screens.first().expect("shutdown screen was shown");
     assert_eq!(shutdown.0, "All Tasks Complete");
-    assert_eq!(shutdown.1, "Completed 0 of 0 task(s).");
+    assert!(
+        shutdown.1.contains("Tasks completed: 0 / 0"),
+        "shutdown message should contain summary: {}",
+        shutdown.1
+    );
 }
 
 #[test]

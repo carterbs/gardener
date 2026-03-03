@@ -7,6 +7,7 @@ use crate::priority::Priority;
 use crate::runtime::ProcessRunner;
 use crate::task_identity::TaskKind;
 use crate::types::RuntimeScope;
+use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::ErrorKind;
@@ -37,7 +38,7 @@ struct FrictionOutputEnvelope {
     schema_version: Option<usize>,
     #[serde(default)]
     state: Option<String>,
-    payload: FrictionAnalysisResponse,
+    payload: Option<FrictionAnalysisResponse>,
 }
 
 pub struct FrictionAnalysisInput<'a> {
@@ -55,7 +56,9 @@ pub enum FrictionAnalysisOutcome {
         findings: Vec<FrictionFinding>,
         smooth_run: bool,
     },
-    Skipped { reason: String },
+    Skipped {
+        reason: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +384,11 @@ fn open_friction_tasks_prompt_context(cfg: &AppConfig, scope: &RuntimeScope) -> 
             )
         })
         .map(|task| {
-            let details = task.details.split_whitespace().collect::<Vec<_>>().join(" ");
+            let details = task
+                .details
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             let details = if details.chars().count() > 180 {
                 let trimmed: String = details.chars().take(180).collect();
                 format!("{trimmed}...")
@@ -469,12 +476,10 @@ pub fn run_friction_analysis(
         .to_path_buf();
 
     let output_schema = friction_output_schema_path(scope)?;
-    let output_file = scope
-        .working_dir
-        .join(format!(
-            ".cache/gardener/friction-analysis-output-{}.json",
-            input.run_id
-        ));
+    let output_file = scope.working_dir.join(format!(
+        ".cache/gardener/friction-analysis-output-{}.json",
+        input.run_id
+    ));
     if let Some(parent) = output_file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             crate::errors::GardenerError::Io(format!("create_dir_all {}: {e}", parent.display()))
@@ -518,21 +523,33 @@ pub fn run_friction_analysis(
                     "error": event_error.to_string(),
                 }),
             );
-            parse_friction_payload_from_file(&output_file).unwrap_or_else(|file_error| {
-                append_run_log(
-                    "warn",
-                    "friction_analysis.parse_failed",
-                    json!({
-                        "worker_id": input.worker_id,
-                        "event_error": event_error.to_string(),
-                        "file_error": file_error.to_string()
-                    }),
-                );
-                FrictionAnalysisResponse {
-                    findings: vec![],
-                    smooth_run: false,
-                }
-            })
+            let response =
+                parse_friction_payload_from_file(&output_file).map_err(|file_error| {
+                    append_run_log(
+                        "warn",
+                        "friction_analysis.parse_failed",
+                        json!({
+                            "worker_id": input.worker_id,
+                            "event_error": event_error.to_string(),
+                            "file_error": file_error.to_string()
+                        }),
+                    );
+                    crate::errors::GardenerError::OutputEnvelope(format!(
+                    "friction analysis parse failed for worker {}: event_error={}, file_error={}",
+                    input.worker_id,
+                    event_error,
+                    file_error
+                ))
+                })?;
+            append_run_log(
+                "info",
+                "friction_analysis.parse_recovered_from_file",
+                json!({
+                    "worker_id": input.worker_id,
+                    "run_id": input.run_id,
+                }),
+            );
+            response
         }
     };
 
@@ -598,7 +615,13 @@ fn parse_friction_payload(
         return Ok(payload);
     }
     let envelope: FrictionOutputEnvelope = serde_json::from_value(value)?;
-    Ok(envelope.payload)
+    let payload = envelope.payload.ok_or_else(|| {
+        serde_json::Error::custom(format!(
+            "friction output envelope payload missing or null: schema_version={:?}, state={:?}",
+            envelope.schema_version, envelope.state
+        ))
+    })?;
+    Ok(payload)
 }
 
 fn parse_friction_payload_from_file(
@@ -1134,19 +1157,11 @@ mod tests {
             run_id: "run-1",
             log_path: &log_path,
         };
-        let outcome = run_friction_analysis(&input, &AppConfig::default(), &runner, &scope)
-            .expect("run friction analysis");
-        let (findings, smooth_run) = match outcome {
-            FrictionAnalysisOutcome::Completed {
-                findings,
-                smooth_run,
-            } => (findings, smooth_run),
-            FrictionAnalysisOutcome::Skipped { reason } => {
-                panic!("did not expect skip: {reason}")
-            }
-        };
-        assert!(findings.is_empty());
-        assert!(!smooth_run);
+        let err = run_friction_analysis(&input, &AppConfig::default(), &runner, &scope)
+            .expect_err("run friction analysis should fail without fallback");
+        assert!(err
+            .to_string()
+            .contains("friction analysis parse failed for worker worker-1"));
     }
 
     #[test]

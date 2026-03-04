@@ -2098,9 +2098,9 @@ fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
                  lease_owner = NULL,
                  lease_expires_at = NULL,
                  last_updated = ?1
-             WHERE (status = 'in_progress'
-                OR status = 'merge_pending'
-                OR (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at < ?1)))
+             WHERE (status = 'merge_pending'
+                OR ((status = 'in_progress' OR status = 'leased')
+                    AND (lease_expires_at IS NULL OR lease_expires_at < ?1)))
                 AND related_pr IS NULL",
             [now],
         )
@@ -2112,9 +2112,9 @@ fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
                  lease_owner = NULL,
                  lease_expires_at = NULL,
                  last_updated = ?1
-             WHERE (status = 'in_progress'
-                OR status = 'merge_pending'
-                OR (status = 'leased' AND (lease_expires_at IS NULL OR lease_expires_at < ?1)))
+             WHERE (status = 'merge_pending'
+                OR ((status = 'in_progress' OR status = 'leased')
+                    AND (lease_expires_at IS NULL OR lease_expires_at < ?1)))
                 AND related_pr IS NOT NULL",
             [now],
         )
@@ -2423,6 +2423,39 @@ mod tests {
         assert_eq!(round_trip.status, TaskStatus::Ready);
         assert_eq!(round_trip.lease_owner, None);
         assert_eq!(round_trip.lease_expires_at, None);
+    }
+
+    #[test]
+    fn stale_recovery_skips_in_progress_with_live_lease() {
+        let (store, _dir) = temp_store();
+        // Use a long lease (3600s) so it won't be expired
+        let row = store
+            .upsert_task(task("active-work", Priority::P1))
+            .expect("seed");
+        let leased = store
+            .claim_next("worker-a", 3600)
+            .expect("claim")
+            .expect("leased row");
+        assert_eq!(leased.status, TaskStatus::Leased);
+        let transitioned = store
+            .mark_in_progress(&row.task_id, "worker-a")
+            .expect("in progress");
+        assert!(transitioned);
+
+        // Call recover_stale with a "now" that is BEFORE the lease expiry.
+        // The lease_expires_at = claim_time + 3600*1000, so using claim_time + 1000
+        // should be well before expiry.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 1000;
+        let recovered = store.recover_stale_leases(now).expect("recover");
+        assert_eq!(recovered, 0, "in_progress task with live lease must not be recovered");
+
+        let round_trip = store.get_task(&row.task_id).expect("fetch").expect("task");
+        assert_eq!(round_trip.status, TaskStatus::InProgress);
+        assert_eq!(round_trip.lease_owner.as_deref(), Some("worker-a"));
     }
 
     #[test]

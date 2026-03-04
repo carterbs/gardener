@@ -59,6 +59,34 @@ fn workspace_clippy_lint_configuration_enforces_expect_used_deny() {
 }
 
 #[test]
+fn workspace_clippy_lint_configuration_enforces_same_functions_in_if_condition_deny() {
+    let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_path.pop();
+    manifest_path.pop();
+    manifest_path.push("Cargo.toml");
+
+    let manifest_text = std::fs::read_to_string(Path::new(&manifest_path)).unwrap_or_else(|_| {
+        panic!(
+            "failed to read workspace manifest: {}",
+            manifest_path.display()
+        )
+    });
+
+    let manifest: Value =
+        toml::from_str(&manifest_text).expect("workspace Cargo.toml should parse as TOML");
+
+    let level = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("clippy"))
+        .and_then(|clippy| clippy.get("same_functions_in_if_condition"))
+        .and_then(Value::as_str)
+        .expect("workspace.lints.clippy.same_functions_in_if_condition is not configured");
+
+    assert_eq!(level, "deny");
+}
+
+#[test]
 fn workspace_clippy_lint_configuration_enforces_manual_clamp_deny() {
     let mut manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_path.pop();

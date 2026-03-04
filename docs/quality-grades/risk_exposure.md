@@ -1,36 +1,35 @@
 ## Risk Exposure Assessment
 
-### Repo-Wide Score: 61
-Risk is elevated overall: core runtime files are very large and deeply branched, and 29/98 source files are untested, including orchestration-critical paths. The sampled `tui.rs` has strong unit coverage, but its size and statefulness still create regression surface area that tests do not fully close.
+### Repo-Wide Score: 68
+Risk is elevated by concentration of logic in very large runtime files (`tui.rs`, `backlog_store.rs`, `worker_pool.rs`, `startup.rs`) plus 29/98 untested source files. Debt-marker volume is low (13 total), and many high-complexity files do include unit tests, which keeps risk below the high-risk band. Overall this is a test-rich repo with meaningful blind spots in orchestration boundaries.
 
 ### Per-Domain Scores
-- runtime-orchestration: 54 - Highest complexity concentration (`tui.rs`, `backlog_store.rs`, `worker_pool.rs`, `startup.rs`) plus multiple untested runtime files in control-flow boundaries raises bug/regression exposure.
-- runtime-validation: 76 - Test suite is substantial and catches many UI/state paths, but coverage is uneven against high-risk orchestration and terminal/error-edge behavior.
-- migration-wiring-fixtures: 72 - Simple fixture scope limits blast radius, but fixture code is untested and can silently drift from real migration wiring expectations.
+- runtime-orchestration: 62 - Highest exposure: deepest complexity sits here, and several runtime modules in the untested list (`config.rs`, `phase_cli.rs`, `plan_phase.rs`, `merge_loop.rs`, `pr_audit.rs`, `main.rs`) are operationally sensitive.
+- integration-and-contract-testing: 74 - Strong suite breadth (phase/contract/lint/e2e tests) reduces regression risk, but coverage is uneven against all runtime boundary modules.
+- developer-automation-and-fixtures: 71 - Scope is smaller, but fixture/script paths include untested files and can silently drift from runtime expectations.
 
 ### Key Findings
-- `tools/gardener/src/tui.rs` is heavily tested but still a monolithic, high-branching control surface with global thread-local state and multiple rendering modes.
-- Critical runtime files listed as untested (`git_phase.rs`, `plan_phase.rs`, `merge_loop.rs`, `phase_cli.rs`, `quality_scoring.rs`, `config.rs`) create disproportionate regression risk versus their role.
-- Error boundaries in rendering paths still include `panic!`-style failure behavior, increasing hard-failure risk under terminal/runtime edge conditions.
+- Complexity is heavily concentrated in a few orchestration files, creating large regression blast radius per change.
+- Test density is good overall, including many inline tests in complex files, but critical untested runtime modules remain.
+- Debt markers are not the primary risk driver; coverage gaps around execution boundaries are.
 
 ### Deficiencies
+- **[CoverageGap | P0] Untested runtime boundary modules**
+- What: Multiple runtime entry/boundary files are untested (`tools/gardener/src/config.rs`, `phase_cli.rs`, `plan_phase.rs`, `merge_loop.rs`, `pr_audit.rs`, `main.rs`, plus others from the untested list).
+- Agent impact: Autonomous runs can pass local checks while still failing in real orchestration paths (startup, planning, merge, CLI pathing), causing failed runs and wasted remediation turns.
+- Fix: Add focused contract/integration tests for each boundary module using existing phase-fixture patterns in `tools/gardener/tests/fixtures/configs`.
 
-- **CoverageGap | P0** Untested orchestration paths in critical runtime modules
-  - What: Key files in `tools/gardener/src/` (including `git_phase.rs`, `plan_phase.rs`, `merge_loop.rs`, `phase_cli.rs`, `quality_scoring.rs`, `config.rs`) are reported untested.
-  - Agent impact: Autonomous runs can fail late in phase transitions/merge flows, causing wasted cycles and missed regressions in the exact paths agents exercise most.
-  - Fix: Add focused integration tests per phase boundary (claim → plan → do → merge), plus contract tests for config parsing and scoring outputs.
+- **[FeedbackLoopGap | P1] Monolithic files slow safe iteration**
+- What: `tui.rs` (~4k LOC) and other very large files hold many concerns in one unit, increasing coupling and branch interactions.
+- Agent impact: Small edits require broad retesting/context loading, increasing token/tool usage and raising accidental regression probability.
+- Fix: Split by responsibility (rendering, input handling, state mapping, formatting/parsing) and keep tests co-located per new module.
 
-- **ConventionViolation | P1** Monolithic TUI module with mixed responsibilities
-  - What: `tools/gardener/src/tui.rs` combines rendering, input handling, wizard logic, state normalization, scroll state, and terminal lifecycle in one very large file.
-  - Agent impact: Changes are harder to localize safely; agents must touch broad surfaces, increasing accidental regressions and review complexity.
-  - Fix: Split into submodules (`render_dashboard`, `render_report`, `wizard`, `terminal_lifecycle`, `state_formatting`) and enforce max file/function complexity thresholds in CI.
+- **[MissingTooling | P1] No hard guard against untested-source drift**
+- What: The repo surfaces untested-file reporting, but current quality gates still allow significant untested source inventory.
+- Agent impact: Agents cannot rely on CI to reject newly uncovered critical paths, so risk accumulates invisibly over time.
+- Fix: Add CI policy gates (for example: fail on new untested files in runtime-orchestration paths, then ratchet toward stricter thresholds).
 
-- **ObservabilityGap | P1** Panic-based failure in render/test paths
-  - What: Multiple render helpers use `panic!` on terminal initialization/draw failure rather than propagating structured errors.
-  - Agent impact: Failures become abrupt and less diagnosable, reducing agent ability to recover, retry, or provide actionable remediation.
-  - Fix: Replace panic branches with `Result` propagation and add structured error context (mode, dimensions, terminal state) to logs.
-
-- **FeedbackLoopGap | P2** Debt clusters around quality subsystem
-  - What: Debt markers are concentrated in `quality_debt_scanner.rs` and related quality files, indicating known cleanup/consistency gaps near scoring logic.
-  - Agent impact: Agents spend extra turns reconciling ambiguous behavior in quality reporting, slowing iteration and increasing inconsistent outputs.
-  - Fix: Burn down debt markers in quality pipeline files first, then add lint/check to fail on new `TODO/FIXME` in scoring and assessment modules.
+- **[MissingDocumentation | P2] Limited executable docs for orchestration invariants**
+- What: High-risk flows (worker lifecycle/state transitions/merge loop expectations) are encoded mainly in code/tests, with limited concise invariant docs.
+- Agent impact: Agents spend extra turns inferring implicit rules, increasing mis-edits in stateful paths.
+- Fix: Add short runbooks describing invariants and failure modes for worker FSM, startup sequencing, and merge-loop decision logic, each linked to owning tests.

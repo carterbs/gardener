@@ -1,31 +1,35 @@
 ## Agent Steering Assessment
 
-### Repo-Wide Score: 61
-The steering docs are very concise and contain concrete runtime/commit/worktree directives, which is high-signal. However, they miss two major effectiveness drivers: architecture pointers and explicit test/validation commands. Coverage is heavily skewed to runtime execution and does not guide agents through validation or fixture domains.
+### Repo-Wide Score: 44
+The steering is concise and highly specific where it speaks (runtime entry commands, commit/worktree policy), but coverage is narrow. It lacks architecture pointers, explicit test/build workflows beyond runtime launch, and domain-level guidance for tests and scripts, which limits autonomous execution quality.
 
 ### Per-Domain Scores
-- runtime-orchestration: 78 - `AGENTS.md` gives clear Rust-first direction and exact runtime commands, plus strong commit/worktree constraints.
-- runtime-validation: 38 - No explicit test commands (`cargo test` targets, integration/contract/lint entrypoints) or guidance on when/how to run validation suites.
-- migration-wiring-fixtures: 27 - No mention of fixture usage, migration wiring checks, or commands for verifying pass/fail fixture behavior.
+- runtime-orchestration: 70 - Clear Rust-first directive and concrete Gardener runtime invocations provide strong operational guidance for core execution paths.
+- integration-and-contract-testing: 28 - No explicit commands or selection strategy for running `tools/gardener/tests/`, so agents must infer test workflows and risk incomplete validation.
+- developer-automation-and-fixtures: 24 - `scripts/` usage, fixture expectations, and automation entrypoints are undocumented, leaving agents without actionable script-level instructions.
 
 ### Key Findings
-- Strong specificity for runtime execution: exact `cargo run -p gardener --bin gardener -- ...` commands reduce ambiguity.
-- Excellent signal-to-noise ratio (21 total lines across both files), with minimal boilerplate and clean progressive disclosure (`CLAUDE.md` -> `AGENTS.md`).
-- Critical coverage gaps: missing architecture map and test/verification commands substantially limit autonomous agent reliability.
+- `AGENTS.md` has good signal-to-noise and concrete command specificity, with minimal fluff.
+- Steering lacks architecture pointers (module boundaries/where to implement changes), reducing navigation efficiency in `tools/gardener/src/`.
+- Testing/build guidance is materially incomplete: runtime invocation is documented, but verification commands and domain-specific test expectations are missing.
 
 ### Deficiencies
+- **[CoverageGap | P1] Missing domain-level steering beyond runtime launch**
+  - What: `AGENTS.md` documents runtime entrypoints but does not cover `tools/gardener/tests/` or `scripts/fixtures/` workflows.
+  - Agent impact: Agents can run the app but frequently skip or under-run verification, increasing regression risk and rework.
+  - Fix: Add short per-domain sections with exact commands for integration/contract tests and script fixture checks.
 
-- **MissingTooling | P1** Missing test and verification command matrix
-  - What: `AGENTS.md` defines run commands but no concrete test/build/lint commands for `tools/gardener/tests/` or repo-level validation flows.
-  - Agent impact: Agents guess validation steps, causing missed regressions, extra turns, or incorrect “done” states after code changes.
-  - Fix: Add a compact “Verification” section with exact commands (unit, integration, fixture checks, lint/format) and when each is required.
+- **[MissingTooling | P1] No explicit test/build command matrix**
+  - What: There is no canonical list for build, unit, integration, and targeted test runs (workspace vs package-level).
+  - Agent impact: Agents spend extra turns discovering commands, may choose slower/full runs unnecessarily, or miss required checks.
+  - Fix: Add a compact “Validation Commands” block (e.g., `cargo test -p gardener`, targeted test filters, lint/format/pre-commit command).
 
-- **CoverageGap | P1** No architecture pointers for core modules
-  - What: Steering docs do not map key runtime areas in `tools/gardener/src/` (orchestration, TUI, worker lifecycle, git/worktree ops, quality pipeline).
-  - Agent impact: Slower navigation and higher risk of editing wrong components, increasing failed attempts and patch churn.
-  - Fix: Add a short “Architecture Pointers” section listing major modules/paths and their responsibilities (1 line each).
+- **[MissingDocumentation | P2] No architecture map for `tools/gardener/src/`**
+  - What: Steering does not identify key modules (runtime orchestration, worker lifecycle, adapters, phases) or where related changes belong.
+  - Agent impact: Higher chance of edits in wrong layer, slower onboarding, and inconsistent fixes across similar issues.
+  - Fix: Add a 6-10 line architecture pointer section naming major directories/files and ownership boundaries, with links to deeper docs if available.
 
-- **CoverageGap | P2** Fixture/migration domain not represented
-  - What: No guidance references `scripts/fixtures/check-migrations-wired/` or how fixture-driven migration wiring validation is expected to run.
-  - Agent impact: Agents underuse fixture checks and can miss migration wiring regressions tied to backlog-store behavior.
-  - Fix: Add a “Fixtures” subsection with fixture path purpose and exact command(s) to run pass/fail wiring checks.
+- **[FeedbackLoopGap | P2] Pre-commit policy present but failure-handling workflow is incomplete**
+  - What: Policy says “do not bypass hooks” but does not specify how to run hooks locally before commit or triage common failures.
+  - Agent impact: Agents hit hook failures late in the cycle, causing repeated failed commit attempts and wasted turns.
+  - Fix: Add explicit pre-flight command(s) and a short remediation sequence (run hooks, fix, re-run, then commit).

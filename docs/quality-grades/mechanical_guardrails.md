@@ -1,31 +1,36 @@
 ## Mechanical Guardrails Assessment
 
 ### Repo-Wide Score: 84
-The repo has strong baseline guardrails: CI is present, pre-commit runs validation, clippy is enforced with denied lints, and a hard 90% line-coverage gate is wired into CI. It also includes custom lint scripts for migration wiring, binary artifact blocking, and doc/command drift checks. Main gaps are missing security scanning and missing explicit formatter enforcement in CI.
+Guardrails are strong: CI runs `./scripts/run-validate.sh`, pre-commit runs the same validation path, and Rust linting/coverage are hard-fail (`cargo clippy -D warnings`, `COVERAGE_MIN_LINE` gate in `scripts/test-gardener-coverage.sh`). The main gaps are missing security/dependency scanning and incomplete formatting/coverage observability enforcement in CI.
 
 ### Per-Domain Scores
-- runtime-orchestration: 86 - `tools/gardener/src/` is protected by clippy (`-D warnings`), CI validation, and coverage gating via `scripts/test-gardener-coverage.sh`, with additional custom checks in `scripts/run-validate.sh`.
-- runtime-validation: 83 - `tools/gardener/tests/` is exercised through coverage/test pipelines and targeted doc/command contract tests, but no dedicated mutation/security/dependency risk checks are enforced.
-- migration-wiring-fixtures: 76 - Fixture-backed migration wiring checks are present (`scripts/check-migrations-wired.sh` + fixture tests), but guardrails are narrow in scope and rely on shell-script conventions rather than broader static enforcement.
+- runtime-orchestration: 86 - `tools/gardener/src/` is protected by workspace clippy denies (`Cargo.toml`) plus CI/pre-commit validation and coverage gating.
+- integration-and-contract-testing: 82 - `tools/gardener/tests/` is exercised through coverage runs and targeted lint/contract tests, but coverage reporting is summary-only and excludes configured paths.
+- developer-automation-and-fixtures: 84 - `scripts/` has substantial self-checks (`run-script-lint-fixture-tests.sh`, migration/skills/doc linters), but script/supply-chain security tooling is limited.
 
 ### Key Findings
-- CI and pre-commit both route through `scripts/run-validate.sh`, creating a mostly unified enforcement path.
-- Mechanical quality checks are unusually strong for repo-specific risks (migration wiring, binary blob prevention, skills sync, doc drift).
-- Security/dependency guardrails (CodeQL, `cargo audit`, `cargo deny`, Dependabot) are not detected.
+- CI has two active workflows (`.github/workflows/ci.yml`, `.github/workflows/gardener-coverage.yml`) that fail builds on validation/coverage regressions.
+- Pre-commit is wired (`.githooks/pre-commit`) and runs repository-wide validation, not just formatting.
+- Coverage is quantitatively enforced (`scripts/test-gardener-coverage.sh`) with a default 90% line threshold.
 
 ### Deficiencies
 
-- **MissingTooling | P1** Missing security/dependency scanning
-  - What: No workflows or scripts for `cargo audit`, `cargo deny`, CodeQL, Semgrep, or Dependabot config were found (only `.github/workflows/ci.yml` and `.github/workflows/gardener-coverage.yml` exist).
-  - Agent impact: Agents can ship vulnerable dependencies or risky code patterns without automated detection, increasing regression and incident risk after “green” CI.
-  - Fix: Add a CI security job (at minimum `cargo audit` + `cargo deny check`) and enable Dependabot/CodeQL in `.github/`.
+- **[MissingTooling | P1]** No dependency/security scanning gate
+  - What: No `cargo deny`, `cargo audit`, SCA workflow, or equivalent security check appears in `.github/workflows/*.yml` or validation scripts.
+  - Agent impact: Vulnerable or policy-violating dependencies can land undetected, causing late-cycle break/fix work and riskier autonomous updates.
+  - Fix: Add a CI stage (and pre-commit integration where practical) for `cargo audit` and/or `cargo deny check` with fail-on-findings policy.
 
-- **FeedbackLoopGap | P1** Formatter compliance is not explicitly CI-gated
-  - What: `.githooks/pre-commit` runs `rustfmt` on staged files, but CI/validation does not run `cargo fmt --check`; `scripts/run-validate.sh` only checks formatter availability.
-  - Agent impact: If hooks are not installed or bypassed in a local environment, formatting drift can land and force later cleanup churn across autonomous runs.
-  - Fix: Add `cargo fmt --all -- --check` to `scripts/run-validate.sh` (or a dedicated CI step) so formatting is enforced server-side.
+- **[CoverageGap | P1]** Coverage gate excludes files via ignore manifest
+  - What: `scripts/test-gardener-coverage.sh` applies `--ignore-filename-regex` from `scripts/coverage-ignore-manifest.txt`.
+  - Agent impact: Agents can change excluded runtime code without moving the coverage gate, increasing missed-regression probability.
+  - Fix: Tighten the ignore manifest to minimal justified exclusions and add a policy check that blocks new exclusions without review.
 
-- **CoverageGap | P2** CI path filters can miss guardrail-relevant changes
-  - What: `.github/workflows/ci.yml` only triggers on selected paths (`tools/gardener/**`, `scripts/**`, Cargo files, skills dirs), not on guardrail files like `.githooks/pre-commit` or broader repo config.
-  - Agent impact: Changes to enforcement plumbing may merge without re-running validation, causing silent degradation in future agent feedback loops.
-  - Fix: Expand workflow `paths` coverage (or add a lightweight always-on validation workflow) to include hook/workflow/config files that affect guardrail behavior.
+- **[FeedbackLoopGap | P2]** Coverage feedback is log-only
+  - What: Workflows run coverage but do not publish HTML/LCOV artifacts or PR annotations (`.github/workflows/gardener-coverage.yml`).
+  - Agent impact: Regression triage is slower because agents/reviewers must parse raw logs instead of targeted diffs/artifacts.
+  - Fix: Emit LCOV/HTML (`cargo llvm-cov --lcov/--html`) and upload artifacts; optionally add PR comments for changed-file coverage.
+
+- **[ConventionViolation | P2]** Formatting is not explicitly CI-enforced
+  - What: Pre-commit formats staged Rust files, but CI does not run an explicit `cargo fmt --all --check` step in workflows.
+  - Agent impact: If hooks are bypassed/misconfigured, style drift can merge and create noisy follow-up churn for autonomous edits.
+  - Fix: Add `cargo fmt --all --check` to `scripts/run-validate.sh` (or workflow steps) as a hard CI gate.

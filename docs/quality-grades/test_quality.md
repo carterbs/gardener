@@ -1,31 +1,30 @@
 ## Test Quality Assessment
 
-### Repo-Wide Score: 93
-The sampled `tools/gardener/src/tui.rs` tests are substantial: they cover rendering branches, state normalization, ordering logic, scroll behavior, and wizard key-handling with meaningful assertions. Quality is high overall, but not perfect due to limited coverage of failure/IO paths and some string-fragile UI assertions. This is a strong suite, but not quite a true 100.
+### Repo-Wide Score: 96
+Test quality is very strong: assertion density is high, test names are specific, and there is broad edge-case coverage (state transitions, key handling, rendering behavior, parsing). The sampled suite shows meaningful, behavior-focused assertions rather than trivial smoke checks. I’m scoring slightly below perfect due to a few structural gaps that can still hide regressions.
 
 ### Per-Domain Scores
-- runtime-orchestration: 94 - `tui.rs` includes deep unit coverage for state transforms and UI behavior, including edge cases (normalization, truncation, viewport scrolling, wizard branching), with clear test naming and isolation.
-- runtime-validation: 90 - broad assertion volume is strong, but quality appears uneven across files (including very low-/zero-assertion contract/lint-style tests), which weakens confidence in behavioral regression detection.
-- migration-wiring-fixtures: 88 - fixture-driven validation exists, but fixture domains typically under-test malformed/partial permutations unless explicitly enumerated; risk remains around unmodeled wiring edge cases.
+- runtime-orchestration: 97 - Deep unit coverage in `tools/gardener/src/tui.rs` exercises state machines, parsing, rendering, and keyboard flows with strong assertions.
+- integration-and-contract-testing: 95 - Deterministic metrics indicate broad integration coverage and high assertion counts; evidence suggests strong end-to-end validation depth.
+- developer-automation-and-fixtures: 90 - Coverage appears present but less evidenced in the sample; fixture/script paths likely have lower behavioral-depth tests than core runtime paths.
 
 ### Key Findings
-- The `tui.rs` module has high-quality behavioral tests, not just existence checks, including ordered rendering invariants and input-state transitions.
-- Test names are descriptive and map well to expected behavior, which improves maintainability and failure triage.
-- The largest remaining risk is around interactive runtime/terminal error paths that are difficult to unit-test and appear lightly covered.
+- Tests validate real behavior and edge paths (viewport scrolling limits, wizard progression, parser fallbacks, stage inference), not just type-level checks.
+- Assertion style is meaningful and varied (`assert_eq!`, negative assertions, containment checks, sequence/state verification).
+- Naming quality is high and supports fast diagnosis of failures in autonomous workflows.
 
 ### Deficiencies
+- **ConventionViolation | P1** Monolithic test surface in runtime source file
+  - What: A very large in-file unit test module in `tools/gardener/src/tui.rs` couples many concerns (rendering, parsing, input handling) into one compilation/test surface.
+  - Agent impact: Autonomous agents get slower triage and noisier failure localization because unrelated regressions fail in the same dense module.
+  - Fix: Split tests into focused modules/files (`tui_render_tests.rs`, `tui_parser_tests.rs`, `tui_input_tests.rs`) and keep helper builders shared.
 
-- **[CoverageGap | P1] Interactive terminal failure paths are weakly tested**
-  - What: Paths in `run_seed_review_wizard`, `run_repo_health_wizard`, `with_live_terminal`, and teardown/error branches are largely unexercised compared to pure render helpers.
-  - Agent impact: Autonomous runs can fail on terminal/raw-mode edge cases (resize, IO errors, early exits) with regressions escaping CI until runtime.
-  - Fix: Introduce abstraction for event/terminal backends and add deterministic tests for error propagation, cleanup guarantees, and cancel/interrupt flows.
+- **CoverageGap | P2** Limited fuzz/property-style validation for string parsing
+  - What: Parsers like `parse_backlog_item`, `parse_merge_queue_item`, and token helpers are covered by examples but not by property/fuzz tests for malformed/randomized input.
+  - Agent impact: Agents can miss parser edge regressions from unseen input variants, causing runtime misclassification and extra repair turns.
+  - Fix: Add property-based tests (e.g., `proptest`) for tokenization invariants and no-panic guarantees across arbitrary strings.
 
-- **[CoverageGap | P2] UI assertions rely heavily on raw string contains**
-  - What: Many tests assert `frame.contains("...")` rather than asserting structural invariants (panel boundaries, row selection index behavior, semantic sections).
-  - Agent impact: Minor copy or style changes can cause noisy failures, slowing agent iteration and obscuring real behavior regressions.
-  - Fix: Add helper assertions that validate semantic regions/ordering and key widgets; keep a smaller set of literal text checks for critical labels only.
-
-- **[FeedbackLoopGap | P2] Assertion quality is uneven across the wider test set**
-  - What: Repo metadata shows some files with 0-1 assertions (for example lint/contract tests), creating pockets of shallow verification.
-  - Agent impact: Agents may get false confidence from passing checks while behavioral bugs in adjacent flows remain undetected.
-  - Fix: Raise minimum expectations for low-assertion tests (multi-assert behavioral checks, negative-case assertions, failure-message validation) and enforce via test quality linting.
+- **ObservabilityGap | P2** Render assertions rely heavily on substring presence
+  - What: Many UI tests assert `frame.contains(...)` without validating stronger structural invariants of layout output.
+  - Agent impact: Agents may ship subtle visual/semantic regressions that still pass broad string checks, reducing confidence in automated UI refactors.
+  - Fix: Introduce targeted snapshot/golden assertions for key layouts (by width/height tiers) plus normalized structural checks for critical sections.

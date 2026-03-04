@@ -1,31 +1,31 @@
 ## Coverage Infrastructure Assessment
 
-### Repo-Wide Score: 76
-Coverage is actively measured and enforced for Rust via `cargo llvm-cov` in both CI workflows and local validation (`scripts/test-gardener-coverage.sh` with `COVERAGE_MIN_LINE`, default 90). The score is capped because reporting is terminal-only (`--summary-only`), with no artifact publishing, PR annotations, or badge/trend visibility.
+### Repo-Wide Score: 74
+Coverage is actively enforced with `cargo llvm-cov` in CI and local validation (`.github/workflows/ci.yml`, `.github/workflows/gardener-coverage.yml`, `scripts/test-gardener-coverage.sh`) with a numeric line gate (`COVERAGE_MIN_LINE`, default 90). It is not top-tier because reporting is summary-only (no artifact publishing, PR annotations, or badge integration) and coverage scope is reduced by explicit path exclusions (`scripts/coverage-ignore-manifest.txt`).
 
 ### Per-Domain Scores
-- runtime-orchestration: 80 - `tools/gardener/src/` is covered by a real CI gate (`cargo llvm-cov`, fail-below-threshold), but enforcement scope is reduced by `scripts/coverage-ignore-manifest.txt` exclusions and lacks rich reporting.
-- runtime-validation: 56 - Validation runs in CI and coverage gate execution is tested, but there is no domain-specific threshold/reporting for `tools/gardener/tests/` itself.
-- migration-wiring-fixtures: 22 - Fixture behavior is tested through shell fixture runs, but there is no coverage instrumentation or threshold for fixture/script paths.
+- runtime-orchestration: 81 - `tools/gardener/src/` is covered by a real, failing CI gate via `cargo llvm-cov`, but confidence is reduced by ignore-manifest exclusions and lack of per-change visibility.
+- integration-and-contract-testing: 62 - `tools/gardener/tests/` is exercised in CI through `--all-targets`, but there is no domain-specific threshold/reporting surface for integration/contract layers.
+- developer-automation-and-fixtures: 28 - `scripts/` and fixture logic are validated functionally, but no script-level coverage tooling/thresholds (e.g., `kcov`) are wired into CI.
 
 ### Key Findings
-- CI has explicit coverage enforcement (`.github/workflows/ci.yml`, `.github/workflows/gardener-coverage.yml` -> `./scripts/test-gardener-coverage.sh`).
-- The gate is numeric and failing (`COVERAGE_MIN_LINE` default `90`, parse `TOTAL`, exit non-zero below threshold).
-- Coverage visibility is weak: no LCOV/HTML artifact upload, no Codecov/Coveralls integration, and no README badge.
+- Coverage gating is real and enforced in multiple workflows using `cargo llvm-cov` plus a numeric fail condition.
+- Coverage observability is weak: no LCOV/HTML artifact upload, no coverage service integration, and no README badge.
+- Scope exclusions in `scripts/coverage-ignore-manifest.txt` materially weaken denominator trust for runtime coverage.
 
 ### Deficiencies
 
-- **[CoverageGap | P1]** Coverage gate excludes many runtime files
-  - What: `scripts/test-gardener-coverage.sh` applies `--ignore-filename-regex` from `scripts/coverage-ignore-manifest.txt`, removing substantial `tools/gardener/src/**` paths from denominator math.
-  - Agent impact: Agents can change excluded runtime code and still pass the gate, increasing missed-regression risk and false confidence in autonomous runs.
-  - Fix: Shrink the ignore manifest to true non-actionable paths only; add a policy test that fails if high-risk modules are newly excluded.
+- **[ObservabilityGap | P1]** Coverage results are log-only
+  - What: `scripts/test-gardener-coverage.sh` runs `cargo llvm-cov --summary-only`; workflows do not publish `lcov.info`/HTML or PR annotations.
+  - Agent impact: Agents and reviewers must parse raw logs, making regressions harder to detect and slowing remediation loops.
+  - Fix: Emit machine-readable coverage outputs (`--lcov`/HTML), upload artifacts in GitHub Actions, and add PR annotation/reporting integration.
 
-- **[ObservabilityGap | P1]** No published coverage artifacts or PR-level visibility
-  - What: Workflows run coverage checks but only print summary text; there is no `lcov.info`/HTML upload, no PR annotation, and no external reporting integration.
-  - Agent impact: Agents/reviewers must parse raw logs manually, slowing triage and making coverage regressions harder to spot quickly.
-  - Fix: Emit machine-readable output (LCOV/JSON), upload artifacts in CI, and optionally wire Codecov/Coveralls or PR comments for change-level visibility.
+- **[CoverageGap | P1]** Runtime coverage denominator is narrowed by ignore manifest
+  - What: `scripts/coverage-ignore-manifest.txt` excludes many `tools/gardener/src/**` paths from coverage math.
+  - Agent impact: Green coverage gates can overstate confidence, increasing risk of missed regressions in orchestrator-critical code.
+  - Fix: Audit and minimize exclusions, require justification for new ignores, and enforce policy checks for high-risk module exclusions.
 
-- **[MissingTooling | P1]** No coverage tooling for fixture/script domain
-  - What: `scripts/fixtures/check-migrations-wired/**` and related shell checks are behavior-tested, but shell coverage tooling (e.g., `kcov`/`bashcov`) is not configured or gated.
-  - Agent impact: Script-path regressions can survive because execution success does not reveal untested branches in fixture validation logic.
-  - Fix: Add shell/script coverage collection in CI for critical scripts and enforce a minimum threshold for the migration-wiring fixture workflow.
+- **[MissingTooling | P1]** No dedicated coverage tooling for scripts/fixtures
+  - What: `scripts/` and `scripts/fixtures/check-migrations-wired/` are executed by validation, but no script/fixture coverage tool or threshold is configured.
+  - Agent impact: Shell/fixture branch regressions can pass CI unnoticed, reducing reliability of automation infrastructure that agents depend on.
+  - Fix: Add script coverage tooling (for example `kcov`) for high-impact scripts, set minimum thresholds, and gate in CI.

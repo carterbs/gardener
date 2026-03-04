@@ -1,4 +1,4 @@
-use crate::agent::{validate_model, AdapterCapabilities, AdapterContext, AgentAdapter};
+use crate::agent::{validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::protocol::{map_codex_event, parse_json_records, AgentEvent, AgentTerminal, StepResult};
@@ -113,7 +113,11 @@ impl AgentAdapter for CodexAdapter {
             args.push(schema.display().to_string());
         }
 
-        args.push(prompt.to_string());
+        let prompt_file = write_prompt_file(&context.worker_id, prompt)?;
+        args.push(format!(
+            "Read the file at {} for your full instructions. Follow them exactly.",
+            prompt_file.display()
+        ));
 
         append_run_log(
             "debug",
@@ -211,6 +215,7 @@ impl AgentAdapter for CodexAdapter {
             &mut on_stdout_line,
             &mut on_stderr_line,
         )?;
+        let _ = std::fs::remove_file(&prompt_file);
         let mut diagnostics = stderr_diagnostics;
         diagnostics.extend(stdout_diagnostics);
         let events = raw_events.iter().map(map_codex_event).collect::<Vec<_>>();

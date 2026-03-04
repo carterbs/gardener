@@ -1,4 +1,4 @@
-use crate::agent::{validate_model, AdapterCapabilities, AdapterContext, AgentAdapter};
+use crate::agent::{validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::protocol::{map_claude_event, AgentEvent, AgentTerminal, StepResult};
@@ -87,9 +87,13 @@ impl AgentAdapter for ClaudeAdapter {
             }),
         );
 
+        let prompt_file = write_prompt_file(&context.worker_id, prompt)?;
         let mut args = vec![
             "-p".to_string(),
-            prompt.to_string(),
+            format!(
+                "Read the file at {} for your full instructions. Follow them exactly.",
+                prompt_file.display()
+            ),
             "--output-format".to_string(),
             "stream-json".to_string(),
             "--verbose".to_string(),
@@ -194,6 +198,7 @@ impl AgentAdapter for ClaudeAdapter {
             &mut on_stdout_line,
             &mut on_stderr_line,
         )?;
+        let _ = std::fs::remove_file(&prompt_file);
         let mut diagnostics = stderr_diagnostics;
         diagnostics.extend(stdout_diagnostics);
         let events = raw_events.iter().map(map_claude_event).collect::<Vec<_>>();

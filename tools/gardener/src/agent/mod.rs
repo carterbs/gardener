@@ -8,6 +8,33 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+/// Write a prompt to a temp file and return its path.
+/// Used to avoid exceeding OS `ARG_MAX` when prompts contain large payloads.
+pub fn write_prompt_file(agent_id: &str, prompt: &str) -> Result<PathBuf, GardenerError> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "gardener-{}-{}-{}.md",
+        agent_id,
+        ts,
+        std::process::id()
+    ));
+    std::fs::write(&path, prompt)
+        .map_err(|e| GardenerError::Process(format!("failed to write prompt file: {e}")))?;
+    append_run_log(
+        "debug",
+        "agent.write_prompt_file",
+        json!({
+            "agent_id": agent_id,
+            "path": path.display().to_string(),
+            "prompt_bytes": prompt.len()
+        }),
+    );
+    Ok(path)
+}
+
 pub mod claude;
 pub mod codex;
 pub mod factory;

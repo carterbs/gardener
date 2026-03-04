@@ -27,6 +27,7 @@ This directory is the canonical index for agent-oriented repository navigation. 
 - [Backlog operations runbook](./runbooks/backlog-operations.md)
 - [Agent bootstrap runbook (first run)](./runbooks/agent-bootstrap.md)
 - [Startup artifact map runbook](./runbooks/startup-artifact-map.md)
+- [Lima isolated runtime runbook](./runbooks/lima-isolated-runtime.md)
 
 ## Fifth: repository map
 

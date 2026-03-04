@@ -362,6 +362,9 @@ rm -f "$backlog_output"
 coverage_output="$(mktemp)"
 coverage_tmp_dir="$(mktemp -d)"
 coverage_manifest="$coverage_tmp_dir/coverage-ignore-manifest.txt"
+coverage_output_dir="$coverage_tmp_dir/coverage"
+coverage_lcov="$coverage_output_dir/lcov.info"
+coverage_html_dir="$coverage_output_dir/html"
 cat > "$coverage_manifest" <<'EOF'
 runtime/mod.rs
 bin/review_pr.rs
@@ -371,7 +374,31 @@ coverage_fake_cargo_args_file="$coverage_tmp_dir/cargo.args"
 cat > "$coverage_tmp_dir/cargo" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "\$@" > "$coverage_fake_cargo_args_file"
+printf '%s\n' "\$@" >> "$coverage_fake_cargo_args_file"
+
+write_next_output_path=0
+write_next_output_dir=0
+for arg in "\$@"; do
+  if [[ "\$write_next_output_path" == "1" ]]; then
+    mkdir -p "\$(dirname "\$arg")"
+    printf 'TN:fixture\n' > "\$arg"
+    write_next_output_path=0
+    continue
+  fi
+
+  if [[ "\$write_next_output_dir" == "1" ]]; then
+    mkdir -p "\$arg"
+    printf '<html><body>coverage fixture</body></html>' > "\$arg/index.html"
+    write_next_output_dir=0
+    continue
+  fi
+
+  case "\$arg" in
+    --output-path) write_next_output_path=1 ;;
+    --output-dir) write_next_output_dir=1 ;;
+  esac
+done
+
 echo "TOTAL a b c d e f g h 95.00%"
 EOF
 chmod +x "$coverage_tmp_dir/cargo"
@@ -380,10 +407,27 @@ run_expect_exit_capture 0 "$coverage_output" \
   env \
     PATH="$coverage_tmp_dir:$PATH" \
     COVERAGE_IGNORE_MANIFEST="$coverage_manifest" \
+    COVERAGE_LCOV_FILE="$coverage_lcov" \
+    COVERAGE_HTML_DIR="$coverage_html_dir" \
     COVERAGE_FAKE_CARGO_ARGS_FILE="$coverage_fake_cargo_args_file" \
     "$SCRIPT_DIR/test-gardener-coverage.sh"
 assert_file_contains "$coverage_output" "coverage gate passed"
 assert_file_contains "$coverage_fake_cargo_args_file" '/tools/gardener/src/(bin\/review_pr\.rs|runtime\/mod\.rs|worker/.*)'
+assert_file_contains "$coverage_fake_cargo_args_file" "--summary-only"
+assert_file_contains "$coverage_fake_cargo_args_file" "--lcov"
+assert_file_contains "$coverage_fake_cargo_args_file" "--output-path"
+assert_file_contains "$coverage_fake_cargo_args_file" "$coverage_lcov"
+assert_file_contains "$coverage_fake_cargo_args_file" "--html"
+assert_file_contains "$coverage_fake_cargo_args_file" "--output-dir"
+assert_file_contains "$coverage_fake_cargo_args_file" "$coverage_html_dir"
+if [[ ! -f "$coverage_lcov" ]]; then
+  echo "expected coverage LCOV output to be generated" >&2
+  exit 1
+fi
+if [[ ! -f "$coverage_html_dir/index.html" ]]; then
+  echo "expected coverage HTML output to be generated" >&2
+  exit 1
+fi
 rm -f "$coverage_output" "$coverage_fake_cargo_args_file"
 
 coverage_invalid_manifest="$coverage_tmp_dir/coverage-ignore-manifest.invalid.txt"

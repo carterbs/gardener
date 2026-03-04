@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-85}"
 PROFILE_DIR="${COVERAGE_PROFILE_DIR:-target/llvm-cov-target/profraw}"
 COVERAGE_IGNORE_MANIFEST="${COVERAGE_IGNORE_MANIFEST:-$SCRIPT_DIR/coverage-ignore-manifest.txt}"
+COVERAGE_LCOV_FILE="${COVERAGE_LCOV_FILE:-target/llvm-cov-target/coverage/lcov.info}"
+COVERAGE_HTML_DIR="${COVERAGE_HTML_DIR:-target/llvm-cov-target/coverage/html}"
 
 escape_for_regex() {
   local value="$1"
@@ -78,16 +80,17 @@ build_coverage_ignore_regex() {
 
 COVERAGE_IGNORE_REGEX="${COVERAGE_IGNORE_REGEX:-$(build_coverage_ignore_regex "$COVERAGE_IGNORE_MANIFEST")}"
 
+coverage_llvm_cov_args=( -p gardener --all-targets )
+if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
+  coverage_llvm_cov_args+=( --ignore-filename-regex "$COVERAGE_IGNORE_REGEX" )
+fi
+
 # Keep raw LLVM profiles out of the repo root when coverage-instrumented
 # subprocesses are spawned during tests.
 mkdir -p "$PROFILE_DIR"
 export LLVM_PROFILE_FILE="${LLVM_PROFILE_FILE:-$(pwd)/$PROFILE_DIR/default_%p_%m.profraw}"
 
-if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
-  report="$(cargo llvm-cov -p gardener --all-targets --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX")"
-else
-  report="$(cargo llvm-cov -p gardener --all-targets --summary-only)"
-fi
+report="$(cargo llvm-cov "${coverage_llvm_cov_args[@]}" --summary-only)"
 printf '%s\n' "$report"
 
 line_cov="$(printf '%s\n' "$report" | awk '/^TOTAL/{print $10}' | tr -d '%')"
@@ -95,6 +98,14 @@ if [[ -z "$line_cov" ]]; then
   echo "coverage gate: could not parse TOTAL line coverage" >&2
   exit 1
 fi
+
+mkdir -p "$(dirname "$COVERAGE_LCOV_FILE")"
+cargo llvm-cov "${coverage_llvm_cov_args[@]}" --lcov --output-path "$COVERAGE_LCOV_FILE"
+echo "coverage lcov report: $COVERAGE_LCOV_FILE"
+
+mkdir -p "$COVERAGE_HTML_DIR"
+cargo llvm-cov "${coverage_llvm_cov_args[@]}" --html --output-dir "$COVERAGE_HTML_DIR"
+echo "coverage html report: $COVERAGE_HTML_DIR"
 
 awk -v got="$line_cov" -v min="$MIN_LINE_COVERAGE" 'BEGIN { if (got + 0 < min + 0) exit 1 }' || {
   echo "coverage gate failed: line coverage ${line_cov}% < ${MIN_LINE_COVERAGE}%" >&2

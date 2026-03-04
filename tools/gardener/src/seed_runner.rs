@@ -2,7 +2,7 @@ use crate::agent::factory::AdapterFactory;
 use crate::agent::AdapterContext;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{SEEDING_PROMPT_VERSION_DIRECT, SEEDING_PROMPT_VERSION_LEGACY};
+use crate::prompt_registry::SEEDING_PROMPT_VERSION_SEEDING;
 use crate::protocol::{AgentEvent, AgentTerminal};
 use crate::runtime::ProcessRunner;
 use crate::types::{AgentKind, RuntimeScope};
@@ -116,7 +116,7 @@ fn run_legacy_seed_runner_v1_with_events_internal(
             "backend": format!("{:?}", backend),
             "model": model,
             "working_dir": scope.working_dir.display().to_string(),
-            "prompt_version": SEEDING_PROMPT_VERSION_LEGACY,
+            "prompt_version": SEEDING_PROMPT_VERSION_SEEDING,
             "max_turns": 12,
         }),
     );
@@ -139,7 +139,7 @@ fn run_legacy_seed_runner_v1_with_events_internal(
         sandbox_id: "seed-sandbox".to_string(),
         model: model.to_string(),
         cwd: scope.working_dir.clone(),
-        prompt_version: SEEDING_PROMPT_VERSION_LEGACY.to_string(),
+        prompt_version: SEEDING_PROMPT_VERSION_SEEDING.to_string(),
         context_manifest_hash: "seeding-context".to_string(),
         output_schema: Some(output_schema),
         output_file: None,
@@ -240,7 +240,7 @@ pub fn run_seed_agent_direct_v2_with_events(
             "backend": format!("{:?}", backend),
             "model": model,
             "working_dir": scope.working_dir.display().to_string(),
-            "prompt_version": SEEDING_PROMPT_VERSION_DIRECT,
+            "prompt_version": SEEDING_PROMPT_VERSION_SEEDING,
             "max_turns": 24,
         }),
     );
@@ -262,7 +262,7 @@ pub fn run_seed_agent_direct_v2_with_events(
         sandbox_id: "seed-sandbox".to_string(),
         model: model.to_string(),
         cwd: scope.working_dir.clone(),
-        prompt_version: SEEDING_PROMPT_VERSION_DIRECT.to_string(),
+        prompt_version: SEEDING_PROMPT_VERSION_SEEDING.to_string(),
         context_manifest_hash: "seeding-context-direct".to_string(),
         output_schema: None,
         output_file: None,

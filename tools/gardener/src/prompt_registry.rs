@@ -14,8 +14,6 @@ pub struct PromptRegistry {
 }
 
 pub const SEEDING_PROMPT_VERSION_SEEDING: &str = "seeding-v5";
-pub const SEEDING_PROMPT_VERSION_LEGACY: &str = SEEDING_PROMPT_VERSION_SEEDING;
-pub const SEEDING_PROMPT_VERSION_DIRECT: &str = SEEDING_PROMPT_VERSION_SEEDING;
 
 pub const SEEDING_ACTION_CONTRACT_DRY_RUN: &str = r#"Output contract
 - Emit JSON only.
@@ -117,14 +115,6 @@ Quality doc
 {QUALITY_DOC}
 "#,
     }
-}
-
-pub fn seeding_v2_prompt_template() -> PromptTemplate {
-    seeding_prompt_template()
-}
-
-pub fn seeding_v3_direct_prompt_template() -> PromptTemplate {
-    seeding_prompt_template()
 }
 
 impl PromptRegistry {
@@ -496,7 +486,10 @@ Return exactly one final envelope between <<GARDENER_JSON_START>> and <<GARDENER
 
 #[cfg(test)]
 mod tests {
-    use super::{ci_failure_remediation_template, PromptRegistry};
+    use super::{
+        ci_failure_remediation_template, seeding_prompt_template, PromptRegistry,
+        SEEDING_PROMPT_VERSION_SEEDING,
+    };
     use crate::types::WorkerState;
 
     #[test]
@@ -566,5 +559,11 @@ mod tests {
         assert!(tpl.body.contains("git status"));
         assert!(!tpl.body.contains("<<GARDENER_JSON_START>>"));
         assert!(!tpl.body.contains("Output schema must be JSON envelope"));
+    }
+
+    #[test]
+    fn seeding_prompt_template_uses_canonical_version_constant() {
+        let tpl = seeding_prompt_template();
+        assert_eq!(tpl.version, SEEDING_PROMPT_VERSION_SEEDING);
     }
 }

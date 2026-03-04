@@ -2447,7 +2447,7 @@ mod tests {
         // should be well before expiry.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system time is before UNIX epoch")
             .as_millis() as i64
             + 1000;
         let recovered = store.recover_stale_leases(now).expect("recover");

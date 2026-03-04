@@ -56,4 +56,3 @@ discovery_max_turns = 12
 [quality_report]
 path = "docs/quality-grades.md"
 stale_after_days = 7
-stale_if_head_commit_differs = true

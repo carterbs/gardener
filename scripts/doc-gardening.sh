@@ -76,8 +76,7 @@ run_check() {
 
 check_quality_grade_freshness() {
   local name="quality-grade freshness checks"
-  local quality_path quality_stamp stale_after_days stale_if_head_commit_differs
-  local profile_path current_head profile_head
+  local quality_path quality_stamp stale_after_days
   local stamp_value now_seconds ttl_seconds age
 
   checks_total=$((checks_total + 1))
@@ -119,9 +118,6 @@ check_quality_grade_freshness() {
 
   stale_after_days="$(extract_toml_value "quality_report" "stale_after_days" "$repo_root/gardener.toml")"
   stale_after_days="${stale_after_days:-7}"
-  stale_if_head_commit_differs="$(extract_toml_value "quality_report" "stale_if_head_commit_differs" "$repo_root/gardener.toml")"
-  stale_if_head_commit_differs="${stale_if_head_commit_differs:-true}"
-
   case "$stale_after_days" in
     ''|*[!0-9]*)
       stale_after_days=7
@@ -137,38 +133,6 @@ check_quality_grade_freshness() {
     echo "  fail: $name" >&2
     echo "quality report stamp is older than configured TTL (${stale_after_days} days): $quality_stamp" >&2
     return 0
-  fi
-
-  if [[ "$stale_if_head_commit_differs" == "true" ]]; then
-    profile_path="$(extract_toml_value "triage" "output_path" "$repo_root/gardener.toml")"
-    if [[ -z "$profile_path" ]]; then
-      profile_path=".gardener/repo-intelligence.toml"
-    fi
-    if [[ "${profile_path}" != /* ]]; then
-      profile_path="$repo_root/$profile_path"
-    fi
-
-    if [[ -f "$profile_path" ]]; then
-      profile_head="$(extract_toml_value "meta" "head_sha" "$profile_path")"
-      if [[ -z "$profile_head" ]]; then
-        checks_failed=$((checks_failed + 1))
-        failed_checks+=("$name")
-        echo "  fail: $name" >&2
-        echo "profile head sha missing in ${profile_path}" >&2
-        return 0
-      fi
-
-      current_head="$(git -C "$repo_root" rev-parse HEAD)"
-      if [[ -n "$current_head" && "$current_head" != "$profile_head" ]]; then
-        checks_failed=$((checks_failed + 1))
-        failed_checks+=("$name")
-        echo "  fail: $name" >&2
-        echo "quality report freshness failed: profile head differs from working tree head" >&2
-        echo "  profile: $profile_head" >&2
-        echo "  working: $current_head" >&2
-        return 0
-      fi
-    fi
   fi
 
   checks_passed=$((checks_passed + 1))

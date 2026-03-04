@@ -10,8 +10,7 @@ use serde::de::Error as DeError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SeedTask {
@@ -39,10 +38,8 @@ struct SeedPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SeedEnvelope {
-    #[serde(default)]
-    schema_version: Option<usize>,
-    #[serde(default)]
-    state: Option<String>,
+    schema_version: usize,
+    state: String,
     payload: SeedPayload,
 }
 
@@ -135,14 +132,7 @@ fn run_legacy_seed_runner_v1_with_events_internal(
         GardenerError::InvalidConfig(err)
     })?;
 
-    let output_file = scope
-        .working_dir
-        .join(".cache/gardener/seed-last-message.json");
     let output_schema = seed_output_schema_path(scope)?;
-    if let Some(parent) = output_file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| GardenerError::Io(format!("create_dir_all {}: {e}", parent.display())))?;
-    }
     let context = AdapterContext {
         worker_id: "seed-worker".to_string(),
         session_id: "seed-session".to_string(),
@@ -152,18 +142,17 @@ fn run_legacy_seed_runner_v1_with_events_internal(
         prompt_version: SEEDING_PROMPT_VERSION_LEGACY.to_string(),
         context_manifest_hash: "seeding-context".to_string(),
         output_schema: Some(output_schema),
-        output_file: Some(output_file.clone()),
+        output_file: None,
         permissive_mode: true,
         max_turns: Some(12),
     };
 
     append_run_log(
         "debug",
-        "seed_runner.adapter.executing",
+            "seed_runner.adapter.executing",
         json!({
             "backend": format!("{:?}", backend),
             "model": model,
-            "output_file": output_file.display().to_string(),
             "output_schema": context.output_schema.as_ref().map(|p| p.display().to_string()),
         }),
     );
@@ -211,48 +200,17 @@ fn run_legacy_seed_runner_v1_with_events_internal(
         )));
     }
 
-    let payload = {
-        let payload_result = match expected_task_count {
-            Some(expected_task_count) => {
-                parse_seed_payload_with_task_count(exec_result.payload, Some(expected_task_count))
-            }
-            None => parse_seed_payload(exec_result.payload),
-        };
-        match payload_result {
-            Ok(payload) => payload,
-            Err(event_error) => {
-                append_run_log(
-                    "warn",
-                    "seed_runner.parse_from_event_failed",
-                    json!({
-                        "backend": format!("{:?}", backend),
-                        "model": model,
-                        "error": event_error.to_string()
-                    }),
-                );
-                let file_payload = if let Some(expected_task_count) = expected_task_count {
-                    parse_seed_payload_from_file_with_task_count(&output_file, Some(expected_task_count))
-                } else {
-                    parse_seed_payload_from_file(&output_file)
-                };
-                file_payload.map_err(|file_error| {
-                    append_run_log(
-                        "error",
-                        "seed_runner.parse_failed",
-                        json!({
-                            "backend": format!("{:?}", backend),
-                            "model": model,
-                            "event_error": event_error.to_string(),
-                            "file_error": file_error.to_string()
-                        }),
-                    );
-                    GardenerError::OutputEnvelope(format!(
-                        "failed to parse seeding payload from event and file: event={event_error}; file={file_error}"
-                    ))
-                })?
-            }
+    let payload_result = match expected_task_count {
+        Some(expected_task_count) => {
+            parse_seed_payload_with_task_count(exec_result.payload, Some(expected_task_count))
         }
+        None => parse_seed_payload(exec_result.payload),
     };
+    let payload = payload_result.map_err(|err| {
+        GardenerError::OutputEnvelope(format!(
+            "seed output must match seeding envelope schema: {err}"
+        ))
+    })?;
 
     append_run_log(
         "info",
@@ -361,59 +319,23 @@ fn parse_seed_payload_with_task_count(
     value: serde_json::Value,
     expected_task_count: Option<usize>,
 ) -> Result<SeedPayload, serde_json::Error> {
-    if let Ok(payload) = serde_json::from_value::<SeedPayload>(value.clone()) {
-        validate_seed_payload(&payload, expected_task_count)?;
-        return Ok(payload);
-    }
-    let envelope: SeedEnvelope = serde_json::from_value(value)?;
-    validate_seed_payload(&envelope.payload, expected_task_count)?;
-    Ok(envelope.payload)
-}
-
-fn parse_seed_payload_from_file(path: &Path) -> Result<SeedPayload, GardenerError> {
-    parse_seed_payload_from_file_with_task_count(path, None)
-}
-
-fn parse_seed_payload_from_file_with_task_count(
-    path: &Path,
-    expected_task_count: Option<usize>,
-) -> Result<SeedPayload, GardenerError> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) => {
-            if err.kind() == ErrorKind::NotFound {
-                return Err(GardenerError::OutputEnvelope(format!(
-                    "seed output file missing: {}",
-                    path.display()
-                )));
-            }
-            return Err(GardenerError::Io(format!(
-                "read seed output file {}: {err}",
-                path.display()
-            )));
-        }
-    };
-
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(GardenerError::OutputEnvelope(format!(
-            "seed output file was empty: {}",
-            path.display()
+    let envelope: SeedEnvelope = serde_json::from_value(value).map_err(|err| {
+        DeError::custom(format!("seed payload must be a seeding envelope: {err}"))
+    })?;
+    if envelope.schema_version != 1 {
+        return Err(DeError::custom(format!(
+            "schema_version must be 1, found {}",
+            envelope.schema_version
         )));
     }
-
-    let value = serde_json::from_str::<serde_json::Value>(trimmed).map_err(|err| {
-        GardenerError::OutputEnvelope(format!(
-            "seed output file contained invalid JSON at {}: {err}",
-            path.display()
-        ))
-    })?;
-    parse_seed_payload_with_task_count(value, expected_task_count).map_err(|err| {
-        GardenerError::OutputEnvelope(format!(
-            "seed output file payload parse failed at {}: {err}",
-            path.display()
-        ))
-    })
+    if envelope.state != "seeding" {
+        return Err(DeError::custom(format!(
+            "state mismatch: expected seeding, got {}",
+            envelope.state
+        )));
+    }
+    validate_seed_payload(&envelope.payload, expected_task_count)?;
+    Ok(envelope.payload)
 }
 
 fn validate_seed_payload(
@@ -535,7 +457,7 @@ fn seed_output_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_seed_payload, parse_seed_payload_from_file, run_legacy_seed_runner_v1,
+        parse_seed_payload, run_legacy_seed_runner_v1,
         run_legacy_seed_runner_v1_with_events, run_legacy_seed_runner_v1_with_events_and_task_count,
         parse_seed_payload_with_task_count, run_seed_agent_direct_v2_with_events, SeedTask,
     };
@@ -684,27 +606,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_v1_uses_output_file_when_event_payload_is_unparseable() {
+    fn legacy_v1_rejects_unwrapped_direct_payload() {
         let runner = FakeProcessRunner::default();
         let working_dir = tempdir().expect("tempdir");
-        let output_file = working_dir
-            .path()
-            .join(".cache/gardener/seed-last-message.json");
-        if let Some(parent) = output_file.parent() {
-            std::fs::create_dir_all(parent).expect("create output parent");
-        }
-        std::fs::write(
-            &output_file,
-            r#"{"schema_version":1,"state":"seeding","payload":{"tasks":[{"title":"t","details":"d","rationale":"rationale","domain":"backlog","priority":"P1"}]}}"#,
-        )
-        .expect("write seeded file");
-
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
-            stdout: "{\"type\":\"turn.completed\",\"result\":null}\n".to_string(),
+            stdout: "{\"type\":\"turn.completed\",\"result\":{\"title\":\"t\",\"details\":\"d\",\"rationale\":\"rationale\",\"domain\":\"backlog\",\"priority\":\"P1\"}}\n".to_string(),
             stderr: String::new(),
         }));
-        let tasks = run_legacy_seed_runner_v1(
+        let result = run_legacy_seed_runner_v1(
             &runner,
             &RuntimeScope {
                 process_cwd: PathBuf::from("/cwd"),
@@ -714,12 +624,13 @@ mod tests {
             AgentKind::Codex,
             "gpt-5-codex",
             "prompt",
-        )
-        .expect("tasks");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].title, "t");
-        assert_eq!(tasks[0].domain, "backlog");
-        assert_eq!(tasks[0].priority, "P1");
+        );
+        assert!(result.is_err(), "expected Err on unwrapped payload");
+        let msg = result.expect_err("expected parse error");
+        assert!(
+            msg.to_string().contains("seed output must match seeding envelope schema"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]
@@ -836,7 +747,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_seed_payload_accepts_direct_payload_format() {
+    fn parse_seed_payload_rejects_direct_payload_format() {
         let payload = serde_json::json!({
             "tasks": [{
                 "title": "t",
@@ -847,6 +758,49 @@ mod tests {
             }]
         });
         let result = parse_seed_payload(payload);
+        assert!(result.is_err(), "expected Err for direct payload");
+    }
+
+    #[test]
+    fn parse_seed_payload_rejects_bad_envelope_metadata() {
+        let payload = serde_json::json!({
+            "schema_version": 2,
+            "state": "wrong",
+            "payload": {
+                "tasks": [{
+                    "title": "t",
+                    "details": "d",
+                    "rationale": "rationale",
+                    "domain": "backlog",
+                    "priority": "P1"
+                }]
+            }
+        });
+        let result = parse_seed_payload(payload);
+        let err = result.expect_err("expected invalid metadata");
+        assert!(
+            err.to_string().contains("schema_version must be 1")
+                || err.to_string().contains("state mismatch"),
+            "unexpected parse error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_seed_payload_accepts_envelope_payload_format() {
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "state": "seeding",
+            "payload": {
+                "tasks": [{
+                    "title": "t",
+                    "details": "d",
+                    "rationale": "r",
+                    "domain": "backlog",
+                    "priority": "P1"
+                }]
+            }
+        });
+        let result = parse_seed_payload(payload);
         assert!(result.is_ok());
         assert_eq!(result.expect("parse_seed_payload succeeded").tasks.len(), 1);
     }
@@ -854,13 +808,17 @@ mod tests {
     #[test]
     fn parse_seed_payload_with_task_count_enforces_exact_task_count() {
         let payload = serde_json::json!({
-            "tasks": [{
-                "title": "a",
-                "details": "d",
-                "rationale": "rationale",
-                "domain": "backlog",
-                "priority": "P1"
-            }]
+            "schema_version": 1,
+            "state": "seeding",
+            "payload": {
+                "tasks": [{
+                    "title": "a",
+                    "details": "d",
+                    "rationale": "rationale",
+                    "domain": "backlog",
+                    "priority": "P1"
+                }]
+            }
         });
         let result = parse_seed_payload_with_task_count(payload, Some(DRY_RUN_TASK_COUNT));
         assert!(
@@ -887,7 +845,11 @@ mod tests {
             })
             .collect();
         let payload = serde_json::json!({
-            "tasks": tasks
+            "schema_version": 1,
+            "state": "seeding",
+            "payload": {
+                "tasks": tasks
+            }
         });
         let result = parse_seed_payload_with_task_count(payload, Some(DRY_RUN_TASK_COUNT));
         assert!(
@@ -910,7 +872,11 @@ mod tests {
             })
             .collect();
         let payload = serde_json::json!({
-            "tasks": tasks
+            "schema_version": 1,
+            "state": "seeding",
+            "payload": {
+                "tasks": tasks
+            }
         });
         let result = parse_seed_payload_with_task_count(payload, Some(DRY_RUN_TASK_COUNT));
         assert!(
@@ -924,17 +890,6 @@ mod tests {
         let payload = serde_json::json!("not-an-object");
         let result = parse_seed_payload(payload);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn parse_seed_payload_from_file_reads_and_parses_tasks() {
-        let working_dir = tempdir().expect("tempdir");
-        let path = working_dir.path().join("seed-last-message.json");
-        let content = r#"{"schema_version":1,"state":"seeding","payload":{"tasks":[{"title":"title","details":"details","rationale":"rationale here","domain":"backlog","priority":"P0"}]}}"#;
-        std::fs::write(&path, content).expect("seed output file");
-        let payload = parse_seed_payload_from_file(&path).expect("parsed file payload");
-        assert_eq!(payload.tasks.len(), 1);
-        assert_eq!(payload.tasks[0].title, "title");
     }
 
     #[test]

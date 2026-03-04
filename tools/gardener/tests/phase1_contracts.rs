@@ -205,7 +205,7 @@ fn run_with_runtime_paths_and_errors() {
     let dir = TempDir::new().expect("tempdir");
     let repo_root = dir.path().to_str().expect("utf8").to_string();
     let runtime = runtime_with_config(
-        "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n\n[quality_report]\npath = \"docs/quality-grades.md\"\nstale_after_days = 7\nstale_if_head_commit_differs = false\n",
+        "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n\n[quality_report]\npath = \"docs/quality-grades.md\"\nstale_after_days = 7\n",
         true,
         Some(&repo_root),
     );
@@ -402,7 +402,6 @@ command = "npm run validate"
 [quality_report]
 path = "quality.md"
 stale_after_days = 1
-stale_if_head_commit_differs = false
 "#,
     );
     fs.write_string(Path::new("/repo/quality.md"), "# Quality Grades\n")
@@ -457,7 +456,6 @@ command = "npm run validate"
 [quality_report]
 path = "quality.md"
 stale_after_days = 0
-stale_if_head_commit_differs = false
 "#,
     );
     fs.write_string(Path::new("/repo/quality.md"), "# Quality Grades\n")

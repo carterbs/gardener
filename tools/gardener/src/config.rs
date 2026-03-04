@@ -129,7 +129,6 @@ pub struct TriageConfig {
 pub struct QualityReportConfig {
     pub path: String,
     pub stale_after_days: u64,
-    pub stale_if_head_commit_differs: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,7 +190,6 @@ impl Default for AppConfig {
             quality_report: QualityReportConfig {
                 path: "docs/quality-grades.md".to_string(),
                 stale_after_days: 7,
-                stale_if_head_commit_differs: true,
             },
             quality: QualityConfig {
                 backend: None,
@@ -293,7 +291,6 @@ struct PartialTriageConfig {
 struct PartialQualityReportConfig {
     path: Option<String>,
     stale_after_days: Option<u64>,
-    stale_if_head_commit_differs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -531,9 +528,6 @@ fn merge_partial_config(cfg: &mut AppConfig, partial: PartialAppConfig) {
         }
         if let Some(value) = quality.stale_after_days {
             cfg.quality_report.stale_after_days = value;
-        }
-        if let Some(value) = quality.stale_if_head_commit_differs {
-            cfg.quality_report.stale_if_head_commit_differs = value;
         }
     }
 

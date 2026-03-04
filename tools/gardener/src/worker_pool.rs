@@ -94,6 +94,222 @@ impl ShutdownSummary {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeSummaryHandling {
+    ContinueLoop,
+    EarlyContinue,
+}
+
+fn available_doing_slots(
+    parallelism: usize,
+    target: usize,
+    completed: usize,
+    active_merging: usize,
+) -> usize {
+    let in_flight_completed_or_merging = completed.saturating_add(active_merging);
+    parallelism.min(target.saturating_sub(in_flight_completed_or_merging))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoingSummaryHandling {
+    ContinueLoop,
+}
+
+fn handle_doing_complete_transition(
+    store: &BacklogStore,
+    workers: &mut [WorkerRow],
+    worker_idx: usize,
+    last_worker_state_line: usize,
+    worker_id: &str,
+    task_id: &str,
+    completed: &mut usize,
+    failed: &mut usize,
+) -> Result<DoingSummaryHandling, GardenerError> {
+    let marked_complete = store.mark_complete(task_id, worker_id)?;
+    if !marked_complete {
+        append_run_log(
+            "error",
+            "worker.task.completed_rejected",
+            json!({
+                "worker_id": worker_id,
+                "task_id": task_id,
+            }),
+        );
+        let unresolved = store.mark_unresolved(task_id, worker_id)?;
+        *failed = failed.saturating_add(1);
+        workers[worker_idx].state = if unresolved {
+            "unresolved".to_string()
+        } else {
+            "failed".to_string()
+        };
+        workers[worker_idx].task_id = None;
+        workers[worker_idx].last_state_line = last_worker_state_line;
+        let message = if unresolved {
+            format!("unresolved {}", task_id)
+        } else {
+            format!("complete transition rejected {}", task_id)
+        };
+        workers[worker_idx].tool_line = message.clone();
+        append_worker_command(&mut workers[worker_idx], &message);
+        workers[worker_idx].breadcrumb = workers[worker_idx].state.clone();
+        workers[worker_idx].lease_held = false;
+        return Ok(DoingSummaryHandling::ContinueLoop);
+    }
+    *completed = completed.saturating_add(1);
+    workers[worker_idx].state = "complete".to_string();
+    workers[worker_idx].task_id = None;
+    workers[worker_idx].last_state_line = last_worker_state_line;
+    let completed_message = format!("completed {}", task_id);
+    workers[worker_idx].tool_line = completed_message.clone();
+    append_worker_command(&mut workers[worker_idx], &completed_message);
+    workers[worker_idx].breadcrumb = "complete".to_string();
+    workers[worker_idx].lease_held = false;
+    append_run_log(
+        "info",
+        "worker.task.completed",
+        json!({
+            "worker_id": worker_id,
+            "task_id": task_id,
+            "completed": *completed
+        }),
+    );
+    Ok(DoingSummaryHandling::ContinueLoop)
+}
+
+fn handle_doing_non_complete_transition(
+    store: &BacklogStore,
+    workers: &mut [WorkerRow],
+    worker_idx: usize,
+    last_worker_state_line: usize,
+    worker_id: &str,
+    task_id: &str,
+    summary: &crate::worker::WorkerRunSummary,
+    failed: &mut usize,
+) -> Result<DoingSummaryHandling, GardenerError> {
+    workers[worker_idx].state = "failed".to_string();
+    workers[worker_idx].task_id = None;
+    workers[worker_idx].last_state_line = last_worker_state_line;
+    let failed_message = if let Some(reason) = summary.failure_reason.clone() {
+        if reason.is_empty() {
+            format!("failed {}", task_id)
+        } else {
+            let truncated = reason.chars().take(150).collect::<String>();
+            if reason.chars().count() > 150 {
+                format!("failed: {}…", truncated)
+            } else {
+                format!("failed: {}", reason)
+            }
+        }
+    } else {
+        format!("failed {}", task_id)
+    };
+    workers[worker_idx].tool_line = failed_message.clone();
+    append_worker_command(&mut workers[worker_idx], &failed_message);
+    workers[worker_idx].breadcrumb = "failed".to_string();
+    workers[worker_idx].lease_held = false;
+    *failed = failed.saturating_add(1);
+    append_run_log(
+        "error",
+        "worker.task.failed",
+        json!({
+            "worker_id": worker_id,
+            "task_id": task_id,
+            "final_state": summary.final_state.as_str()
+        }),
+    );
+
+    let unresolved = store.mark_unresolved(task_id, worker_id)?;
+    append_run_log(
+        "warn",
+        "worker.task.unresolved",
+        json!({
+            "worker_id": worker_id,
+            "task_id": task_id,
+            "marked_unresolved": unresolved,
+            "failure_reason": summary.failure_reason,
+            "final_state": summary.final_state.as_str(),
+        }),
+    );
+    if unresolved {
+        let unresolved_message = format!("unresolved {}", task_id);
+        workers[worker_idx].state = "unresolved".to_string();
+        workers[worker_idx].last_state_line = last_worker_state_line;
+        workers[worker_idx].tool_line = unresolved_message.clone();
+        workers[worker_idx].breadcrumb = "unresolved".to_string();
+        append_worker_command(&mut workers[worker_idx], &unresolved_message);
+    }
+    Ok(DoingSummaryHandling::ContinueLoop)
+}
+
+fn handle_merge_summary(
+    store: &BacklogStore,
+    workers: &mut [WorkerRow],
+    merge_row_idx: usize,
+    last_worker_state_line: usize,
+    task_id: &str,
+    summary: &crate::worker::WorkerRunSummary,
+    completed: &mut usize,
+    merged: &mut usize,
+    failed: &mut usize,
+) -> Result<MergeSummaryHandling, GardenerError> {
+    if summary.final_state == crate::types::WorkerState::Complete {
+        let marked_complete = store.mark_complete(task_id, MERGE_WORKER_ID)?;
+        if !marked_complete {
+            append_run_log(
+                "error",
+                "merge_worker.task.completed_rejected",
+                json!({
+                    "worker_id": MERGE_WORKER_ID,
+                    "task_id": task_id,
+                }),
+            );
+            let _ = store.mark_unresolved(task_id, MERGE_WORKER_ID);
+            *failed = failed.saturating_add(1);
+            workers[merge_row_idx].state = "failed".to_string();
+            workers[merge_row_idx].task_id = Some(task_id.to_string());
+            workers[merge_row_idx].last_state_line = last_worker_state_line;
+            let fail_msg = format!("merge complete transition rejected {}", task_id);
+            workers[merge_row_idx].tool_line = fail_msg.clone();
+            append_worker_command(&mut workers[merge_row_idx], &fail_msg);
+            workers[merge_row_idx].breadcrumb = "failed".to_string();
+            workers[merge_row_idx].lease_held = false;
+            return Ok(MergeSummaryHandling::EarlyContinue);
+        }
+        *completed = completed.saturating_add(1);
+        *merged = merged.saturating_add(1);
+        workers[merge_row_idx].state = "complete".to_string();
+        workers[merge_row_idx].task_id = Some(task_id.to_string());
+        workers[merge_row_idx].last_state_line = last_worker_state_line;
+        let done_msg = format!("merged {}", task_id);
+        workers[merge_row_idx].tool_line = done_msg.clone();
+        append_worker_command(&mut workers[merge_row_idx], &done_msg);
+        workers[merge_row_idx].breadcrumb = "complete".to_string();
+        workers[merge_row_idx].lease_held = false;
+        append_run_log(
+            "info",
+            "merge_worker.task.completed",
+            json!({
+                "worker_id": MERGE_WORKER_ID,
+                "task_id": task_id,
+                "completed": *completed
+            }),
+        );
+    } else {
+        let _ = store.mark_unresolved(task_id, MERGE_WORKER_ID)?;
+        *failed = failed.saturating_add(1);
+        workers[merge_row_idx].state = "failed".to_string();
+        workers[merge_row_idx].task_id = Some(task_id.to_string());
+        workers[merge_row_idx].last_state_line = last_worker_state_line;
+        let fail_msg = summary.failure_reason.as_deref().unwrap_or("merge failed");
+        let truncated = fail_msg.chars().take(100).collect::<String>();
+        workers[merge_row_idx].tool_line = truncated.clone();
+        append_worker_command(&mut workers[merge_row_idx], &truncated);
+        workers[merge_row_idx].breadcrumb = "failed".to_string();
+        workers[merge_row_idx].lease_held = false;
+    }
+    Ok(MergeSummaryHandling::ContinueLoop)
+}
+
 struct HotkeyState<'a> {
     runtime: &'a ProductionRuntime,
     scope: &'a RuntimeScope,
@@ -186,12 +402,14 @@ pub fn run_worker_pool_fsm(
         |workers: &mut [WorkerRow],
          claimed: &mut Vec<(usize, crate::backlog_store::BacklogTask)>,
          completed: usize,
+         active_merging: usize,
          last_worker_state_line: usize,
          last_activity_pulse: &mut Vec<Instant>|
          -> Result<bool, GardenerError> {
             let mut claimed_any = false;
             claimed.clear();
-            let available_slots = parallelism.min(target.saturating_sub(completed));
+            let available_slots =
+                available_doing_slots(parallelism, target, completed, active_merging);
             for idx in 0..available_slots {
                 let worker_id = workers[idx].worker_id.clone();
                 let claimed_task =
@@ -217,7 +435,19 @@ pub fn run_worker_pool_fsm(
                         "inserted_after_run_start": inserted_after_run_start
                     }),
                 );
-                let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
+                let moved_to_in_progress = store.mark_in_progress(&task.task_id, &worker_id)?;
+                if !moved_to_in_progress {
+                    append_run_log(
+                        "error",
+                        "worker.task.claim_transition_rejected",
+                        json!({
+                            "worker_id": worker_id,
+                            "task_id": task.task_id,
+                            "transition": "mark_in_progress",
+                        }),
+                    );
+                    continue;
+                }
                 workers[idx].state = "claimed".to_string();
                 workers[idx].task_title = task.title.clone();
                 workers[idx].tool_line = "claimed".to_string();
@@ -295,7 +525,17 @@ pub fn run_worker_pool_fsm(
                             "worker_id": MERGE_WORKER_ID,
                         }),
                     );
-                    let _ = store.release_lease(&task.task_id, MERGE_WORKER_ID);
+                    let requeued = store.mark_unresolved(&task.task_id, MERGE_WORKER_ID)?;
+                    if !requeued {
+                        append_run_log(
+                            "error",
+                            "worker_pool.merge_preseed.invalid_pr_requeue_failed",
+                            json!({
+                                "task_id": task_id,
+                                "worker_id": MERGE_WORKER_ID,
+                            }),
+                        );
+                    }
                     return Ok(None);
                 }
             };
@@ -315,15 +555,25 @@ pub fn run_worker_pool_fsm(
                         "worker_id": MERGE_WORKER_ID,
                     }),
                 );
-                let _ = store.release_lease(&task.task_id, MERGE_WORKER_ID);
+                let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
+                if !requeued {
+                    append_run_log(
+                        "error",
+                        "worker_pool.merge_preseed.requeue_failed",
+                        json!({
+                            "task_id": task_id,
+                            "worker_id": MERGE_WORKER_ID,
+                        }),
+                    );
+                }
                 return Ok(None);
             }
             if let Some(mtx) = merge_tx {
                 let identity = WorkerIdentity::new(MERGE_WORKER_ID);
                 let task_summary = task.title;
-                let _ = mtx.send(MergeRequest {
+                let merge_request = MergeRequest {
                     slot_idx: 0,
-                    task_id: task.task_id,
+                    task_id: task.task_id.clone(),
                     task_summary: task_summary.clone(),
                     attempt_count: task.attempt_count,
                     worker_id: identity.worker_id,
@@ -333,21 +583,54 @@ pub fn run_worker_pool_fsm(
                     pr_number,
                     logs: Vec::new(),
                     handoff_evidence_bundle: None,
-                });
+                };
+                if mtx.send(merge_request).is_err() {
+                    append_run_log(
+                        "error",
+                        "worker_pool.merge_preseed.dispatch_failed",
+                        json!({
+                            "task_id": task_id,
+                            "worker_id": MERGE_WORKER_ID,
+                        }),
+                    );
+                    let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
+                    if !requeued {
+                        append_run_log(
+                            "error",
+                            "worker_pool.merge_preseed.dispatch_requeue_failed",
+                            json!({
+                                "task_id": task_id,
+                                "worker_id": MERGE_WORKER_ID,
+                            }),
+                        );
+                    }
+                    return Ok(None);
+                }
                 *active_merging = active_merging.saturating_add(1);
                 return Ok(Some((pr_number, task_id, task_summary)));
+            }
+            append_run_log(
+                "warn",
+                "worker_pool.merge_preseed.channel_closed",
+                json!({
+                    "task_id": task_id,
+                    "worker_id": MERGE_WORKER_ID,
+                }),
+            );
+            let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
+            if !requeued {
+                append_run_log(
+                    "error",
+                    "worker_pool.merge_preseed.channel_closed_requeue_failed",
+                    json!({
+                        "task_id": task_id,
+                        "worker_id": MERGE_WORKER_ID,
+                    }),
+                );
             }
             Ok(None)
         };
         let mut claimed = Vec::new();
-        let mut claimed_any = claim_tasks_for_available_workers(
-            &mut workers,
-            &mut claimed,
-            completed,
-            last_worker_state_line,
-            &mut last_activity_pulse,
-        )?;
-
         let mut active_merging = 0usize;
         let (tx, rx): (
             mpsc::Sender<PoolResultMessage>,
@@ -362,6 +645,7 @@ pub fn run_worker_pool_fsm(
             mpsc::channel();
         let runtime_scope = scope.clone();
         let mut merge_tx = Some(merge_tx);
+        let mut claimed_any = false;
         if let Some((pr_number, task_id, task_summary)) =
             maybe_start_merge(&mut active_merging, &mut merge_tx)?
         {
@@ -376,6 +660,14 @@ pub fn run_worker_pool_fsm(
                 &task_summary,
             );
         }
+        claimed_any = claim_tasks_for_available_workers(
+            &mut workers,
+            &mut claimed,
+            completed,
+            active_merging,
+            last_worker_state_line,
+            &mut last_activity_pulse,
+        )? || claimed_any;
 
         if !claimed_any && active_merging == 0 {
             let mut claimed_on_idle = false;
@@ -385,6 +677,7 @@ pub fn run_worker_pool_fsm(
                     &mut workers,
                     &mut claimed,
                     completed,
+                    active_merging,
                     last_worker_state_line,
                     &mut last_activity_pulse,
                 )?;
@@ -584,12 +877,50 @@ pub fn run_worker_pool_fsm(
                                 }
                                 Ok(WorkerOutcome::HandoffToMerge(req)) => {
                                     // Transition backlog: in_progress → merge_pending
-                                    let _ = store.mark_merge_pending(&task_id, &worker_id);
-                                    let _ = store.set_related_pr(
+                                    let moved_to_merge_pending =
+                                        store.mark_merge_pending(&task_id, &worker_id)?;
+                                    if !moved_to_merge_pending {
+                                        append_run_log(
+                                            "error",
+                                            "worker.task.handoff_transition_rejected",
+                                            json!({
+                                                "worker_id": worker_id,
+                                                "task_id": task_id,
+                                                "transition": "mark_merge_pending",
+                                            }),
+                                        );
+                                        let _ = store.mark_unresolved(&task_id, &worker_id);
+                                        failed = failed.saturating_add(1);
+                                        workers[idx].state = "failed".to_string();
+                                        workers[idx].task_id = None;
+                                        workers[idx].last_state_line = last_worker_state_line;
+                                        let fail_msg = format!(
+                                            "handoff failed (transition rejected) {}",
+                                            task_id
+                                        );
+                                        workers[idx].tool_line = fail_msg.clone();
+                                        append_worker_command(&mut workers[idx], &fail_msg);
+                                        workers[idx].breadcrumb = "failed".to_string();
+                                        workers[idx].lease_held = false;
+                                        continue;
+                                    }
+                                    let linked_pr = store.set_related_pr(
                                         &task_id,
                                         req.pr_number as i64,
                                         &req.branch,
-                                    );
+                                    )?;
+                                    if !linked_pr {
+                                        append_run_log(
+                                            "error",
+                                            "worker.task.handoff_related_pr_rejected",
+                                            json!({
+                                                "worker_id": worker_id,
+                                                "task_id": task_id,
+                                                "pr_number": req.pr_number,
+                                                "branch": &req.branch,
+                                            }),
+                                        );
+                                    }
                                     // Process doing worker logs for TUI
                                     for event in &req.logs {
                                         workers[idx].state = event.state.as_str().to_string();
@@ -667,95 +998,27 @@ pub fn run_worker_pool_fsm(
                                         )?;
                                     }
                                     if summary.final_state == crate::types::WorkerState::Complete {
-                                        let _ = store.mark_complete(&task_id, &worker_id)?;
-                                        completed = completed.saturating_add(1);
-                                        workers[idx].state = "complete".to_string();
-                                        workers[idx].task_id = None;
-                                        workers[idx].last_state_line = last_worker_state_line;
-                                        let completed_message = format!("completed {}", task_id);
-                                        workers[idx].tool_line = completed_message.clone();
-                                        append_worker_command(
-                                            &mut workers[idx],
-                                            &completed_message,
-                                        );
-                                        workers[idx].breadcrumb = "complete".to_string();
-                                        workers[idx].lease_held = false;
-                                        append_run_log(
-                                            "info",
-                                            "worker.task.completed",
-                                            json!({
-                                                "worker_id": worker_id,
-                                                "task_id": task_id,
-                                                "completed": completed
-                                            }),
-                                        );
+                                        let _ = handle_doing_complete_transition(
+                                            store,
+                                            &mut workers,
+                                            idx,
+                                            last_worker_state_line,
+                                            &worker_id,
+                                            &task_id,
+                                            &mut completed,
+                                            &mut failed,
+                                        )?;
                                     } else {
-                                        workers[idx].state = "failed".to_string();
-                                        workers[idx].task_id = None;
-                                        workers[idx].last_state_line = last_worker_state_line;
-                                        let failed_message = if let Some(reason) =
-                                            summary.failure_reason.clone()
-                                        {
-                                            if reason.is_empty() {
-                                                format!("failed {}", task_id)
-                                            } else {
-                                                let truncated =
-                                                    reason.chars().take(150).collect::<String>();
-                                                if reason.chars().count() > 150 {
-                                                    format!("failed: {}…", truncated)
-                                                } else {
-                                                    format!("failed: {}", reason)
-                                                }
-                                            }
-                                        } else {
-                                            format!("failed {}", task_id)
-                                        };
-                                        workers[idx].tool_line = failed_message.clone();
-                                        append_worker_command(&mut workers[idx], &failed_message);
-                                        workers[idx].breadcrumb = "failed".to_string();
-                                        workers[idx].lease_held = false;
-                                        failed = failed.saturating_add(1);
-                                        append_run_log(
-                                            "error",
-                                            "worker.task.failed",
-                                            json!({
-                                                "worker_id": worker_id,
-                                                "task_id": task_id,
-                                                "final_state": summary.final_state.as_str()
-                                            }),
-                                        );
-                                        if summary.final_state == crate::types::WorkerState::Failed
-                                        {
-                                            let unresolved =
-                                                store.mark_unresolved(&task_id, &worker_id)?;
-                                            append_run_log(
-                                                "warn",
-                                                "worker.task.unresolved",
-                                                json!({
-                                                    "worker_id": worker_id,
-                                                    "task_id": task_id,
-                                                    "marked_unresolved": unresolved,
-                                                    "failure_reason": summary.failure_reason,
-                                                }),
-                                            );
-                                            let unresolved_message = if unresolved {
-                                                format!("unresolved {}", task_id)
-                                            } else {
-                                                failed_message.clone()
-                                            };
-                                            workers[idx].state = "unresolved".to_string();
-                                            workers[idx].last_state_line = last_worker_state_line;
-                                            workers[idx].tool_line = unresolved_message.clone();
-                                            workers[idx].breadcrumb = "unresolved".to_string();
-                                            append_worker_command(
-                                                &mut workers[idx],
-                                                &unresolved_message,
-                                            );
-                                        } else {
-                                            workers[idx].task_id = None;
-                                            workers[idx].last_state_line = last_worker_state_line;
-                                            let _ = store.release_lease(&task_id, &worker_id)?;
-                                        }
+                                        let _ = handle_doing_non_complete_transition(
+                                            store,
+                                            &mut workers,
+                                            idx,
+                                            last_worker_state_line,
+                                            &worker_id,
+                                            &task_id,
+                                            &summary,
+                                            &mut failed,
+                                        )?;
                                     }
                                 }
                             }
@@ -791,7 +1054,20 @@ pub fn run_worker_pool_fsm(
                                         "inserted_after_run_start": inserted_after_run_start
                                     }),
                                 );
-                                let _ = store.mark_in_progress(&task.task_id, &worker_id)?;
+                                let moved_to_in_progress =
+                                    store.mark_in_progress(&task.task_id, &worker_id)?;
+                                if !moved_to_in_progress {
+                                    append_run_log(
+                                        "error",
+                                        "worker.task.claim_transition_rejected",
+                                        json!({
+                                            "worker_id": worker_id,
+                                            "task_id": task.task_id,
+                                            "transition": "mark_in_progress",
+                                        }),
+                                    );
+                                    continue;
+                                }
 
                                 workers[idx].state = "claimed".to_string();
                                 workers[idx].task_title = task.title.clone();
@@ -928,51 +1204,19 @@ pub fn run_worker_pool_fsm(
                                     workers[merge_row_idx].last_state_line = last_worker_state_line;
                                 }
                                 Ok(summary) => {
-                                    if summary.final_state == crate::types::WorkerState::Complete {
-                                        let _ = store.mark_complete(&task_id, MERGE_WORKER_ID)?;
-                                        completed = completed.saturating_add(1);
-                                        merged = merged.saturating_add(1);
-                                        workers[merge_row_idx].state = "complete".to_string();
-                                        workers[merge_row_idx].task_id = Some(task_id.clone());
-                                        workers[merge_row_idx].last_state_line =
-                                            last_worker_state_line;
-                                        let done_msg = format!("merged {}", task_id);
-                                        workers[merge_row_idx].tool_line = done_msg.clone();
-                                        append_worker_command(
-                                            &mut workers[merge_row_idx],
-                                            &done_msg,
-                                        );
-                                        workers[merge_row_idx].breadcrumb = "complete".to_string();
-                                        workers[merge_row_idx].lease_held = false;
-                                        append_run_log(
-                                            "info",
-                                            "merge_worker.task.completed",
-                                            json!({
-                                                "worker_id": MERGE_WORKER_ID,
-                                                "task_id": task_id,
-                                                "completed": completed
-                                            }),
-                                        );
-                                    } else {
-                                        let _ = store.mark_unresolved(&task_id, MERGE_WORKER_ID)?;
-                                        failed = failed.saturating_add(1);
-                                        workers[merge_row_idx].state = "failed".to_string();
-                                        workers[merge_row_idx].task_id = Some(task_id.clone());
-                                        workers[merge_row_idx].last_state_line =
-                                            last_worker_state_line;
-                                        let fail_msg = summary
-                                            .failure_reason
-                                            .as_deref()
-                                            .unwrap_or("merge failed");
-                                        let truncated =
-                                            fail_msg.chars().take(100).collect::<String>();
-                                        workers[merge_row_idx].tool_line = truncated.clone();
-                                        append_worker_command(
-                                            &mut workers[merge_row_idx],
-                                            &truncated,
-                                        );
-                                        workers[merge_row_idx].breadcrumb = "failed".to_string();
-                                        workers[merge_row_idx].lease_held = false;
+                                    let handling = handle_merge_summary(
+                                        store,
+                                        &mut workers,
+                                        merge_row_idx,
+                                        last_worker_state_line,
+                                        &task_id,
+                                        &summary,
+                                        &mut completed,
+                                        &mut merged,
+                                        &mut failed,
+                                    )?;
+                                    if handling == MergeSummaryHandling::EarlyContinue {
+                                        continue;
                                     }
                                 }
                             }
@@ -1771,9 +2015,12 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pool_stream_event, execution_task_packet, hotkey_action,
-        is_non_regressive_state_transition, run_worker_pool_fsm, wait_for_quit, PoolStreamEvent,
-        WorkerRow, INTERRUPT_SENTINEL_KEY,
+        apply_pool_stream_event, execution_task_packet, hotkey_action, available_doing_slots,
+        handle_doing_complete_transition, handle_doing_non_complete_transition,
+        DoingSummaryHandling,
+        is_non_regressive_state_transition, run_worker_pool_fsm, wait_for_quit,
+        handle_merge_summary, MergeSummaryHandling, PoolStreamEvent, WorkerRow,
+        INTERRUPT_SENTINEL_KEY,
     };
     use crate::backlog_store::{BacklogStore, BacklogTask, NewTask, TaskStatus};
     use crate::config::AppConfig;
@@ -1784,7 +2031,7 @@ mod tests {
         FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
     };
     use crate::task_identity::TaskKind;
-    use crate::types::RuntimeScope;
+    use crate::types::{RuntimeScope, WorkerState};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::thread;
@@ -2421,5 +2668,209 @@ mod tests {
             .and_then(|value| value.as_bool())
             .is_some());
         clear_run_logger();
+    }
+
+    #[test]
+    fn handle_merge_summary_rejects_false_complete_transition() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        let row = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: "merge rejected transition".to_string(),
+                details: "force mark_complete rejection".to_string(),
+                scope_key: "scope".to_string(),
+                rationale: "worker_pool regression".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: Some(321),
+                related_branch: Some("gardener/rejected-transition".to_string()),
+            })
+            .expect("seed task");
+
+        let mut workers = vec![WorkerRow {
+            worker_id: "merge-worker".to_string(),
+            state: "merging".to_string(),
+            task_id: Some(row.task_id.clone()),
+            last_state_line: 0,
+            task_title: "merge rejected transition".to_string(),
+            tool_line: "merging PR #321".to_string(),
+            breadcrumb: "merging".to_string(),
+            last_heartbeat_secs: 0,
+            session_age_secs: 0,
+            lease_held: true,
+            session_missing: false,
+            command_details: Vec::new(),
+        }];
+        let summary = crate::worker::WorkerRunSummary {
+            worker_id: "merge-worker".to_string(),
+            session_id: "session-1".to_string(),
+            final_state: WorkerState::Complete,
+            logs: Vec::new(),
+            teardown: None,
+            failure_reason: None,
+        };
+        let mut completed = 0usize;
+        let mut merged = 0usize;
+        let mut failed = 0usize;
+
+        let handling = handle_merge_summary(
+            &store,
+            &mut workers,
+            0,
+            7,
+            &row.task_id,
+            &summary,
+            &mut completed,
+            &mut merged,
+            &mut failed,
+        )
+        .expect("handle summary");
+
+        assert_eq!(handling, MergeSummaryHandling::EarlyContinue);
+        assert_eq!(completed, 0);
+        assert_eq!(merged, 0);
+        assert_eq!(failed, 1);
+        assert_eq!(workers[0].state, "failed");
+        assert_eq!(workers[0].last_state_line, 7);
+        assert_eq!(workers[0].task_id.as_deref(), Some(row.task_id.as_str()));
+        assert!(workers[0]
+            .tool_line
+            .contains("merge complete transition rejected"));
+        assert_eq!(workers[0].breadcrumb, "failed");
+        assert!(!workers[0].lease_held);
+        let task = store
+            .get_task(&row.task_id)
+            .expect("fetch task")
+            .expect("task exists");
+        assert_ne!(task.status, TaskStatus::Complete);
+    }
+
+    #[test]
+    fn available_doing_slots_respects_in_flight_merge_budget() {
+        let slots = available_doing_slots(4, 1, 0, 1);
+        assert_eq!(slots, 0);
+    }
+
+    #[test]
+    fn handle_doing_complete_transition_rejects_false_complete() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        let row = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: "doing complete rejection".to_string(),
+                details: "force mark_complete reject".to_string(),
+                scope_key: "scope".to_string(),
+                rationale: "fsm invariant test".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })
+            .expect("seed task");
+        let mut workers = vec![WorkerRow {
+            worker_id: "worker-1".to_string(),
+            state: "doing".to_string(),
+            task_id: Some(row.task_id.clone()),
+            last_state_line: 0,
+            task_title: "doing complete rejection".to_string(),
+            tool_line: "doing".to_string(),
+            breadcrumb: "state>doing".to_string(),
+            last_heartbeat_secs: 0,
+            session_age_secs: 0,
+            lease_held: true,
+            session_missing: false,
+            command_details: Vec::new(),
+        }];
+        let mut completed = 0usize;
+        let mut failed = 0usize;
+
+        let handling = handle_doing_complete_transition(
+            &store,
+            &mut workers,
+            0,
+            11,
+            "worker-1",
+            &row.task_id,
+            &mut completed,
+            &mut failed,
+        )
+        .expect("transition");
+
+        assert_eq!(handling, DoingSummaryHandling::ContinueLoop);
+        assert_eq!(completed, 0);
+        assert_eq!(failed, 1);
+        assert_ne!(workers[0].state, "complete");
+    }
+
+    #[test]
+    fn handle_doing_non_complete_transition_parks_to_unresolved() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        let row = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: "parked transition".to_string(),
+                details: "parked tasks should be unresolved".to_string(),
+                scope_key: "scope".to_string(),
+                rationale: "fsm invariant test".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })
+            .expect("seed task");
+        let _ = store.claim_next("worker-1", 60).expect("claim");
+        assert!(store
+            .mark_in_progress(&row.task_id, "worker-1")
+            .expect("mark in progress"));
+        let mut workers = vec![WorkerRow {
+            worker_id: "worker-1".to_string(),
+            state: "parked".to_string(),
+            task_id: Some(row.task_id.clone()),
+            last_state_line: 0,
+            task_title: "parked transition".to_string(),
+            tool_line: "parked".to_string(),
+            breadcrumb: "state>parked".to_string(),
+            last_heartbeat_secs: 0,
+            session_age_secs: 0,
+            lease_held: true,
+            session_missing: false,
+            command_details: Vec::new(),
+        }];
+        let mut failed = 0usize;
+        let summary = crate::worker::WorkerRunSummary {
+            worker_id: "worker-1".to_string(),
+            session_id: "session-parked".to_string(),
+            final_state: WorkerState::Parked,
+            logs: Vec::new(),
+            teardown: None,
+            failure_reason: Some("review requested changes".to_string()),
+        };
+
+        let handling = handle_doing_non_complete_transition(
+            &store,
+            &mut workers,
+            0,
+            12,
+            "worker-1",
+            &row.task_id,
+            &summary,
+            &mut failed,
+        )
+        .expect("transition");
+
+        assert_eq!(handling, DoingSummaryHandling::ContinueLoop);
+        assert_eq!(failed, 1);
+        assert_eq!(workers[0].state, "unresolved");
+        let task = store
+            .get_task(&row.task_id)
+            .expect("fetch task")
+            .expect("task exists");
+        assert_eq!(task.status, TaskStatus::Unresolved);
     }
 }

@@ -609,30 +609,7 @@ pub fn run_with_runtime(
                         .filter(|pr| pr.head_ref_name.starts_with("gardener/"))
                         .map(|pr| (pr.head_ref_name, pr.number))
                         .collect::<HashMap<_, _>>();
-                    for task in startup_backlog.iter() {
-                        let branch = if let Some(branch) = task.related_branch.as_deref() {
-                            branch.to_string()
-                        } else {
-                            worktree_branch_for(&task.task_id)
-                        };
-                        if let Some(pr_number) = open_pr_map.get(&branch).copied() {
-                            if task.related_pr.is_none() {
-                                let _ =
-                                    store.set_related_pr(&task.task_id, pr_number as i64, &branch);
-                            }
-                            if task.status == TaskStatus::Unresolved {
-                                let _ = store.set_unresolved_to_merge_pending(&task.task_id);
-                            }
-                        } else {
-                            if task.status == TaskStatus::Unresolved {
-                                let _ = store.set_unresolved_to_ready(&task.task_id);
-                            }
-                            if task.related_pr.is_some() {
-                                let _ = store.clear_related_pr(&task.task_id);
-                            }
-                        }
-                    }
-                    let _ = store.promote_ready_with_pr();
+                    reconcile_startup_backlog_open_prs(&store, &startup_backlog, &open_pr_map);
                 } else {
                     append_run_log(
                         "warn",
@@ -934,6 +911,38 @@ fn env_to_map(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> EnvMap {
     map
 }
 
+fn reconcile_startup_backlog_open_prs(
+    store: &BacklogStore,
+    startup_backlog: &[crate::backlog_store::BacklogTask],
+    open_pr_map: &HashMap<String, u64>,
+) {
+    for task in startup_backlog {
+        let branch = if let Some(branch) = task.related_branch.as_deref() {
+            branch.to_string()
+        } else {
+            worktree_branch_for(&task.task_id)
+        };
+        if let Some(pr_number) = open_pr_map.get(&branch).copied() {
+            if task.related_pr.is_none() {
+                let _ = store.set_related_pr(&task.task_id, pr_number as i64, &branch);
+            }
+            if task.status == TaskStatus::Unresolved {
+                let _ = store.set_unresolved_to_merge_pending(&task.task_id);
+            } else if task.status == TaskStatus::Complete {
+                let _ = store.reopen_complete_to_merge_pending(&task.task_id);
+            }
+        } else {
+            if task.status == TaskStatus::Unresolved {
+                let _ = store.set_unresolved_to_ready(&task.task_id);
+            }
+            if task.related_pr.is_some() {
+                let _ = store.clear_related_pr(&task.task_id);
+            }
+        }
+    }
+    let _ = store.promote_ready_with_pr();
+}
+
 fn persist_agent_default(
     fs: &dyn runtime::FileSystem,
     path: &std::path::Path,
@@ -970,8 +979,13 @@ fn persist_agent_default(
 #[cfg(test)]
 mod tests {
     use super::{config, repo_intelligence, runtime, triage_discovery};
+    use crate::backlog_store::{BacklogStore, NewTask, TaskStatus};
+    use crate::priority::Priority;
+    use crate::task_identity::TaskKind;
     use clap::{error::ErrorKind, Parser};
+    use std::collections::HashMap;
     use std::path::Path;
+    use tempfile::TempDir;
 
     fn sample_profile(
         preferred_parallelism: Option<u32>,
@@ -1078,5 +1092,43 @@ mod tests {
 
         let error = super::required_agent_backends(&cfg).expect_err("expected missing backend");
         assert!(error.to_string().contains("no backend configured for"));
+    }
+
+    #[test]
+    fn startup_reconcile_reopens_complete_task_with_open_pr() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        let row = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: "merge reopen regression".to_string(),
+                details: "verify startup reopen for complete+open-pr".to_string(),
+                rationale: "regression test".to_string(),
+                scope_key: "startup".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: Some(142),
+                related_branch: Some("gardener/manual-open-pr".to_string()),
+            })
+            .expect("seed");
+        let _ = store.claim_next("worker-a", 60).expect("claim");
+        assert!(store
+            .mark_in_progress(&row.task_id, "worker-a")
+            .expect("mark in progress"));
+        assert!(store
+            .mark_complete(&row.task_id, "worker-a")
+            .expect("mark complete"));
+
+        let startup_backlog = store.list_tasks().expect("list tasks");
+        let open_pr_map = HashMap::from([("gardener/manual-open-pr".to_string(), 142_u64)]);
+        super::reconcile_startup_backlog_open_prs(&store, &startup_backlog, &open_pr_map);
+
+        let updated = store
+            .get_task(&row.task_id)
+            .expect("fetch task")
+            .expect("task exists");
+        assert_eq!(updated.status, TaskStatus::MergePending);
+        assert_eq!(updated.related_pr, Some(142));
     }
 }

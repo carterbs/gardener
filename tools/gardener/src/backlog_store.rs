@@ -173,6 +173,11 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<usize>>,
     },
+    ReopenCompleteToMergePending {
+        task_id: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
     InsertRejectedSeed {
         title: String,
         details: String,
@@ -582,6 +587,25 @@ impl BacklogStore {
                         );
                         let _ = reply.send(result);
                     }
+                    WriteCmd::ReopenCompleteToMergePending {
+                        task_id,
+                        now,
+                        reply,
+                    } => {
+                        let result = reopen_complete_to_merge_pending(&write_conn, &task_id, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
                     WriteCmd::InsertRejectedSeed {
                         title,
                         details,
@@ -593,7 +617,7 @@ impl BacklogStore {
                         reply,
                     } => {
                         let id = {
-                            use sha2::{Sha256, Digest};
+                            use sha2::{Digest, Sha256};
                             let mut hasher = Sha256::new();
                             hasher.update(title.trim().to_ascii_lowercase().as_bytes());
                             hasher.update(b"|");
@@ -1183,6 +1207,40 @@ impl BacklogStore {
         result
     }
 
+    /// Re-open a completed task whose PR is still open on GitHub by
+    /// transitioning it back to `merge_pending`.
+    pub fn reopen_complete_to_merge_pending(&self, task_id: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::ReopenCompleteToMergePending {
+                task_id: task_id.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.reopened_to_merge_pending",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.reopened_to_merge_pending.failed",
+                    json!({ "task_id": task_id, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
@@ -1519,7 +1577,16 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
                 "now": now,
             }),
         ),
-        WriteCmd::InsertRejectedSeed { title, domain, now, .. } => (
+        WriteCmd::ReopenCompleteToMergePending { task_id, now, .. } => (
+            "reopen_complete_to_merge_pending",
+            json!({
+                "task_id": task_id,
+                "now": now,
+            }),
+        ),
+        WriteCmd::InsertRejectedSeed {
+            title, domain, now, ..
+        } => (
             "insert_rejected_seed",
             json!({
                 "title": title,
@@ -2085,6 +2152,27 @@ fn promote_ready_with_pr(conn: &Connection, now: i64) -> StoreResult<usize> {
     Ok(changed)
 }
 
+fn reopen_complete_to_merge_pending(
+    conn: &Connection,
+    task_id: &str,
+    now: i64,
+) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.reopen_complete_to_merge_pending.started",
+        json!({ "task_id": task_id }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'merge_pending', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
+             WHERE task_id = ?2 AND status = 'complete'",
+            params![now, task_id],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
 fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {
     append_run_log(
         "debug",
@@ -2451,7 +2539,10 @@ mod tests {
             .as_millis() as i64
             + 1000;
         let recovered = store.recover_stale_leases(now).expect("recover");
-        assert_eq!(recovered, 0, "in_progress task with live lease must not be recovered");
+        assert_eq!(
+            recovered, 0,
+            "in_progress task with live lease must not be recovered"
+        );
 
         let round_trip = store.get_task(&row.task_id).expect("fetch").expect("task");
         assert_eq!(round_trip.status, TaskStatus::InProgress);
@@ -2478,6 +2569,34 @@ mod tests {
 
         let task = store.get_task(&row.task_id).expect("fetch").expect("row");
         assert_eq!(task.status, TaskStatus::Complete);
+    }
+
+    #[test]
+    fn reopen_complete_task_to_merge_pending() {
+        let (store, _dir) = temp_store();
+        let row = store
+            .upsert_task(task("merge-reopen-me", Priority::P1))
+            .expect("seed");
+
+        let _ = store.claim_next("worker-a", 60).expect("claim");
+        let in_progress = store
+            .mark_in_progress(&row.task_id, "worker-a")
+            .expect("in progress");
+        assert!(in_progress);
+        let complete = store
+            .mark_complete(&row.task_id, "worker-a")
+            .expect("complete");
+        assert!(complete);
+
+        let reopened = store
+            .reopen_complete_to_merge_pending(&row.task_id)
+            .expect("reopen");
+        assert!(reopened);
+
+        let task = store.get_task(&row.task_id).expect("fetch").expect("row");
+        assert_eq!(task.status, TaskStatus::MergePending);
+        assert_eq!(task.lease_owner, None);
+        assert_eq!(task.lease_expires_at, None);
     }
 
     #[test]

@@ -51,12 +51,15 @@ fn runtime_backlog_db_path(scope: &RuntimeScope) -> PathBuf {
     scope.working_dir.join(DEFAULT_BACKLOG_DB_PATH)
 }
 
-pub fn backlog_db_path(_cfg: &crate::config::AppConfig, scope: &RuntimeScope) -> PathBuf {
+pub fn backlog_db_path(cfg: &crate::config::AppConfig, scope: &RuntimeScope) -> PathBuf {
     if let Ok(path) = env::var(RUNTIME_BACKLOG_DB_ENV) {
         return PathBuf::from(path);
     }
     if let Ok(path) = env::var(LEGACY_BACKLOG_DB_ENV) {
         return PathBuf::from(path);
+    }
+    if cfg.execution.test_mode {
+        return scope.working_dir.join(DEFAULT_BACKLOG_DB_PATH);
     }
     runtime_backlog_db_path(scope)
 }
@@ -1496,7 +1499,7 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
         };
         let path = backlog_db_path(&cfg, &scope);
-        assert!(path.ends_with(".gardener/backlog.sqlite"));
+        assert_eq!(path, scope.working_dir.join(".gardener/backlog.sqlite"));
         assert!(!path.display().to_string().contains(".cache/gardener"));
     }
 

@@ -5,50 +5,60 @@ description: 'Debug Gardener runtime failures by joining git worktree/branch/com
 
 # Gardener Log Debugging
 
+## Mandatory approach (read first)
+
+- ALWAYS start with `otel-logs run-trace --run-id <RUN_ID>` once a run id is known.
+- ALWAYS use `otel-logs filter --run-id ... --event-type ...` to narrow scope before any raw extraction.
+- NEVER paste large raw JSON streams into context. Pull only the specific event families needed for the current hypothesis.
+- Use broad `jq`/`rg` over full log files only as a last resort after `run-trace` + targeted `filter` are insufficient.
+
 ## Core workflow
 
 1. Start with run failure signal (dashboard entry, test failure, or failed worker action).
 2. Resolve the matching run id.
-3. Pull matching events with the OTEL log utility.
+3. Pull matching events with `otel-logs` (`run-trace` first, then targeted `filter`).
 4. Narrow to failure-relevant events and build a timeline.
 5. Map each failure to git context using `run.working_dir` and worker/task metadata.
 6. Reproduce using the exact worktree and command in payload if present.
 
-## Log-query utility to use
+## OTEL utility to use
 
-Use the `log-query` binary directly and let it resolve the default log path:
+Use the `otel-logs` binary:
 
 ```bash
-export LOG_QUERY_BIN=${LOG_QUERY_BIN:-log-query}
+export OTEL_BIN=${OTEL_BIN:-cargo run -q -p gardener --bin otel-logs --}
 ```
 
-`log-query --help` defaults to `default_run_log_path`, which resolves to:
+Default log path resolution:
 - `$GARDENER_LOG_PATH` if set
 - otherwise `$HOME/.gardener/otel-logs.jsonl`
 
 Only pass `--log-path` when you intentionally want a non-default log file:
-`$LOG_QUERY_BIN --log-path /tmp/otel-logs.jsonl events ...`
+`$OTEL_BIN --log-path /tmp/otel-logs.jsonl ...`
 
 ## Log sanity and discovery
 
-- Show top-level summary (events, runs, workers):
-  - `$LOG_QUERY_BIN stats`
-- Fetch matching events:
-  - `$LOG_QUERY_BIN events --run-id <RUN_ID> --limit 100`
-- Build a compact timeline:
-  - `$LOG_QUERY_BIN timeline --run-id <RUN_ID> --limit 200`
+- Show available rotated files:
+  - `$OTEL_BIN index`
+- Build high-signal lifecycle trace:
+  - `$OTEL_BIN run-trace --run-id <RUN_ID>`
+- Fetch scoped event slices:
+  - `$OTEL_BIN filter --run-id <RUN_ID> --event-type <PREFIX> --max 200`
 
 ## Failure-to-logs workflow
 
 1. Find likely failures in the current log stream:
-  - `$LOG_QUERY_BIN events --contains '"terminal":"failure"' --limit 50`
-  - `$LOG_QUERY_BIN events --event-type "agent.turn.finished" --limit 50`
+  - `$OTEL_BIN filter --event-type run.failed --tail --max 50`
+  - `$OTEL_BIN filter --event-type agent.turn.finished --tail --max 100`
 2. Capture the run id from a failure line and assign:
   - `RUN=...`
 3. Reconstruct full context for that run:
-  - `$LOG_QUERY_BIN timeline --run-id "$RUN"`
-4. Pull raw rows when payload fields are needed:
-  - `$LOG_QUERY_BIN events --run-id "$RUN" --raw --contains '"terminal"' --limit 200 | jq -R 'fromjson? // empty | "\(.logRecord.timeUnixNano) \(.event_type) run=\(.payload.run_id // \"\") worker=\(.payload.worker_id // \"\") terminal=\(.payload.terminal // \"\") cmd=\(.payload.command // \"\")"'`
+  - `$OTEL_BIN run-trace --run-id "$RUN"`
+4. Pull only the event families needed for the active hypothesis:
+  - `$OTEL_BIN filter --run-id "$RUN" --event-type backlog.task --max 200`
+  - `$OTEL_BIN filter --run-id "$RUN" --event-type merge_worker --max 200`
+  - `$OTEL_BIN filter --run-id "$RUN" --event-type friction_analysis --max 200`
+5. Use raw extraction only if targeted filters are insufficient.
 
 ## Git-to-logs workflow
 
@@ -56,31 +66,24 @@ Only pass `--log-path` when you intentionally want a non-default log file:
   - `workdir="/Users/bradcarter/Documents/Dev/gardener/.worktrees/worker-1..."`
   - `git -C "$workdir" rev-parse --short HEAD`
   - `git -C "$workdir" status --short`
-- Find run candidates from workdir path:
-  - `WORKDIR="/Users/bradcarter/Documents/Dev/gardener/.worktrees/worker-1..."`
-  - `$LOG_QUERY_BIN events --contains "$WORKDIR" --raw | head -n 200`
-- Resolve commit context from a known run id:
-  - `RUN=...`
-  - `gitroot=$($LOG_QUERY_BIN events --run-id "$RUN" --contains '"run.working_dir"' --raw | jq -R 'fromjson? // empty | .logRecord.attributes[]? | select(.key=="run.working_dir") | .value.stringValue' | head -n 1)`
-  - `git -C "$gitroot" rev-parse --short HEAD`
-  - `git -C "$gitroot" log --oneline -n 5`
+- Resolve commit context from a known run id using targeted run trace and event filter output.
 
 ## Useful failure clusters
 
 - adapter parse issues:
-  - `$LOG_QUERY_BIN events --event-type "stdout_non_json"`
+  - `$OTEL_BIN filter --run-id "$RUN" --event-type stdout_non_json --max 200`
 - process spawn failures:
-  - `$LOG_QUERY_BIN events --event-type "process_spawn"`
+  - `$OTEL_BIN filter --run-id "$RUN" --event-type process.spawn --max 200`
 - terminal transitions:
-  - `$LOG_QUERY_BIN events --event-type "terminal_result"`
+  - `$OTEL_BIN filter --run-id "$RUN" --event-type terminal_result --max 200`
 
 ## One-command triage
 
-Use `RUN` to print a dense run audit:
+Use `RUN` to print a dense run audit with bounded output:
 
 ```bash
 RUN=...
-$LOG_QUERY_BIN timeline --run-id "$RUN"
-$LOG_QUERY_BIN events --run-id "$RUN" --contains '"terminal":"failure"' --raw --limit 50 \
-  | jq -R 'fromjson? // empty | "\(.logRecord.timeUnixNano) \(.event_type) worker=\(.payload.worker_id // \"\") run_dir=\(.payload.working_dir // \"\") cmd=\(.payload.command // \"\")"'
+$OTEL_BIN run-trace --run-id "$RUN"
+$OTEL_BIN filter --run-id "$RUN" --event-type backlog.task --max 100
+$OTEL_BIN filter --run-id "$RUN" --event-type merge_worker --max 100
 ```

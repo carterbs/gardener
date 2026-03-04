@@ -109,10 +109,11 @@ pub(crate) fn parse_reviewing_output(payload: &serde_json::Value) -> ReviewingOu
         .get("verdict")
         .and_then(serde_json::Value::as_str)
         .map(|v| match v.to_ascii_lowercase().as_str() {
+            "approve" => ReviewVerdict::Approve,
             "needs_changes" => ReviewVerdict::NeedsChanges,
-            _ => ReviewVerdict::Approve,
+            _ => ReviewVerdict::NeedsChanges,
         })
-        .unwrap_or(ReviewVerdict::Approve);
+        .unwrap_or(ReviewVerdict::NeedsChanges);
     let suggestions = payload
         .get("suggestions")
         .and_then(serde_json::Value::as_array)
@@ -183,9 +184,9 @@ mod tests {
     use super::parse_reviewing_output;
 
     #[test]
-    fn parse_reviewing_output_defaults_to_approve_without_verdict() {
+    fn parse_reviewing_output_defaults_to_needs_changes_without_verdict() {
         let output = parse_reviewing_output(&serde_json::json!({}));
-        assert_eq!(output.verdict, crate::fsm::ReviewVerdict::Approve);
+        assert_eq!(output.verdict, crate::fsm::ReviewVerdict::NeedsChanges);
         assert!(output.suggestions.is_empty());
     }
 
@@ -197,5 +198,17 @@ mod tests {
         }));
         assert_eq!(output.verdict, crate::fsm::ReviewVerdict::NeedsChanges);
         assert_eq!(output.suggestions, vec!["first", "third"]);
+    }
+
+    #[test]
+    fn parse_reviewing_output_is_fail_closed_for_missing_or_unknown_verdict() {
+        let missing = parse_reviewing_output(&serde_json::json!({}));
+        assert_eq!(missing.verdict, crate::fsm::ReviewVerdict::NeedsChanges);
+
+        let unknown = parse_reviewing_output(&serde_json::json!({
+            "verdict": "ship_it",
+            "suggestions": ["looks good"],
+        }));
+        assert_eq!(unknown.verdict, crate::fsm::ReviewVerdict::NeedsChanges);
     }
 }

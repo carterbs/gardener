@@ -27,6 +27,25 @@ use serde_json::json;
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewAction {
+    Rework,
+    Parked,
+    Handoff,
+}
+
+fn decide_review_action(verdict: ReviewVerdict, review_loops: u32) -> ReviewAction {
+    if verdict == ReviewVerdict::NeedsChanges {
+        if review_loops >= MAX_REVIEW_LOOPS {
+            ReviewAction::Parked
+        } else {
+            ReviewAction::Rework
+        }
+    } else {
+        ReviewAction::Handoff
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_task(
     cfg: &AppConfig,
@@ -544,6 +563,7 @@ fn execute_task_live(
     let reviewing_output = parse_reviewing_output(&reviewing_result.payload);
     log_and_persist_review_output(scope, task_id, &identity.worker_id, &reviewing_output);
     if reviewing_output.verdict == ReviewVerdict::NeedsChanges {
+        let action = decide_review_action(reviewing_output.verdict, fsm.review_loops);
         append_run_log(
             "info",
             "worker.review.needs_changes",
@@ -556,30 +576,34 @@ fn execute_task_live(
                 "suggestions": reviewing_output.suggestions
             }),
         );
-        if fsm.review_loops >= MAX_REVIEW_LOOPS {
-            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
-            append_run_log(
-                "warn",
-                "worker.review.loop_cap_reached",
-                json!({
-                    "worker_id": identity.worker_id,
-                    "task_id": task_id,
-                    "review_loops": fsm.review_loops
-                }),
-            );
-            fsm.on_review_loop_back()?;
-            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-                worker_id: identity.worker_id,
-                session_id: identity.session.session_id,
-                final_state: fsm.state,
-                logs,
-                teardown: None,
-                failure_reason: None,
-            }));
-        }
         fsm.on_review_loop_back()?;
-        fsm.transition(WorkerState::Doing)?;
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing, on_event);
+        if fsm.state != WorkerState::Parked {
+            fsm.transition(WorkerState::Parked)?;
+        }
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
+        let reason = match action {
+            ReviewAction::Rework => "review requested changes",
+            ReviewAction::Parked => "review loop cap reached",
+            ReviewAction::Handoff => "review requested changes",
+        };
+        append_run_log(
+            "warn",
+            "worker.review.rework_required",
+            json!({
+                "worker_id": identity.worker_id,
+                "task_id": task_id,
+                "review_loops": fsm.review_loops,
+                "reason": reason,
+            }),
+        );
+        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Parked,
+            logs,
+            teardown: None,
+            failure_reason: Some(reason.to_string()),
+        }));
     } else {
         append_run_log(
             "info",
@@ -633,9 +657,10 @@ fn execute_task_live(
 
 #[cfg(test)]
 mod tests {
-    use super::execute_task;
+    use super::{decide_review_action, execute_task, ReviewAction};
     use crate::config::AppConfig;
     use crate::runtime::FakeProcessRunner;
+    use crate::fsm::{ReviewVerdict, MAX_REVIEW_LOOPS};
     use crate::types::{RuntimeScope, WorkerState};
     use crate::worker::types::WorkerOutcome;
     use std::path::PathBuf;
@@ -684,5 +709,17 @@ mod tests {
         assert!(teardown.sandbox_torn_down);
         assert!(teardown.worktree_cleaned);
         assert!(teardown.state_cleared);
+    }
+
+    #[test]
+    fn review_needs_changes_requires_rework_before_handoff() {
+        let action = decide_review_action(ReviewVerdict::NeedsChanges, 0);
+        assert_eq!(action, ReviewAction::Rework);
+    }
+
+    #[test]
+    fn review_needs_changes_at_cap_is_parked() {
+        let action = decide_review_action(ReviewVerdict::NeedsChanges, MAX_REVIEW_LOOPS);
+        assert_eq!(action, ReviewAction::Parked);
     }
 }

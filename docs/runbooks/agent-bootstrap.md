@@ -80,3 +80,21 @@ $LOG_QUERY_BIN timeline --run-id "<run_id>"
 - Startup grades generated and readable.
 - Backlog can be listed without DB write failures.
 - One bounded worker run completes cleanly and exits normally.
+
+## Domain start points
+
+### `tools/gardener/tests` (`verification-harness`)
+
+- Entry files:
+  - `tools/gardener/tests/docs_readme.rs`
+  - `tools/gardener/tests/cli_smoke.rs`
+- Start-here command:
+  - `cargo test -p gardener --test docs_readme`
+
+### `scripts/fixtures` (`repository-automation`)
+
+- Entry files:
+  - `scripts/fixtures/check-migrations-wired/passing/migrations/001_init.sql`
+  - `scripts/run-script-lint-fixture-tests.sh`
+- Start-here command:
+  - `bash scripts/run-script-lint-fixture-tests.sh`

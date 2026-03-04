@@ -10,7 +10,7 @@ use crate::quality_assessment_runner::{QualityAssessmentConfig, QualityProgressE
 use crate::quality_grade_compute::GradeReport;
 use crate::quality_pipeline::run_quality_pipeline;
 use crate::repo_intelligence::read_profile;
-use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner, ProductionRuntime};
+use crate::runtime::{Clock, FileSystem, ProcessRequest, ProductionRuntime};
 use crate::seed_runner::SeedTask;
 use crate::seeding::{
     recommend_seed_tasks_with_events, refine_seed_tasks_with_events,
@@ -73,7 +73,7 @@ pub fn refresh_quality_report(
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
         || !runtime.file_system.exists(&cache_path)
-        || report_stamp_is_stale(runtime, cfg, &stamp_path, scope)?;
+        || report_stamp_is_stale(runtime, cfg, &stamp_path)?;
 
     append_run_log(
         "debug",
@@ -196,7 +196,6 @@ pub fn ensure_quality_report_fresh_for_validation(
 ) -> Result<(), GardenerError> {
     ensure_quality_report_fresh_for_validation_with_context(
         runtime.file_system.as_ref(),
-        runtime.process_runner.as_ref(),
         runtime.clock.as_ref(),
         cfg,
         scope,
@@ -205,7 +204,6 @@ pub fn ensure_quality_report_fresh_for_validation(
 
 pub(crate) fn ensure_quality_report_fresh_for_validation_with_context(
     file_system: &dyn FileSystem,
-    process_runner: &dyn ProcessRunner,
     clock: &dyn Clock,
     cfg: &AppConfig,
     scope: &RuntimeScope,
@@ -222,11 +220,9 @@ pub(crate) fn ensure_quality_report_fresh_for_validation_with_context(
     if !file_system.exists(&stamp_path)
         || report_stamp_is_stale_with_context(
             file_system,
-            process_runner,
             clock,
             cfg,
             &stamp_path,
-            scope,
         )?
     {
         return Err(GardenerError::Cli(
@@ -1394,25 +1390,20 @@ fn report_stamp_is_stale(
     runtime: &ProductionRuntime,
     cfg: &AppConfig,
     stamp_path: &std::path::Path,
-    scope: &RuntimeScope,
 ) -> Result<bool, GardenerError> {
     report_stamp_is_stale_with_context(
         runtime.file_system.as_ref(),
-        runtime.process_runner.as_ref(),
         runtime.clock.as_ref(),
         cfg,
         stamp_path,
-        scope,
     )
 }
 
 fn report_stamp_is_stale_with_context(
     file_system: &dyn FileSystem,
-    process_runner: &dyn ProcessRunner,
     clock: &dyn Clock,
     cfg: &AppConfig,
     stamp_path: &std::path::Path,
-    scope: &RuntimeScope,
 ) -> Result<bool, GardenerError> {
     if !file_system.exists(stamp_path) {
         return Ok(true);
@@ -1432,18 +1423,6 @@ fn report_stamp_is_stale_with_context(
     if now.saturating_sub(stamp) > ttl_seconds {
         return Ok(true);
     }
-    if cfg.quality_report.stale_if_head_commit_differs {
-        let profile_loc = crate::triage::profile_path(scope, cfg);
-        if let Ok(profile) = read_profile(file_system, &profile_loc) {
-            if let Ok(current_head) =
-                crate::repo_intelligence::current_head_sha(process_runner, &scope.working_dir)
-            {
-                if current_head != profile.meta.head_sha {
-                    return Ok(true);
-                }
-            }
-        }
-    }
     Ok(false)
 }
 
@@ -1454,14 +1433,10 @@ mod tests {
         report_stamp_is_stale, should_seed_backlog,
     };
     use crate::config::AppConfig;
-    use crate::repo_intelligence::{self, RepoIntelligenceProfile};
     use crate::runtime::{
-        FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput,
-        ProductionRuntime,
+        FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProductionRuntime,
     };
     use crate::seed_runner::SeedTask;
-    use crate::triage;
-    use crate::triage_discovery::DiscoveryAssessment;
     use crate::types::RuntimeScope;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
@@ -1592,27 +1567,20 @@ mod tests {
             &runtime,
             &cfg,
             &scope.working_dir.join("report.md.stamp"),
-            &scope,
         )
         .expect("stale");
         assert!(stale);
     }
 
     #[test]
-    fn report_stamp_is_stale_when_ttl_exceeded_or_head_commit_changes() {
+    fn report_stamp_is_stale_when_ttl_exceeded() {
         let dir = tempdir().expect("tempdir");
-        let scope = RuntimeScope {
-            process_cwd: dir.path().to_path_buf(),
-            repo_root: Some(dir.path().to_path_buf()),
-            working_dir: dir.path().to_path_buf(),
-        };
 
         let stamp = dir.path().join("report.md.stamp");
         let fs = FakeFileSystem::default();
         fs.write_string(&stamp, "0").expect("seed stamp");
         let mut cfg = AppConfig::default();
         cfg.quality_report.stale_after_days = 0;
-        cfg.quality_report.stale_if_head_commit_differs = false;
         let runtime = ProductionRuntime {
             clock: Arc::new(FakeClock::new(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
@@ -1621,71 +1589,6 @@ mod tests {
             process_runner: Arc::new(FakeProcessRunner::default()),
             terminal: Arc::new(FakeTerminal::default()),
         };
-        assert!(report_stamp_is_stale(&runtime, &cfg, &stamp, &scope).expect("stale by ttl"));
-
-        let fs = FakeFileSystem::default();
-        fs.write_string(&stamp, "9_900").expect("seed fresh stamp");
-        let mut cfg = AppConfig::default();
-        cfg.quality_report.stale_after_days = 1;
-        cfg.quality_report.stale_if_head_commit_differs = true;
-        let profile = RepoIntelligenceProfile {
-            meta: repo_intelligence::RepoMeta {
-                schema_version: 1,
-                created_at: "0".to_string(),
-                head_sha: "abc".to_string(),
-                working_dir: dir.path().display().to_string(),
-                repo_root: dir.path().display().to_string(),
-                discovery_used: false,
-            },
-            detected_agent: repo_intelligence::DetectedAgentProfile {
-                primary: "codex".to_string(),
-                claude_signals: Vec::new(),
-                codex_signals: Vec::new(),
-                agents_md_present: false,
-                user_confirmed: false,
-            },
-            discovery: DiscoveryAssessment::unknown(),
-            user_validated: repo_intelligence::UserValidated {
-                agent_steering_correction: String::new(),
-                external_docs_surface: String::new(),
-                external_docs_accessible: false,
-                guardrails_correction: String::new(),
-                validation_command: String::new(),
-                coverage_grade_override: String::new(),
-                additional_context: String::new(),
-                preferred_parallelism: None,
-                backlog_approval: false,
-                corrections_made: 0,
-                validated_at: "0".to_string(),
-            },
-            agent_readiness: repo_intelligence::AgentReadiness {
-                agent_steering_score: None,
-                knowledge_accessible_score: None,
-                mechanical_guardrails_score: None,
-                local_feedback_loop_score: None,
-                coverage_signal_score: None,
-                readiness_score: 82,
-                readiness_grade: "B".to_string(),
-                primary_gap: "coverage_signal".to_string(),
-            },
-        };
-        let profile_path = triage::profile_path(&scope, &cfg);
-        fs.write_string(&profile_path, &toml::to_string(&profile).expect("toml"))
-            .expect("write profile");
-        let runner = FakeProcessRunner::default();
-        runner.push_response(Ok(ProcessOutput {
-            exit_code: 0,
-            stdout: "different\n".to_string(),
-            stderr: String::new(),
-        }));
-        let runtime = ProductionRuntime {
-            clock: Arc::new(FakeClock::new(
-                SystemTime::UNIX_EPOCH + Duration::from_secs(10_000),
-            )),
-            file_system: Arc::new(fs),
-            process_runner: Arc::new(runner),
-            terminal: Arc::new(FakeTerminal::default()),
-        };
-        assert!(report_stamp_is_stale(&runtime, &cfg, &stamp, &scope).expect("mismatch head"));
+        assert!(report_stamp_is_stale(&runtime, &cfg, &stamp).expect("stale by ttl"));
     }
 }

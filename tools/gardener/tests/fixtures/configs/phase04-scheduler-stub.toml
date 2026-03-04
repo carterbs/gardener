@@ -18,7 +18,6 @@ validation_command = "npm run validate"
 [quality_report]
 path = "tools/gardener/tests/fixtures/quality-grades-phase4.md"
 stale_after_days = 7
-stale_if_head_commit_differs = true
 
 [triage]
 output_path = "tools/gardener/tests/fixtures/triage/expected-profiles/phase03-profile.toml"

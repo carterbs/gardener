@@ -74,7 +74,6 @@ discovery_max_turns = 12
 [quality_report]
 path = "{}"
 stale_after_days = 7
-stale_if_head_commit_differs = true
 "#,
             dir.path().display(),
             profile_path.display(),
@@ -216,7 +215,6 @@ discovery_max_turns = 12
 [quality_report]
 path = "{}"
 stale_after_days = 7
-stale_if_head_commit_differs = false
 
 [seeding]
 backend = "codex"

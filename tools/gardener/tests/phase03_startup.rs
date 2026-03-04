@@ -53,7 +53,6 @@ discovery_max_turns = 12
 [quality_report]
 path = "quality.md"
 stale_after_days = 7
-stale_if_head_commit_differs = true
 "#;
     let profile = include_str!("fixtures/triage/expected-profiles/phase03-profile.toml");
     let runtime = runtime_with_files(vec![
@@ -99,7 +98,6 @@ discovery_max_turns = 12
 [quality_report]
 path = "quality.md"
 stale_after_days = 7
-stale_if_head_commit_differs = true
 "#;
     let runtime = runtime_with_files(vec![("/cfg.toml", cfg_toml)]);
     let overrides = CliOverrides {

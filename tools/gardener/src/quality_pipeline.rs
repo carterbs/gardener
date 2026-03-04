@@ -4,7 +4,9 @@ use crate::agent::factory::AdapterFactory;
 use crate::backlog_store::BacklogStore;
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::quality_assessment_runner::{run_assessment, QualityAssessmentConfig};
+use crate::quality_assessment_runner::{
+    run_assessment, QualityAssessmentConfig, QualityProgressEvent,
+};
 use crate::quality_backlog_emitter::emit_deficiency_tasks;
 use crate::quality_grade_compute::{compute_grade_report, GradeReport};
 use crate::quality_grade_renderer::render_grade_document_with_repo_wide;
@@ -20,6 +22,7 @@ pub fn run_quality_pipeline(
     process_runner: &dyn ProcessRunner,
     store: Option<&BacklogStore>,
     config: &QualityAssessmentConfig,
+    on_progress: Option<&(dyn Fn(QualityProgressEvent) + Send + Sync)>,
 ) -> Result<(String, GradeReport), GardenerError> {
     append_run_log(
         "info",
@@ -32,7 +35,8 @@ pub fn run_quality_pipeline(
     );
 
     // 1. Run assessment (handles evidence collection, agent/fallback internally)
-    let (payload, _bundle, agent_used) = run_assessment(repo_path, factory, process_runner, config)?;
+    let (payload, _bundle, agent_used) =
+        run_assessment(repo_path, factory, process_runner, config, on_progress)?;
 
     // Keep repo_wide for the renderer (before payload is consumed by compute_grade_report)
     let repo_wide = payload.repo_wide.clone();
@@ -104,8 +108,8 @@ mod tests {
         let config = QualityAssessmentConfig::default();
         let runner = FakeProcessRunner::default();
 
-        let (doc, report) =
-            run_quality_pipeline(dir.path(), None, &runner, None, &config).expect("should succeed");
+        let (doc, report) = run_quality_pipeline(dir.path(), None, &runner, None, &config, None)
+            .expect("should succeed");
 
         assert!(doc.contains("# Quality Grade Report"));
         assert!(!report.domain_grades.is_empty() || report.deficiencies.is_empty());
@@ -125,7 +129,7 @@ mod tests {
         let runner = FakeProcessRunner::default();
 
         let (_doc, report) =
-            run_quality_pipeline(dir.path(), None, &runner, Some(&store), &config)
+            run_quality_pipeline(dir.path(), None, &runner, Some(&store), &config, None)
                 .expect("should succeed");
 
         // If there are deficiencies, tasks should have been emitted
@@ -145,8 +149,8 @@ mod tests {
         let config = QualityAssessmentConfig::default();
         let runner = FakeProcessRunner::default();
 
-        let (doc, _report) =
-            run_quality_pipeline(dir.path(), None, &runner, None, &config).expect("should succeed");
+        let (doc, _report) = run_quality_pipeline(dir.path(), None, &runner, None, &config, None)
+            .expect("should succeed");
 
         assert!(doc.contains("Assessed by: deterministic-fallback"));
     }

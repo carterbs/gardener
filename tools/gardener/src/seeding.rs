@@ -5,10 +5,12 @@ use crate::prompt_registry::{
     seeding_prompt_template, SEEDING_ACTION_CONTRACT_DRY_RUN, SEEDING_ACTION_CONTRACT_WRITE,
 };
 use crate::protocol::AgentEvent;
+use crate::quality_grade_compute::GradeReport;
 use crate::repo_intelligence::RepoIntelligenceProfile;
 use crate::runtime::ProcessRunner;
 use crate::seed_runner::{
-    run_legacy_seed_runner_v1_with_events_and_task_count, run_seed_agent_direct_v2_with_events, SeedTask,
+    run_legacy_seed_runner_v1_with_events_and_task_count, run_seed_agent_direct_v2_with_events,
+    SeedTask,
 };
 use crate::types::RuntimeScope;
 use serde_json::json;
@@ -27,6 +29,8 @@ pub struct SeedPromptContext {
     pub backlog_skill_md: String,
     pub existing_backlog: String,
     pub rejected_tasks: String,
+    pub structural_deficiencies: String,
+    pub domain_notes: String,
 }
 
 pub fn build_seed_prompt(
@@ -35,8 +39,16 @@ pub fn build_seed_prompt(
     scope: &RuntimeScope,
     existing_backlog: &str,
     rejected_tasks: &str,
+    grade_report: Option<&GradeReport>,
 ) -> String {
-    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog, rejected_tasks);
+    let context = build_seed_prompt_context(
+        profile,
+        quality_doc,
+        scope,
+        existing_backlog,
+        rejected_tasks,
+        grade_report,
+    );
     build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE)
 }
 
@@ -46,17 +58,21 @@ pub fn build_seed_dry_run_prompt(
     scope: &RuntimeScope,
     existing_backlog: &str,
     rejected_tasks: &str,
+    grade_report: Option<&GradeReport>,
 ) -> String {
-    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog, rejected_tasks);
+    let context = build_seed_prompt_context(
+        profile,
+        quality_doc,
+        scope,
+        existing_backlog,
+        rejected_tasks,
+        grade_report,
+    );
     build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_DRY_RUN)
 }
 
 pub fn build_seed_prompt_v2(context: &SeedPromptContext, action_contract: &str) -> String {
-    render_seed_prompt_template(
-        seeding_prompt_template().body,
-        context,
-        action_contract,
-    )
+    render_seed_prompt_template(seeding_prompt_template().body, context, action_contract)
 }
 
 fn render_seed_prompt_template(
@@ -98,6 +114,16 @@ fn render_seed_prompt_template(
             context.rejected_tasks
         )
     };
+    let structural_deficiencies = if context.structural_deficiencies.is_empty() {
+        "No structural deficiencies identified.\n".to_string()
+    } else {
+        context.structural_deficiencies.clone()
+    };
+    let domain_notes = if context.domain_notes.is_empty() {
+        "No domain-level notes available.\n".to_string()
+    } else {
+        context.domain_notes.clone()
+    };
     template_body
         .replace("{ACTION_CONTRACT}", action_contract)
         .replace("{PRIMARY_GAP}", &context.primary_gap)
@@ -110,9 +136,12 @@ fn render_seed_prompt_template(
         .replace("{BACKLOG_SKILL_MD}", &backlog_skill_md)
         .replace("{EXISTING_BACKLOG}", &context.existing_backlog)
         .replace("{REJECTED_TASKS}", &rejected_tasks)
+        .replace("{STRUCTURAL_DEFICIENCIES}", &structural_deficiencies)
+        .replace("{DOMAIN_NOTES}", &domain_notes)
         .replace("{QUALITY_DOC}", &context.quality_doc)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn seed_backlog_if_needed(
     process_runner: &dyn ProcessRunner,
     scope: &RuntimeScope,
@@ -121,6 +150,7 @@ pub fn seed_backlog_if_needed(
     quality_doc: &str,
     existing_backlog: &str,
     rejected_tasks: &str,
+    grade_report: Option<&GradeReport>,
 ) -> Result<(), GardenerError> {
     seed_backlog_if_needed_with_events(
         process_runner,
@@ -131,6 +161,7 @@ pub fn seed_backlog_if_needed(
         existing_backlog,
         rejected_tasks,
         None,
+        grade_report,
     )
 }
 
@@ -141,8 +172,16 @@ pub fn build_seed_refine_prompt(
     scope: &RuntimeScope,
     existing_backlog: &str,
     rejected_tasks: &str,
+    grade_report: Option<&GradeReport>,
 ) -> String {
-    let context = build_seed_prompt_context(profile, quality_doc, scope, existing_backlog, rejected_tasks);
+    let context = build_seed_prompt_context(
+        profile,
+        quality_doc,
+        scope,
+        existing_backlog,
+        rejected_tasks,
+        grade_report,
+    );
     let mut out = String::new();
     out.push_str("You are the Gardener backlog seeding worker.\n");
     out.push_str("The user has reviewed your previously suggested tasks and provided feedback.\n");
@@ -193,6 +232,7 @@ pub fn refine_seed_tasks_with_events(
     rejected_tasks: &str,
     tasks_with_feedback: &[(SeedTask, String)],
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+    grade_report: Option<&GradeReport>,
 ) -> Result<Vec<SeedTask>, GardenerError> {
     append_run_log(
         "info",
@@ -211,6 +251,7 @@ pub fn refine_seed_tasks_with_events(
         scope,
         existing_backlog,
         rejected_tasks,
+        grade_report,
     );
     let task_count = tasks_with_feedback.len();
     let result = if let Some(sink) = on_event.as_mut() {
@@ -264,6 +305,7 @@ pub fn recommend_seed_tasks_with_events(
     existing_backlog: &str,
     rejected_tasks: &str,
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+    grade_report: Option<&GradeReport>,
 ) -> Result<Vec<SeedTask>, GardenerError> {
     append_run_log(
         "info",
@@ -277,7 +319,14 @@ pub fn recommend_seed_tasks_with_events(
         }),
     );
 
-    let prompt = build_seed_dry_run_prompt(profile, quality_doc, scope, existing_backlog, rejected_tasks);
+    let prompt = build_seed_dry_run_prompt(
+        profile,
+        quality_doc,
+        scope,
+        existing_backlog,
+        rejected_tasks,
+        grade_report,
+    );
     const DRY_RUN_TASK_COUNT: usize = 10;
     let result = if let Some(sink) = on_event.as_mut() {
         run_legacy_seed_runner_v1_with_events_and_task_count(
@@ -334,6 +383,7 @@ pub fn seed_backlog_if_needed_with_events(
     existing_backlog: &str,
     rejected_tasks: &str,
     mut on_event: Option<&mut dyn FnMut(&AgentEvent)>,
+    grade_report: Option<&GradeReport>,
 ) -> Result<(), GardenerError> {
     append_run_log(
         "info",
@@ -347,7 +397,14 @@ pub fn seed_backlog_if_needed_with_events(
         }),
     );
 
-    let prompt = build_seed_prompt(profile, quality_doc, scope, existing_backlog, rejected_tasks);
+    let prompt = build_seed_prompt(
+        profile,
+        quality_doc,
+        scope,
+        existing_backlog,
+        rejected_tasks,
+        grade_report,
+    );
     let result = if let Some(sink) = on_event.as_mut() {
         run_seed_agent_direct_v2_with_events(
             process_runner,
@@ -400,6 +457,7 @@ fn build_seed_prompt_context(
     scope: &RuntimeScope,
     existing_backlog: &str,
     rejected_tasks: &str,
+    grade_report: Option<&GradeReport>,
 ) -> SeedPromptContext {
     let repo_root = scope
         .repo_root
@@ -409,13 +467,40 @@ fn build_seed_prompt_context(
     let agents_md = read_optional_file(&repo_root.join("AGENTS.md"));
     let claude_md = read_optional_file(&repo_root.join("CLAUDE.md"));
     let docs_listing = collect_docs_listing(&repo_root);
-    let quality_risks = extract_quality_risks(quality_doc);
     let backlog_skill_md = read_optional_file(&repo_root.join(".codex/skills/backlog-db/SKILL.md"));
 
+    // When a structured GradeReport is available, use it directly for richer context
+    let (
+        primary_gap,
+        readiness_score,
+        readiness_grade,
+        quality_risks,
+        structural_deficiencies,
+        domain_notes,
+    ) = if let Some(report) = grade_report {
+        (
+            report.primary_gap.clone(),
+            report.repo_grade.0 as i64,
+            report.repo_grade.1.as_str().to_string(),
+            build_quality_risks_from_report(report),
+            format_structural_deficiencies(report),
+            format_domain_notes(report),
+        )
+    } else {
+        (
+            profile.agent_readiness.primary_gap.clone(),
+            profile.agent_readiness.readiness_score,
+            profile.agent_readiness.readiness_grade.clone(),
+            extract_quality_risks(quality_doc),
+            String::new(),
+            String::new(),
+        )
+    };
+
     SeedPromptContext {
-        primary_gap: profile.agent_readiness.primary_gap.clone(),
-        readiness_score: profile.agent_readiness.readiness_score,
-        readiness_grade: profile.agent_readiness.readiness_grade.clone(),
+        primary_gap,
+        readiness_score,
+        readiness_grade,
         quality_doc: quality_doc.to_string(),
         agents_md,
         claude_md,
@@ -424,6 +509,8 @@ fn build_seed_prompt_context(
         backlog_skill_md,
         existing_backlog: existing_backlog.to_string(),
         rejected_tasks: rejected_tasks.to_string(),
+        structural_deficiencies,
+        domain_notes,
     }
 }
 
@@ -502,12 +589,75 @@ fn extract_quality_risks(quality_doc: &str) -> String {
             continue;
         }
         let grade = columns[2];
-        if !matches!(grade, "A" | "B" | "C" | "D" | "F") {
+        // Accept 9-level grades: A, B+, B, B-, C+, C, C-, D, F
+        if !matches!(
+            grade,
+            "A" | "B+" | "B" | "B-" | "C+" | "C" | "C-" | "D" | "F"
+        ) {
             continue;
         }
         rows.push(format!("| {} | {} | {} |", columns[0], columns[1], grade));
     }
     rows.join("\n")
+}
+
+/// Build quality risks table directly from a structured GradeReport.
+fn build_quality_risks_from_report(report: &GradeReport) -> String {
+    let mut rows = Vec::new();
+    for (domain, score, grade) in &report.domain_grades {
+        let notes_summary = if domain.notes.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {}",
+                domain.notes.first().map(|s| s.as_str()).unwrap_or("")
+            )
+        };
+        rows.push(format!(
+            "| {} | {:.0} | {}{} |",
+            domain.name,
+            score,
+            grade.as_str(),
+            notes_summary
+        ));
+    }
+    rows.join("\n")
+}
+
+/// Format structural deficiencies from a GradeReport for the seeding prompt.
+fn format_structural_deficiencies(report: &GradeReport) -> String {
+    if report.deficiencies.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for def in &report.deficiencies {
+        let domain = def.domain.as_deref().unwrap_or("repo-wide");
+        let _ = writeln!(
+            &mut out,
+            "- [{severity}] [{category}] ({domain}): {desc}\n  Suggested: {title}",
+            severity = def.severity.as_str(),
+            category = def.category.as_str(),
+            desc = def.description,
+            title = def.suggested_task_title,
+        );
+    }
+    out
+}
+
+/// Format per-domain notes from a GradeReport for the seeding prompt.
+fn format_domain_notes(report: &GradeReport) -> String {
+    let mut out = String::new();
+    for (domain, _score, grade) in &report.domain_grades {
+        if domain.notes.is_empty() {
+            continue;
+        }
+        let _ = writeln!(&mut out, "## {} ({})", domain.name, grade.as_str());
+        for note in &domain.notes {
+            let _ = writeln!(&mut out, "- {note}");
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -587,6 +737,8 @@ mod tests {
             backlog_skill_md: String::new(),
             existing_backlog: "No active backlog tasks.".to_string(),
             rejected_tasks: String::new(),
+            structural_deficiencies: String::new(),
+            domain_notes: String::new(),
         };
         let prompt = super::build_seed_prompt_v2(&context, SEEDING_ACTION_CONTRACT_WRITE);
         assert!(prompt.contains("Seed-generation contract"));
@@ -726,6 +878,7 @@ mod tests {
             &scope,
             "No active backlog tasks.",
             "",
+            None,
         );
 
         assert_eq!(context.primary_gap, "coverage_signal");
@@ -758,6 +911,7 @@ mod tests {
             },
             "No active backlog tasks.",
             "",
+            None,
         );
 
         assert!(prompt.contains("No AGENTS.md found."));
@@ -781,6 +935,7 @@ mod tests {
             },
             "No active backlog tasks.",
             "",
+            None,
         );
 
         assert!(prompt.contains("Output contract"));
@@ -803,6 +958,7 @@ mod tests {
             },
             "No active backlog tasks.",
             rejected,
+            None,
         );
 
         assert!(prompt.contains("Previously rejected seed tasks"));
@@ -823,6 +979,7 @@ mod tests {
             },
             "No active backlog tasks.",
             "",
+            None,
         );
 
         assert!(!prompt.contains("Previously rejected seed tasks"));
@@ -867,6 +1024,7 @@ mod tests {
             },
             "No active backlog tasks.",
             "",
+            None,
         );
 
         assert!(prompt.contains("Revise each task below"));
@@ -908,6 +1066,7 @@ mod tests {
             },
             "No active backlog tasks.",
             rejected,
+            None,
         );
 
         assert!(prompt.contains("Previously rejected tasks"));

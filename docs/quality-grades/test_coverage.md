@@ -1,30 +1,31 @@
 ## Test Coverage Assessment
 
-### Repo-Wide Score: 84
-Coverage is strong in `tools/gardener`, with broad unit coverage plus many integration phase tests and one e2e hotkey test. The main drag on the score is weaker explicit coverage in `scripts/` validation tooling and limited e2e depth relative to the runtime surface area.
+### Repo-Wide Score: 89
+Coverage is strong: `tools/gardener/src` shows broad unit-test presence across most modules, and `tools/gardener/tests` includes 30 integration tests plus 1 e2e test hitting phase flows and TUI/hotkey behavior. The main limiter is relatively thin true end-to-end/system-path coverage compared with the size and criticality of runtime orchestration.
 
 ### Per-Domain Scores
-- runtime-orchestration: 90 - `tools/gardener` has extensive unit coverage across core modules plus 29 integration tests and 1 e2e test spanning startup, scheduling, adapters, triage, rendering, hotkeys, and CLI paths.
-- developer-validation-tooling: 42 - The `scripts/` area appears lightly exercised directly; `scripts/fixtures/check-migrations-wired/` is present, but dedicated script-focused tests are limited/implicit rather than clearly comprehensive.
+- runtime-orchestration: 88 - High module-level coverage and many phase-focused integration tests, but only one explicit e2e path for a complex orchestrator/runtime stack.
+- runtime-validation: 93 - Integration suite is extensive and intentionally covers contracts, edge cases, linters, and phase behavior; this is the strongest domain.
+- migration-wiring-fixtures: 74 - Fixture-based validation exists, but the fixture surface appears narrow (small pass/fail set), leaving migration wiring edge cases under-exercised.
 
 ### Key Findings
-- Integration coverage for runtime phases is unusually complete (`phase03` through `phase12`, adapter edges, triage paths, hotkeys, TUI, CLI smoke), which materially boosts confidence.
-- Unit tests are distributed across most Rust source modules, suggesting good module-level regression protection.
-- e2e coverage is thin (single `hotkey_pty_e2e.rs`), leaving multi-phase runtime behavior and script validation workflows underrepresented end-to-end.
+- Test distribution is healthy overall, with unusually broad per-module unit coverage in `tools/gardener/src`.
+- Integration testing is a clear strength, especially around phase execution and adapter/hotkey/triage edge paths.
+- e2e depth is the largest structural gap for confidence in autonomous multi-phase runtime behavior.
 
 ### Deficiencies
 
-- **[CoverageGap | P1] Limited end-to-end runtime scenario coverage**
-  - What: Only one e2e file (`tools/gardener/tests/hotkey_pty_e2e.rs`) covers a narrow interaction path; no broad e2e for full orchestration (`startup -> triage -> execution -> render`).
-  - Agent impact: Autonomous changes can pass unit/integration tests but still fail in real run sequencing, causing failed runs and extra diagnosis turns.
-  - Fix: Add 2-3 deterministic e2e scenarios that execute the Rust entrypoint with fixtures/configs and assert phase transitions, outputs, and failure handling across the full lifecycle.
+- **CoverageGap | P1** Limited e2e breadth beyond hotkeys
+  - What: Only one e2e file (`tools/gardener/tests/hotkey_pty_e2e.rs`) is present for a runtime that spans startup, orchestration, worker execution, git/worktree flows, and quality grading.
+  - Agent impact: Agents can pass unit/integration checks but still fail in real runs due to cross-phase state or process-boundary issues, causing failed autonomous runs and costly reruns.
+  - Fix: Add e2e scenarios for full runtime lifecycle (`--config` run, phase progression, worker completion/failure recovery, postmerge/quality outputs) using stable fixtures and deterministic log assertions.
 
-- **[CoverageGap | P1] Script/validation-tooling domain is under-tested directly**
-  - What: `scripts/fixtures/check-migrations-wired/` indicates migration-wiring validation behavior, but `scripts/` itself lacks clearly scoped, direct test suites in the provided inventory.
-  - Agent impact: Agents modifying guardrail scripts can introduce regressions in repo validation that are only caught late (or missed), slowing autonomous iteration.
-  - Fix: Create explicit integration tests for each script contract (input fixture -> command -> expected exit/status/output), including negative/failure cases.
+- **MissingTooling | P1** No explicit coverage gate/threshold enforcement visible
+  - What: The suite is large, but there is no stated coverage threshold or CI gate tying changed runtime code to minimum line/branch coverage.
+  - Agent impact: Regressions can slip in when agents modify low-visibility modules; test count stays high while effective coverage drifts down over time.
+  - Fix: Introduce Rust coverage collection in CI (e.g., `cargo llvm-cov`) with per-package thresholds and changed-file coverage checks for `tools/gardener/src/**`.
 
-- **[FeedbackLoopGap | P2] Heavy reliance on file-presence style checks over behavior assertions in quality tooling**
-  - What: Many quality modules are unit-tested, but cross-module behavioral assertions for grading outputs (combined evidence, scoring drift, threshold edges) appear limited.
-  - Agent impact: Agents may produce subtly wrong quality grades/prompts that look structurally valid, leading to missed regressions and lower trust in automated assessment output.
-  - Fix: Add golden/integration tests for the full quality pipeline (`quality_*` modules together) with stable fixtures and expected grade/evidence bundles to detect semantic drift.
+- **FeedbackLoopGap | P2** Fixture scope for migration wiring is minimal
+  - What: `scripts/fixtures/check-migrations-wired/` has only a small fixture set, which likely underrepresents ordering, missing-file, and partial-migration edge cases.
+  - Agent impact: Agents may produce migration changes that pass current checks but fail in less common repository states, increasing review churn and runtime break risk.
+  - Fix: Expand fixture matrix (out-of-order migrations, duplicate versions, missing baseline, mixed valid/invalid trees) and assert diagnostics in a dedicated integration test table.

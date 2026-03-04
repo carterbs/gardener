@@ -18,6 +18,48 @@ use std::cell::RefCell;
 use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Canonical quality dimension descriptions shown in the intro screen.
+/// The linter in `tests/quality_dimension_linter.rs` enforces that these IDs
+/// match the dimension keys used in `quality_assessment_runner.rs`.
+pub const QUALITY_DIMENSIONS: &[(&str, &str)] = &[
+    (
+        "test_coverage",
+        "Measures what fraction of source files have corresponding tests, weighting integration and e2e tests more heavily.",
+    ),
+    (
+        "test_quality",
+        "Evaluates how thorough tests are: assertion density, edge-case coverage, test isolation, and meaningful naming.",
+    ),
+    (
+        "risk_exposure",
+        "Assesses how exposed each domain is to bugs and regressions based on complexity metrics and untested code.",
+    ),
+    (
+        "convention_adherence",
+        "Checks how consistently the codebase follows its own stated conventions for style, naming, and linting.",
+    ),
+    (
+        "agent_steering",
+        "Rates the quality of AGENTS.md/CLAUDE.md steering docs: specificity, architecture pointers, and build commands.",
+    ),
+    (
+        "mechanical_guardrails",
+        "Evaluates breadth and enforcement of automated checks: linters, formatters, type checkers, and CI gates.",
+    ),
+    (
+        "local_feedback_loop",
+        "Measures how quickly developers can validate changes locally via test runners, Makefiles, and watch modes.",
+    ),
+    (
+        "coverage_infrastructure",
+        "Checks whether code coverage is measured, reported, and enforced with thresholds and CI gates.",
+    ),
+    (
+        "documentation_quality",
+        "Assesses README quality, API docs, architectural docs, inline doc density, and doc generation setup.",
+    ),
+];
+
 const WORKER_LIST_ROW_HEIGHT: usize = 3;
 const COMPACT_WORKER_LIST_ROW_HEIGHT: usize = 2;
 const RECENT_COMMAND_STREAM_LIMIT: usize = 4;
@@ -724,7 +766,7 @@ fn parse_triage_artifact(line: &str) -> TriageArtifact {
     }
 }
 
-fn now_hhmmss() -> String {
+pub fn now_hhmmss() -> String {
     let timestamp = now_unix_millis() % 86_400_000;
     let secs = (timestamp / 1000) as u64;
     let in_day = secs % 86_400;
@@ -1448,13 +1490,8 @@ pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> 
         Ok(terminal) => terminal,
         Err(err) => panic!("terminal: {err}"),
     };
-    let lines = report
-        .lines()
-        .take(height.saturating_sub(8) as usize)
-        .collect::<Vec<_>>()
-        .join("\n");
     terminal
-        .draw(|frame| draw_report_frame(frame, path, &lines))
+        .draw(|frame| draw_report_frame(frame, path, report))
         .unwrap_or_else(|err| panic!("draw: {err}"));
     let mut out = String::new();
     let buffer = terminal.backend().buffer().clone();
@@ -1467,7 +1504,7 @@ pub fn render_report_view(path: &str, report: &str, width: u16, height: u16) -> 
     out
 }
 
-fn draw_report_frame(frame: &mut ratatui::Frame<'_>, path: &str, report_lines: &str) {
+fn draw_report_frame(frame: &mut ratatui::Frame<'_>, path: &str, report_raw: &str) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1481,13 +1518,33 @@ fn draw_report_frame(frame: &mut ratatui::Frame<'_>, path: &str, report_lines: &
             .block(Block::default().borders(Borders::ALL).title("Report")),
         chunks[0],
     );
+
+    let styled_lines = markdown_to_lines(report_raw);
+    let total = styled_lines.len();
+    let viewport_height = chunks[1].height.saturating_sub(2) as usize; // borders
+    REPORT_TOTAL_LINES.with(|cell| {
+        *cell.borrow_mut() = total;
+    });
+    let offset = REPORT_SCROLL_OFFSET.with(|cell| *cell.borrow());
+    let visible: Vec<Line<'_>> = styled_lines
+        .into_iter()
+        .skip(offset)
+        .take(viewport_height)
+        .collect();
     frame.render_widget(
-        Paragraph::new(report_lines.to_string())
-            .block(Block::default().borders(Borders::ALL).title(path)),
+        Paragraph::new(visible).block(Block::default().borders(Borders::ALL).title(path)),
         chunks[1],
     );
+
+    let scroll_info = if total > viewport_height {
+        let end = (offset + viewport_height).min(total);
+        format!(" [{}-{}/{}]", offset + 1, end, total)
+    } else {
+        String::new()
+    };
+    let legend = format!("{}{scroll_info}", report_controls_legend());
     frame.render_widget(
-        Paragraph::new(report_controls_legend()).block(Block::default().borders(Borders::ALL)),
+        Paragraph::new(legend).block(Block::default().borders(Borders::ALL)),
         chunks[2],
     );
 }
@@ -1500,6 +1557,8 @@ thread_local! {
     static WORKERS_VIEWPORT_SELECTED: RefCell<usize> = const { RefCell::new(0) };
     static WORKERS_VIEWPORT_CAPACITY: RefCell<usize> = const { RefCell::new(1) };
     static WORKERS_TOTAL_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    static REPORT_SCROLL_OFFSET: RefCell<usize> = const { RefCell::new(0) };
+    static REPORT_TOTAL_LINES: RefCell<usize> = const { RefCell::new(0) };
 }
 
 fn now_unix_millis() -> u128 {
@@ -1588,6 +1647,144 @@ pub fn reset_workers_scroll() {
     });
 }
 
+pub fn scroll_report_down(viewport_height: usize) -> bool {
+    let total = REPORT_TOTAL_LINES.with(|cell| *cell.borrow());
+    if total <= viewport_height {
+        return false;
+    }
+    let max_offset = total.saturating_sub(viewport_height);
+    REPORT_SCROLL_OFFSET.with(|cell| {
+        let mut offset = cell.borrow_mut();
+        if *offset >= max_offset {
+            return false;
+        }
+        *offset += 1;
+        true
+    })
+}
+
+pub fn scroll_report_up() -> bool {
+    REPORT_SCROLL_OFFSET.with(|cell| {
+        let mut offset = cell.borrow_mut();
+        if *offset == 0 {
+            return false;
+        }
+        *offset -= 1;
+        true
+    })
+}
+
+pub fn reset_report_scroll() {
+    REPORT_SCROLL_OFFSET.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
+    REPORT_TOTAL_LINES.with(|cell| {
+        *cell.borrow_mut() = 0;
+    });
+}
+
+fn markdown_to_lines(raw: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for raw_line in raw.lines() {
+        if let Some(heading) = raw_line.strip_prefix("### ") {
+            lines.push(Line::from(Span::styled(
+                heading.to_string(),
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::DIM),
+            )));
+        } else if let Some(heading) = raw_line.strip_prefix("## ") {
+            lines.push(Line::from(Span::styled(
+                heading.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )));
+        } else if let Some(heading) = raw_line.strip_prefix("# ") {
+            lines.push(Line::from(Span::styled(
+                heading.to_string(),
+                Style::default()
+                    .fg(Color::Rgb(85, 198, 255))
+                    .add_modifier(Modifier::BOLD),
+            )));
+        } else if raw_line.trim() == "---" || raw_line.trim() == "***" {
+            lines.push(Line::from(Span::styled(
+                "─".repeat(60),
+                Style::default().add_modifier(Modifier::DIM),
+            )));
+        } else if raw_line.trim().is_empty() {
+            lines.push(Line::from(""));
+        } else if raw_line.starts_with("- ") || raw_line.starts_with("* ") {
+            let content = &raw_line[2..];
+            let mut spans = vec![Span::raw("  ")];
+            spans.push(Span::styled(
+                "• ",
+                Style::default().fg(Color::Rgb(82, 88, 126)),
+            ));
+            spans.extend(parse_inline_spans(content));
+            lines.push(Line::from(spans));
+        } else {
+            lines.push(Line::from(parse_inline_spans(raw_line)));
+        }
+    }
+    lines
+}
+
+fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if let Some(bold_start) = remaining.find("**") {
+            if bold_start > 0 {
+                let before = &remaining[..bold_start];
+                spans.extend(parse_code_spans(before));
+            }
+            let after_open = &remaining[bold_start + 2..];
+            if let Some(bold_end) = after_open.find("**") {
+                let bold_text = &after_open[..bold_end];
+                spans.push(Span::styled(
+                    bold_text.to_string(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+                remaining = &after_open[bold_end + 2..];
+            } else {
+                spans.extend(parse_code_spans(remaining));
+                break;
+            }
+        } else {
+            spans.extend(parse_code_spans(remaining));
+            break;
+        }
+    }
+    spans
+}
+
+fn parse_code_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if let Some(code_start) = remaining.find('`') {
+            if code_start > 0 {
+                spans.push(Span::raw(remaining[..code_start].to_string()));
+            }
+            let after_open = &remaining[code_start + 1..];
+            if let Some(code_end) = after_open.find('`') {
+                let code_text = &after_open[..code_end];
+                spans.push(Span::styled(
+                    code_text.to_string(),
+                    Style::default().fg(Color::Rgb(200, 160, 255)),
+                ));
+                remaining = &after_open[code_end + 1..];
+            } else {
+                spans.push(Span::raw(remaining.to_string()));
+                break;
+            }
+        } else {
+            spans.push(Span::raw(remaining.to_string()));
+            break;
+        }
+    }
+    spans
+}
+
 pub fn draw_dashboard_live(
     workers: &[WorkerRow],
     stats: &QueueStats,
@@ -1616,21 +1813,139 @@ pub fn draw_dashboard_live(
 
 pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
     with_live_terminal(|terminal| {
-        let available_lines = terminal
-            .size()
-            .map_err(|e| GardenerError::Io(e.to_string()))?
-            .height
-            .saturating_sub(8) as usize;
-        let lines = report
-            .lines()
-            .take(available_lines)
-            .collect::<Vec<_>>()
-            .join("\n");
         terminal
-            .draw(|frame| draw_report_frame(frame, path, &lines))
+            .draw(|frame| draw_report_frame(frame, path, report))
             .map(|_| ())
             .map_err(|e| GardenerError::Io(e.to_string()))
     })
+}
+
+pub fn draw_quality_grading_live(activity: &[String]) -> Result<(), GardenerError> {
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(|frame| draw_quality_grading_frame(frame, activity))
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
+fn draw_quality_grading_frame(frame: &mut ratatui::Frame<'_>, activity: &[String]) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "grading your repository",
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    let activity_items = if activity.is_empty() {
+        vec![ListItem::new("- waiting for quality grading updates")]
+    } else {
+        activity
+            .iter()
+            .map(|line| ListItem::new(style_activity_line(line)))
+            .collect::<Vec<_>>()
+    };
+    frame.render_widget(
+        List::new(activity_items).block(
+            Block::default()
+                .title("Quality Grading Activity")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        chunks[1],
+    );
+
+    let footer =
+        Paragraph::new("Quality grading in progress \u{2014} agents are assessing your repository")
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+            );
+    frame.render_widget(footer, chunks[2]);
+}
+
+pub fn render_quality_grading(activity: &[String], width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
+    terminal
+        .draw(|frame| draw_quality_grading_frame(frame, activity))
+        .unwrap_or_else(|err| panic!("draw: {err}"));
+
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Style an activity line for TUI display.
+///
+/// - Timestamp portion ("- HH:MM:SS ") is rendered in `DarkGray`.
+/// - For lines containing "Agent activity:", the command portion (after the
+///   last `: `) is rendered in light purple italic.
+/// - Other lines use default styling for the message body.
+fn style_activity_line(line: &str) -> Line<'_> {
+    let timestamp = now_hhmmss();
+    let body = line;
+
+    if body.contains("Agent activity:") {
+        if let Some(last_colon_pos) = body.rfind(": ") {
+            let prefix = &body[..last_colon_pos + 2]; // includes ": "
+            let command = &body[last_colon_pos + 2..];
+            return Line::from(vec![
+                Span::styled(
+                    format!("- {timestamp} "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::raw(prefix.to_string()),
+                Span::styled(
+                    command.to_string(),
+                    Style::default()
+                        .fg(Color::Rgb(180, 180, 220))
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]);
+        }
+    }
+
+    Line::from(vec![
+        Span::styled(
+            format!("- {timestamp} "),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(body.to_string()),
+    ])
 }
 
 pub fn draw_seeding_live(activity: &[String]) -> Result<(), GardenerError> {
@@ -1678,7 +1993,7 @@ fn draw_seeding_frame(frame: &mut ratatui::Frame<'_>, activity: &[String]) {
     } else {
         activity
             .iter()
-            .map(|line| ListItem::new(format!("- {} {}", now_hhmmss(), line)))
+            .map(|line| ListItem::new(style_activity_line(line)))
             .collect::<Vec<_>>()
     };
     frame.render_widget(
@@ -1691,8 +2006,8 @@ fn draw_seeding_frame(frame: &mut ratatui::Frame<'_>, activity: &[String]) {
         chunks[1],
     );
 
-    let footer =
-        Paragraph::new("Seeding in progress \u{2014} agent is exploring your repository").block(
+    let footer = Paragraph::new("Seeding in progress \u{2014} agent is exploring your repository")
+        .block(
             Block::default()
                 .borders(Borders::TOP)
                 .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
@@ -1721,7 +2036,110 @@ pub fn render_seeding(activity: &[String], width: u16, height: u16) -> String {
     out
 }
 
-pub fn render_seed_review(task: &SeedTask, index: usize, total: usize, width: u16, height: u16) -> String {
+pub fn draw_quality_intro_live() -> Result<(), GardenerError> {
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(draw_quality_intro_frame)
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
+fn draw_quality_intro_frame(frame: &mut ratatui::Frame<'_>) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(2),
+        ])
+        .split(frame.area());
+
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "GARDENER ",
+            Style::default()
+                .fg(Color::Rgb(85, 198, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "grading your repository",
+            Style::default()
+                .fg(Color::Rgb(245, 196, 95))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+    );
+    frame.render_widget(header, chunks[0]);
+
+    let dimension_items: Vec<ListItem<'_>> = QUALITY_DIMENSIONS
+        .iter()
+        .map(|(name, desc)| {
+            ListItem::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    *name,
+                    Style::default()
+                        .fg(Color::Rgb(85, 198, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  \u{2014}  ", Style::default().fg(Color::Gray)),
+                Span::styled(*desc, Style::default().fg(Color::Gray)),
+            ]))
+        })
+        .collect();
+
+    frame.render_widget(
+        List::new(dimension_items).block(
+            Block::default()
+                .title("Quality Dimensions")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        ),
+        chunks[1],
+    );
+
+    let footer = Paragraph::new("Agents are starting up \u{2014} assessing 9 quality dimensions")
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Color::Rgb(82, 88, 126))),
+        );
+    frame.render_widget(footer, chunks[2]);
+}
+
+pub fn render_quality_intro(width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(terminal) => terminal,
+        Err(err) => panic!("terminal: {err}"),
+    };
+    terminal
+        .draw(draw_quality_intro_frame)
+        .unwrap_or_else(|err| panic!("draw: {err}"));
+
+    let mut out = String::new();
+    let buffer = terminal.backend().buffer().clone();
+    for y in 0..height {
+        for x in 0..width {
+            out.push_str(buffer[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+pub fn render_seed_review(
+    task: &SeedTask,
+    index: usize,
+    total: usize,
+    width: u16,
+    height: u16,
+) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = match Terminal::new(backend) {
         Ok(terminal) => terminal,
@@ -2113,9 +2531,7 @@ fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &st
             } else if line.starts_with("Tasks completed") {
                 Line::from(Span::styled(
                     line.to_string(),
-                    Style::default()
-                        .fg(accent)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(line.to_string())
@@ -2715,7 +3131,8 @@ pub fn run_repo_health_wizard(
 
     teardown_terminal(terminal)?;
 
-    let preferred_parallelism = ws.parallelism_input
+    let preferred_parallelism = ws
+        .parallelism_input
         .trim()
         .parse::<u32>()
         .ok()
@@ -3450,7 +3867,10 @@ mod tests {
     fn wizard_step_indicator_highlights_backlog_at_step_3() {
         let line = super::wizard_step_indicator(3);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("Backlog"), "step indicator should show Backlog");
+        assert!(
+            text.contains("Backlog"),
+            "step indicator should show Backlog"
+        );
         assert!(text.contains("Parallelism"));
         assert!(text.contains("Notes"));
     }
@@ -3501,6 +3921,81 @@ mod tests {
     }
 
     #[test]
+    fn quality_intro_screen_renders_header_and_dimensions() {
+        let frame = super::render_quality_intro(120, 20);
+        assert!(
+            frame.contains("grading your repository"),
+            "should show grading header"
+        );
+        assert!(
+            frame.contains("Quality Dimensions"),
+            "should show Quality Dimensions block title"
+        );
+        assert!(
+            frame.contains("test_coverage"),
+            "should show test_coverage dimension"
+        );
+        assert!(
+            frame.contains("agent_steering"),
+            "should show agent_steering dimension"
+        );
+        assert!(
+            frame.contains("documentation_quality"),
+            "should show documentation_quality dimension"
+        );
+        assert!(
+            frame.contains("assessing 9 quality dimensions"),
+            "should show footer message"
+        );
+    }
+
+    #[test]
+    fn quality_dimensions_has_nine_entries() {
+        assert_eq!(
+            super::QUALITY_DIMENSIONS.len(),
+            9,
+            "should have exactly 9 quality dimensions"
+        );
+    }
+
+    #[test]
+    fn quality_dimensions_ids_are_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (id, _) in super::QUALITY_DIMENSIONS {
+            assert!(seen.insert(id), "duplicate dimension ID: {id}");
+        }
+    }
+
+    #[test]
+    fn style_activity_line_styles_agent_activity_command() {
+        let line = "Agent activity: shell started: `cargo test`";
+        let styled = super::style_activity_line(line);
+        // Should have 3 spans: timestamp, prefix, command
+        assert_eq!(
+            styled.spans.len(),
+            3,
+            "agent activity line should have 3 spans"
+        );
+        let command_span = &styled.spans[2];
+        assert!(
+            command_span.content.contains("cargo test"),
+            "command span should contain the command"
+        );
+    }
+
+    #[test]
+    fn style_activity_line_handles_plain_line() {
+        let line = "Agent session started";
+        let styled = super::style_activity_line(line);
+        // Should have 2 spans: timestamp and body
+        assert_eq!(styled.spans.len(), 2, "plain line should have 2 spans");
+        assert!(
+            styled.spans[1].content.contains("Agent session started"),
+            "body span should contain the message"
+        );
+    }
+
+    #[test]
     fn seed_review_renders_task_card_with_all_fields() {
         use crate::seed_runner::SeedTask;
         let task = SeedTask {
@@ -3516,27 +4011,15 @@ mod tests {
             "header should show review backlog"
         );
         assert!(frame.contains("(1/5)"), "should show 1-indexed counter");
-        assert!(
-            frame.contains("Add AGENTS.md"),
-            "should show task title"
-        );
+        assert!(frame.contains("Add AGENTS.md"), "should show task title");
         assert!(
             frame.contains("Helps agents understand"),
             "should show rationale"
         );
         assert!(frame.contains("P0"), "should show priority badge");
-        assert!(
-            frame.contains("[k] Keep"),
-            "should show keep hotkey"
-        );
-        assert!(
-            frame.contains("[d] Discard"),
-            "should show discard hotkey"
-        );
-        assert!(
-            frame.contains("[q]"),
-            "should show quit hotkey"
-        );
+        assert!(frame.contains("[k] Keep"), "should show keep hotkey");
+        assert!(frame.contains("[d] Discard"), "should show discard hotkey");
+        assert!(frame.contains("[q]"), "should show quit hotkey");
     }
 
     #[test]
@@ -3634,7 +4117,10 @@ mod tests {
         assert_eq!(ws.step, 3, "Tab should not advance");
         ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(ws.step, 4);
-        assert!(!ws.backlog_approval, "auto-seed selection should persist after Enter");
+        assert!(
+            !ws.backlog_approval,
+            "auto-seed selection should persist after Enter"
+        );
     }
 
     #[test]
@@ -3642,7 +4128,11 @@ mod tests {
         for step in 0..5 {
             let mut ws = wizard_at_step(step);
             let action = ws.handle_key(KeyCode::Esc, KeyModifiers::NONE);
-            assert_eq!(action, WizardAction::Finish, "Esc at step {step} should finish");
+            assert_eq!(
+                action,
+                WizardAction::Finish,
+                "Esc at step {step} should finish"
+            );
         }
     }
 
@@ -3665,8 +4155,10 @@ mod tests {
     fn wizard_unrelated_keys_on_backlog_step_ignored() {
         let mut ws = wizard_at_step(3);
         ws.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert!(ws.backlog_approval, "unrelated key should not change selection");
+        assert!(
+            ws.backlog_approval,
+            "unrelated key should not change selection"
+        );
         assert_eq!(ws.step, 3, "unrelated key should not change step");
     }
-
 }

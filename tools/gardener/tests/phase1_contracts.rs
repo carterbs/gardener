@@ -54,6 +54,30 @@ fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> 
             .expect("seed quality report stamp");
         fs.write_string(&working_dir_stamp_path, "10000")
             .expect("seed quality report stamp");
+        // Sidecar GradeReport JSON cache (required since quality grading pipeline is non-optional)
+        let grade_cache_path = PathBuf::from(format!(
+            "{}.grade-report.json",
+            report_path.to_string_lossy()
+        ));
+        let working_dir_grade_cache_path = PathBuf::from(format!(
+            "{}.grade-report.json",
+            working_dir_report_path.to_string_lossy()
+        ));
+        let empty_grade_report = serde_json::json!({
+            "domain_grades": [],
+            "repo_grade": [50.0, "C"],
+            "deficiencies": [],
+            "primary_gap": "test_coverage",
+            "languages_detected": ["rust"],
+            "repo_wide_rationale": {}
+        });
+        fs.write_string(&grade_cache_path, &empty_grade_report.to_string())
+            .expect("seed grade report cache");
+        fs.write_string(
+            &working_dir_grade_cache_path,
+            &empty_grade_report.to_string(),
+        )
+        .expect("seed grade report cache");
     }
     let process = FakeProcessRunner::default();
     let detect_root_stdout = git_root.unwrap_or_default().to_string();

@@ -8,18 +8,19 @@ use crate::logging::{append_run_log, recent_worker_log_lines, structured_fallbac
 use crate::priority::Priority;
 use crate::runtime::Terminal;
 use crate::runtime::{
-    clear_interrupt, request_interrupt, ProductionRuntime, INTERRUPT_SENTINEL_KEY,
+    clear_interrupt, request_interrupt, ProductionRuntime, ARROW_DOWN_SENTINEL, ARROW_UP_SENTINEL,
+    INTERRUPT_SENTINEL_KEY,
 };
 use crate::startup::refresh_quality_report;
 use crate::task_identity::TaskKind;
 use crate::tui::{
-    format_state_label, reset_workers_scroll, scroll_workers_down, scroll_workers_up, BacklogView,
-    QueueStats, WorkerRow,
+    format_state_label, reset_report_scroll, reset_workers_scroll, scroll_report_down,
+    scroll_report_up, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats, WorkerRow,
 };
 use crate::types::RuntimeScope;
 use crate::worker::{
-    execute_merge_phase, execute_task, worktree_branch_for, worktree_path_for, MergeRequest,
-    clear_state_sink, install_state_sink, WorkerOutcome, WorkerStreamEvent,
+    clear_state_sink, execute_merge_phase, execute_task, install_state_sink, worktree_branch_for,
+    worktree_path_for, MergeRequest, WorkerOutcome, WorkerStreamEvent,
 };
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
@@ -102,6 +103,7 @@ struct HotkeyState<'a> {
     operator_hotkeys: bool,
     terminal: &'a dyn Terminal,
     report_visible: &'a mut bool,
+    report_content: &'a mut Option<String>,
 }
 
 pub fn run_worker_pool_fsm(
@@ -127,6 +129,7 @@ pub fn run_worker_pool_fsm(
     );
     let operator_hotkeys = operator_hotkeys_enabled();
     let mut report_visible = false;
+    let mut report_content: Option<String> = None;
     let hb = cfg.scheduler.heartbeat_interval_seconds;
     let lt = cfg.scheduler.lease_timeout_seconds;
     let parallelism = cfg.orchestrator.parallelism.max(1) as usize;
@@ -262,6 +265,7 @@ pub fn run_worker_pool_fsm(
             operator_hotkeys,
             terminal,
             report_visible: &mut report_visible,
+            report_content: &mut report_content,
         })? {
             return Ok(completed);
         }
@@ -527,6 +531,7 @@ pub fn run_worker_pool_fsm(
                     operator_hotkeys,
                     terminal,
                     report_visible: &mut report_visible,
+                    report_content: &mut report_content,
                 })? {
                     request_interrupt();
                     if !quit_requested {
@@ -817,7 +822,9 @@ pub fn run_worker_pool_fsm(
                                 scope_guard.spawn(move || {
                                     let state_ui_tx = event_tx.clone();
                                     let on_event = move |event: WorkerStreamEvent| {
-                                        if let WorkerStreamEvent::ToolCommand { task_id, command } = event {
+                                        if let WorkerStreamEvent::ToolCommand { task_id, command } =
+                                            event
+                                        {
                                             let _ = event_tx.send(PoolStreamEvent::ToolCommand {
                                                 slot_idx: idx,
                                                 task_id,
@@ -1065,8 +1072,7 @@ pub fn run_worker_pool_fsm(
 
         if let Some((worker_id, task_id, reason)) = shutdown_error {
             let error_detail = worker_failure_prompt(&worker_id, &task_id, &reason);
-            let shutdown_message =
-                format!("{}\n\n{}", error_detail, summary.format_message());
+            let shutdown_message = format!("{}\n\n{}", error_detail, summary.format_message());
             if terminal.stdin_is_tty() {
                 terminal.draw_shutdown_screen("Error", &shutdown_message)?;
             } else {
@@ -1293,6 +1299,22 @@ fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(
     }
 }
 
+fn load_report_content(
+    runtime: &ProductionRuntime,
+    cfg: &AppConfig,
+    scope: &RuntimeScope,
+) -> String {
+    let report_path = quality_report_path(cfg, scope);
+    if runtime.file_system.exists(&report_path) {
+        runtime
+            .file_system
+            .read_to_string(&report_path)
+            .unwrap_or_else(|_| "report not found".to_string())
+    } else {
+        "report not found".to_string()
+    }
+}
+
 fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
     let runtime = state.runtime;
     let scope = state.scope;
@@ -1302,14 +1324,20 @@ fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
     let operator_hotkeys = state.operator_hotkeys;
     let terminal = state.terminal;
     let report_visible = &mut *state.report_visible;
+    let report_content = &mut *state.report_content;
 
     if !terminal.stdin_is_tty() {
         return Ok(false);
     }
     let mut redraw_dashboard = false;
+    let mut redraw_report = false;
     if let Some(key) = terminal.poll_key(10)? {
         if key == '\0' {
-            redraw_dashboard = true;
+            if *report_visible {
+                redraw_report = true;
+            } else {
+                redraw_dashboard = true;
+            }
         }
         if key == INTERRUPT_SENTINEL_KEY {
             append_run_log(
@@ -1322,106 +1350,149 @@ fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
             request_interrupt();
             return Ok(true);
         }
-        match hotkey_action(key, operator_hotkeys) {
-            Some(AppHotkeyAction::Quit) => {
-                append_run_log(
-                    "warn",
-                    "hotkey.quit",
-                    json!({
-                        "worker_id": WORKER_POOL_ID
-                    }),
-                );
-                request_interrupt();
-                return Ok(true);
+
+        if *report_visible {
+            match key {
+                c if c == 'j' || c == ARROW_DOWN_SENTINEL => {
+                    let (_, h) = terminal.draw_dimensions();
+                    let viewport = h.saturating_sub(8) as usize;
+                    if scroll_report_down(viewport) {
+                        redraw_report = true;
+                    }
+                }
+                c if c == 'k' || c == ARROW_UP_SENTINEL => {
+                    if scroll_report_up() {
+                        redraw_report = true;
+                    }
+                }
+                'b' => {
+                    *report_visible = false;
+                    *report_content = None;
+                    reset_report_scroll();
+                    redraw_dashboard = true;
+                }
+                'g' => {
+                    let _ = refresh_quality_report(runtime, cfg, scope, true)?;
+                    *report_content = Some(load_report_content(runtime, cfg, scope));
+                    reset_report_scroll();
+                    redraw_report = true;
+                }
+                'q' => {
+                    append_run_log(
+                        "warn",
+                        "hotkey.quit",
+                        json!({ "worker_id": WORKER_POOL_ID }),
+                    );
+                    request_interrupt();
+                    return Ok(true);
+                }
+                _ => {}
             }
-            Some(AppHotkeyAction::ScrollDown) => {
-                redraw_dashboard = scroll_workers_down();
+        } else {
+            match hotkey_action(key, operator_hotkeys) {
+                Some(AppHotkeyAction::Quit) => {
+                    append_run_log(
+                        "warn",
+                        "hotkey.quit",
+                        json!({
+                            "worker_id": WORKER_POOL_ID
+                        }),
+                    );
+                    request_interrupt();
+                    return Ok(true);
+                }
+                Some(AppHotkeyAction::ScrollDown) => {
+                    redraw_dashboard = scroll_workers_down();
+                }
+                Some(AppHotkeyAction::ScrollUp) => {
+                    redraw_dashboard = scroll_workers_up();
+                }
+                Some(AppHotkeyAction::Retry) => {
+                    let released = store.recover_stale_leases(now_unix_millis())?;
+                    append_run_log(
+                        "info",
+                        "hotkey.retry",
+                        json!({
+                            "worker_id": WORKER_POOL_ID,
+                            "released": released
+                        }),
+                    );
+                    terminal.write_line(&format!(
+                        "retry requested: released {released} stale lease(s)"
+                    ))?;
+                    redraw_dashboard = true;
+                }
+                Some(AppHotkeyAction::ReleaseLease) => {
+                    let release_now = now_unix_millis()
+                        .saturating_add((cfg.scheduler.lease_timeout_seconds as i64 + 1) * 1000);
+                    let released = store.recover_stale_leases(release_now)?;
+                    append_run_log(
+                        "info",
+                        "hotkey.release_lease",
+                        json!({
+                            "worker_id": WORKER_POOL_ID,
+                            "released": released
+                        }),
+                    );
+                    terminal.write_line(&format!(
+                        "release-lease requested: released {released} lease(s)"
+                    ))?;
+                    redraw_dashboard = true;
+                }
+                Some(AppHotkeyAction::ParkEscalate) => {
+                    let active = workers.iter().filter(|row| row.lease_held).count();
+                    let task = store.upsert_task(crate::backlog_store::NewTask {
+                        kind: TaskKind::Maintenance,
+                        title: format!("Escalation requested for {active} active worker(s)"),
+                        details: "Operator requested park/escalate from TUI hotkey".to_string(),
+                        scope_key: "runtime".to_string(),
+                        rationale:
+                            "Operator requested immediate attention on active worker saturation."
+                                .to_string(),
+                        priority: Priority::P0,
+                        source: "tui_hotkey".to_string(),
+                        related_pr: None,
+                        related_branch: None,
+                    })?;
+                    terminal.write_line(&format!(
+                        "park/escalate requested: created P0 escalation task {}",
+                        short_task_id(&task.task_id)
+                    ))?;
+                    append_run_log(
+                        "warn",
+                        "hotkey.park_escalate",
+                        json!({
+                            "worker_id": WORKER_POOL_ID,
+                            "active_workers": active,
+                            "task_id": task.task_id
+                        }),
+                    );
+                    redraw_dashboard = true;
+                }
+                Some(AppHotkeyAction::ViewReport) => {
+                    *report_visible = true;
+                    *report_content = Some(load_report_content(runtime, cfg, scope));
+                    reset_report_scroll();
+                    redraw_report = true;
+                }
+                Some(AppHotkeyAction::RegenerateReport) => {
+                    let _ = refresh_quality_report(runtime, cfg, scope, true)?;
+                    *report_visible = true;
+                    *report_content = Some(load_report_content(runtime, cfg, scope));
+                    reset_report_scroll();
+                    redraw_report = true;
+                }
+                Some(AppHotkeyAction::Back) => {
+                    // Not in report view, ignore
+                }
+                None => {}
             }
-            Some(AppHotkeyAction::ScrollUp) => {
-                redraw_dashboard = scroll_workers_up();
-            }
-            Some(AppHotkeyAction::Retry) => {
-                let released = store.recover_stale_leases(now_unix_millis())?;
-                append_run_log(
-                    "info",
-                    "hotkey.retry",
-                    json!({
-                        "worker_id": WORKER_POOL_ID,
-                        "released": released
-                    }),
-                );
-                terminal.write_line(&format!(
-                    "retry requested: released {released} stale lease(s)"
-                ))?;
-                redraw_dashboard = true;
-            }
-            Some(AppHotkeyAction::ReleaseLease) => {
-                let release_now = now_unix_millis()
-                    .saturating_add((cfg.scheduler.lease_timeout_seconds as i64 + 1) * 1000);
-                let released = store.recover_stale_leases(release_now)?;
-                append_run_log(
-                    "info",
-                    "hotkey.release_lease",
-                    json!({
-                        "worker_id": WORKER_POOL_ID,
-                        "released": released
-                    }),
-                );
-                terminal.write_line(&format!(
-                    "release-lease requested: released {released} lease(s)"
-                ))?;
-                redraw_dashboard = true;
-            }
-            Some(AppHotkeyAction::ParkEscalate) => {
-                let active = workers.iter().filter(|row| row.lease_held).count();
-                let task = store.upsert_task(crate::backlog_store::NewTask {
-                    kind: TaskKind::Maintenance,
-                    title: format!("Escalation requested for {active} active worker(s)"),
-                    details: "Operator requested park/escalate from TUI hotkey".to_string(),
-                    scope_key: "runtime".to_string(),
-                    rationale:
-                        "Operator requested immediate attention on active worker saturation."
-                            .to_string(),
-                    priority: Priority::P0,
-                    source: "tui_hotkey".to_string(),
-                    related_pr: None,
-                    related_branch: None,
-                })?;
-                terminal.write_line(&format!(
-                    "park/escalate requested: created P0 escalation task {}",
-                    short_task_id(&task.task_id)
-                ))?;
-                append_run_log(
-                    "warn",
-                    "hotkey.park_escalate",
-                    json!({
-                        "worker_id": WORKER_POOL_ID,
-                        "active_workers": active,
-                        "task_id": task.task_id
-                    }),
-                );
-                redraw_dashboard = true;
-            }
-            Some(AppHotkeyAction::ViewReport) => *report_visible = true,
-            Some(AppHotkeyAction::RegenerateReport) => {
-                let _ = refresh_quality_report(runtime, cfg, scope, true)?;
-                *report_visible = true;
-            }
-            Some(AppHotkeyAction::Back) => {
-                *report_visible = false;
-                redraw_dashboard = true;
-            }
-            None => {}
         }
     }
-    if *report_visible {
+    if *report_visible && redraw_report {
         let report_path = quality_report_path(cfg, scope);
-        let report = if runtime.file_system.exists(&report_path) {
-            runtime.file_system.read_to_string(&report_path)?
-        } else {
-            "report not found".to_string()
-        };
-        terminal.draw_report(&report_path.display().to_string(), &report)?;
+        let report = report_content.as_deref().unwrap_or("report not found");
+        terminal.draw_report(&report_path.display().to_string(), report)?;
     } else if redraw_dashboard {
         let snapshot = dashboard_snapshot(store)?;
         render(

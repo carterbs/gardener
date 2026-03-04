@@ -1,35 +1,36 @@
 ## Local Feedback Loop Assessment
 
-### Repo-Wide Score: 78
-Local validation is reproducible and well-wired (`.githooks/pre-commit` -> `scripts/run-validate.sh` -> CI-equivalent checks), with strong command documentation in `README.md` and `docs/conventions/workflow.md`. The loop is slowed by a single heavy “full gate” path (clippy + custom linters + coverage) and no first-class quick/watch workflow for narrow edits.
+### Repo-Wide Score: 80
+Local validation is well-defined and CI-reproducible: developers can run the same validation path as CI through `./scripts/run-validate.sh`, and the workflow is documented. The main drag is loop speed, because default commit-time validation includes full coverage gating (`cargo llvm-cov --all-targets`) and there is no first-class test/lint watch loop.
 
 ### Per-Domain Scores
-- runtime-orchestration: 76 - Strong Rust test surface (`tools/gardener/tests/*.rs`) and clear run commands, but iterative validation is expensive because canonical flow routes through full coverage gating.
-- developer-validation-tooling: 82 - Scripted guardrails are comprehensive and CI-parity is high, but there is no lightweight tier/task-runner UX and no validation-focused watch mode.
+- runtime-orchestration: 78 - Strong command parity and clear entrypoints for full validation, but edit-validate cycles are heavier than needed for small Rust changes.
+- runtime-validation: 86 - Extensive integration/lint/fixture tests under `tools/gardener/tests` with deterministic shell harnesses and clear remediation paths.
+- migration-wiring-fixtures: 75 - Fixture-backed script validation exists and is wired into the main validation flow, but this area lacks an independently documented quick-run command for tight iteration.
 
 ### Key Findings
-- CI checks are locally reproducible with the same command path (`./scripts/run-validate.sh`) used by both pre-commit and GitHub Actions.
-- Developer workflow documentation is explicit and actionable for full validation, including hook setup and remediation.
-- Fast inner-loop ergonomics are missing: no `Makefile`/`justfile`/root `package.json` scripts, no quick-mode validator, and no watch-mode for tests/lints.
+- CI and local checks are aligned: both workflows run the same validation scripts (`./scripts/run-validate.sh` and `./scripts/test-gardener-coverage.sh`).
+- Pre-commit is enforced and deterministic via [`.githooks/pre-commit`](/Users/bradcarter/Documents/Dev/gardener/.claude/worktrees/quality-grading-tui/.githooks/pre-commit), including rustfmt and full validation.
+- Fast-loop ergonomics are weaker: no root `Makefile`/`justfile`, no test/lint watch mode, and coverage runs in the default validation path.
 
 ### Deficiencies
 
-- **[MissingTooling | P1] No first-class quick task runner**
-  What: The repo has no `Makefile`/`justfile`/root `package.json` script targets; developers must remember long raw commands (`scripts/run-validate.sh`, `cargo test -p gardener --all-targets`, coverage variants).
-  Agent impact: Agents spend extra turns reconstructing commands and run fewer incremental checks, increasing regression escape risk between edits.
-  Fix: Add a `justfile` (or `Makefile`) with canonical targets like `quick`, `test`, `test-one`, `lint`, `validate`, `coverage`.
+- **[FeedbackLoopGap | P1] Heavy default validation path**
+  - What: [`.githooks/pre-commit`](/Users/bradcarter/Documents/Dev/gardener/.claude/worktrees/quality-grading-tui/.githooks/pre-commit) always calls [`scripts/run-validate.sh`](/Users/bradcarter/Documents/Dev/gardener/.claude/worktrees/quality-grading-tui/scripts/run-validate.sh), which ends with [`scripts/test-gardener-coverage.sh`](/Users/bradcarter/Documents/Dev/gardener/.claude/worktrees/quality-grading-tui/scripts/test-gardener-coverage.sh) (`cargo llvm-cov -p gardener --all-targets`).
+  - Agent impact: Small edits pay full coverage cost, slowing iteration and reducing the number of fix/verify cycles an autonomous agent can complete per session.
+  - Fix: Split into `validate-fast` (fmt+clippy+targeted tests) and `validate-full` (adds coverage), keep full in CI, and point pre-commit to fast by default.
 
-- **[FeedbackLoopGap | P1] Validation path is effectively full-gate only**
-  What: `scripts/run-validate.sh` always runs all custom linters plus coverage gate via `scripts/test-gardener-coverage.sh`; no documented/implemented `quick` mode for scoped edits.
-  Agent impact: High per-iteration cost discourages frequent local verification, causing larger risky change batches and slower autonomous convergence.
-  Fix: Introduce tiered modes (for example `scripts/run-validate.sh --quick|--full`) and document when each mode is acceptable; keep pre-commit/CI on `--full`.
+- **[MissingTooling | P2] No unified local task runner surface**
+  - What: There is no root `Makefile` or `justfile`; validation logic is spread across scripts and docs.
+  - Agent impact: Command discovery overhead increases and agents are more likely to run partial checks or wrong sequences.
+  - Fix: Add a thin `justfile`/`Makefile` with canonical targets (`test`, `lint`, `validate-fast`, `validate-full`, `coverage`, `hooks`) that delegate to existing scripts.
 
-- **[MissingDocumentation | P2] Fast-loop playbook is not explicit**
-  What: Docs strongly cover full validation but do not provide a concise “edit-type -> fastest safe command” matrix (e.g., Rust-only unit change vs script-only change).
-  Agent impact: Agents default to either over-testing (slow) or under-testing (missed regressions), depending on interpretation.
-  Fix: Add a short “Local Feedback Loop” section to `README.md` with command tiers and decision rules.
+- **[FeedbackLoopGap | P2] Missing first-class test/lint watch workflow**
+  - What: The repo has [`scripts/watch-otel-logs.sh`](/Users/bradcarter/Documents/Dev/gardener/.claude/worktrees/quality-grading-tui/scripts/watch-otel-logs.sh) for logs, but no documented watch loop for Rust tests/lints.
+  - Agent impact: Agents must rerun one-shot commands repeatedly, which lengthens turnaround during iterative debugging/refactoring.
+  - Fix: Add documented watch commands (for example `cargo watch -x 'test -p gardener --all-targets'` and `cargo watch -x 'clippy -p gardener --all-targets -- -D warnings'`) in README/workflow docs.
 
-- **[ConventionViolation | P2] Preflight requires extra tooling for all validations**
-  What: `scripts/run-validate.sh --preflight` hard-requires tools like `gh` even when a change may only need Rust/script checks.
-  Agent impact: Agents can be blocked from running local validation in minimally provisioned environments, increasing fallback-to-CI behavior.
-  Fix: Split preflight into required vs optional tools by stage, or gate `gh` only for checks that actually need it.
+- **[MissingDocumentation | P2] Fast-path validation commands are under-documented**
+  - What: [`README.md`](/Users/bradcarter/Documents/Dev/gardener/.claude/worktrees/quality-grading-tui/README.md) primarily documents full-suite commands, with limited guidance on targeted per-file/per-test validation for quick checks.
+  - Agent impact: Agents default to expensive full runs more often, increasing latency and compute waste.
+  - Fix: Document a “quick loop” section with concrete targeted commands (single test file, single test name, clippy on changed crate) and expected use cases.

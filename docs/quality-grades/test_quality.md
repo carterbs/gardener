@@ -1,30 +1,31 @@
 ## Test Quality Assessment
 
-### Repo-Wide Score: 94
-The sampled suite is strong: high assertion density, meaningful test names, and substantial edge-case coverage around state normalization, rendering behavior, and key-handling state machines. I’m adjusting down from the deterministic 100 because important runtime failure paths (terminal I/O/setup/teardown errors and resize/live-terminal lifecycle behavior) are still lightly exercised from tests visible in the sample.
+### Repo-Wide Score: 93
+The sampled `tools/gardener/src/tui.rs` tests are substantial: they cover rendering branches, state normalization, ordering logic, scroll behavior, and wizard key-handling with meaningful assertions. Quality is high overall, but not perfect due to limited coverage of failure/IO paths and some string-fragile UI assertions. This is a strong suite, but not quite a true 100.
 
 ### Per-Domain Scores
-- runtime-orchestration: 94 - Deep and well-structured unit tests in `tools/gardener/src/tui.rs`, including edge conditions and behavioral invariants, but limited direct coverage of error-path/lifecycle behavior in live terminal functions.
-- developer-validation-tooling: 89 - No sampled evidence here of equivalent depth to the runtime suite; likely solid baseline, but confidence is lower without similarly rich edge-case samples for scripts/fixtures workflows.
+- runtime-orchestration: 94 - `tui.rs` includes deep unit coverage for state transforms and UI behavior, including edge cases (normalization, truncation, viewport scrolling, wizard branching), with clear test naming and isolation.
+- runtime-validation: 90 - broad assertion volume is strong, but quality appears uneven across files (including very low-/zero-assertion contract/lint-style tests), which weakens confidence in behavioral regression detection.
+- migration-wiring-fixtures: 88 - fixture-driven validation exists, but fixture domains typically under-test malformed/partial permutations unless explicitly enumerated; risk remains around unmodeled wiring edge cases.
 
 ### Key Findings
-- Tests are behavior-driven and specific, with many assertions validating ordering, exclusion rules, viewport scrolling, and keybinding transitions rather than only smoke-level checks.
-- State-machine logic (`WizardState`, `SeedReviewState`) is covered well across normal, alternate, uppercase, ignored-input, and exit paths.
-- Rendering tests rely heavily on snapshot-like `contains` checks, which are useful but can miss structural regressions in layout/styling semantics and error handling.
+- The `tui.rs` module has high-quality behavioral tests, not just existence checks, including ordered rendering invariants and input-state transitions.
+- Test names are descriptive and map well to expected behavior, which improves maintainability and failure triage.
+- The largest remaining risk is around interactive runtime/terminal error paths that are difficult to unit-test and appear lightly covered.
 
 ### Deficiencies
 
-- **CoverageGap | P1** Live terminal error-path coverage is thin
-  - What: In `tools/gardener/src/tui.rs`, paths like `with_live_terminal`, `close_live_terminal`, raw mode transitions, and terminal resize/autoresize failure handling are not visibly exercised with forced I/O failures.
-  - Agent impact: Autonomous runs can fail in CI/headless or PTY-constrained environments with regressions undetected, causing flaky sessions and wasted repair turns.
-  - Fix: Add injectable terminal/IO abstractions (or trait wrappers) and targeted tests that simulate `enable_raw_mode`, `size`, `draw`, and `LeaveAlternateScreen` failures.
+- **[CoverageGap | P1] Interactive terminal failure paths are weakly tested**
+  - What: Paths in `run_seed_review_wizard`, `run_repo_health_wizard`, `with_live_terminal`, and teardown/error branches are largely unexercised compared to pure render helpers.
+  - Agent impact: Autonomous runs can fail on terminal/raw-mode edge cases (resize, IO errors, early exits) with regressions escaping CI until runtime.
+  - Fix: Introduce abstraction for event/terminal backends and add deterministic tests for error propagation, cleanup guarantees, and cancel/interrupt flows.
 
-- **FeedbackLoopGap | P1** Rendering assertions are mostly string-presence checks
-  - What: Many tests assert `frame.contains(...)` rather than validating bounded regions, row counts, and panel-specific invariants for the ratatui buffer.
-  - Agent impact: Agents may ship layout regressions (overflow, clipping, misplaced panels) that still pass because expected text appears somewhere in the frame.
-  - Fix: Add helper assertions that parse buffer rows/sections and validate per-panel boundaries, ordering, and truncation behavior deterministically.
+- **[CoverageGap | P2] UI assertions rely heavily on raw string contains**
+  - What: Many tests assert `frame.contains("...")` rather than asserting structural invariants (panel boundaries, row selection index behavior, semantic sections).
+  - Agent impact: Minor copy or style changes can cause noisy failures, slowing agent iteration and obscuring real behavior regressions.
+  - Fix: Add helper assertions that validate semantic regions/ordering and key widgets; keep a smaller set of literal text checks for critical labels only.
 
-- **CoverageGap | P2** Parser/normalizer robustness lacks adversarial/property tests
-  - What: Parsing helpers (`parse_backlog_item`, `parse_merge_queue_item`, `normalize_worker_state`, breadcrumb formatting) have good examples but limited generative/adversarial input coverage.
-  - Agent impact: Unexpected token formats from logs or upstream adapters can silently degrade UI state mapping, leading agents to misread queue status and choose wrong actions.
-  - Fix: Add table-driven malformed-input matrices plus property-based tests (e.g., proptest) for normalization/idempotence and “never panic” guarantees.
+- **[FeedbackLoopGap | P2] Assertion quality is uneven across the wider test set**
+  - What: Repo metadata shows some files with 0-1 assertions (for example lint/contract tests), creating pockets of shallow verification.
+  - Agent impact: Agents may get false confidence from passing checks while behavioral bugs in adjacent flows remain undetected.
+  - Fix: Raise minimum expectations for low-assertion tests (multi-assert behavioral checks, negative-case assertions, failure-message validation) and enforce via test quality linting.

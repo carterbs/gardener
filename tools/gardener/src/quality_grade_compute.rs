@@ -27,6 +27,7 @@ pub fn compute_repo_grade(repo: &RepoWideAssessment) -> (f64, Grade) {
     (composite, grade)
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct GradeReport {
     pub domain_grades: Vec<(DomainAssessment, f64, Grade)>,
     pub repo_grade: (f64, Grade),

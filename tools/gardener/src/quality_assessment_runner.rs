@@ -5,6 +5,7 @@ use crate::logging::append_run_log;
 use crate::output_envelope::{END_MARKER, START_MARKER};
 use crate::priority::Priority;
 use crate::protocol::AgentTerminal;
+use crate::protocol::{summarize_agent_event, AgentEvent};
 use crate::quality_assessment_types::{
     AssessmentPayload, DeficiencyCategory, DomainAssessment, DomainScores, RepoWideAssessment,
     StructuralDeficiency,
@@ -22,6 +23,21 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// Progress events emitted during quality assessment.
+#[derive(Debug, Clone)]
+pub enum QualityProgressEvent {
+    /// A named phase has started (e.g. "evidence-collection", "domain-discovery").
+    PhaseStarted(String),
+    /// An agent emitted an update (agent_name, summary).
+    AgentUpdate { agent_name: String, summary: String },
+    /// An agent completed successfully.
+    AgentCompleted(String),
+    /// An agent failed.
+    AgentFailed { agent_name: String, error: String },
+    /// A named phase completed.
+    PhaseCompleted(String),
+}
 
 pub struct QualityAssessmentConfig {
     pub backend: AgentKind,
@@ -53,6 +69,7 @@ pub fn run_assessment(
     factory: Option<&AdapterFactory>,
     process_runner: &dyn ProcessRunner,
     config: &QualityAssessmentConfig,
+    on_progress: Option<&(dyn Fn(QualityProgressEvent) + Send + Sync)>,
 ) -> Result<(AssessmentPayload, EvidenceBundle, bool), GardenerError> {
     append_run_log(
         "info",
@@ -66,11 +83,35 @@ pub fn run_assessment(
     );
 
     // Step 0: Collect evidence bundle (deterministic pre-computation)
+    if let Some(cb) = on_progress {
+        cb(QualityProgressEvent::PhaseStarted(
+            "evidence-collection".to_string(),
+        ));
+    }
     let bundle = collect_evidence_bundle(repo_path)?;
+    if let Some(cb) = on_progress {
+        cb(QualityProgressEvent::AgentUpdate {
+            agent_name: "evidence".to_string(),
+            summary: format!(
+                "Collected {} source files, {} test files",
+                bundle.tree.total_source_files, bundle.tree.total_test_files
+            ),
+        });
+        cb(QualityProgressEvent::PhaseCompleted(
+            "evidence-collection".to_string(),
+        ));
+    }
 
     // Route to multi-agent pipeline or deterministic fallback
     if let Some(factory) = factory {
-        match run_multi_agent_assessment(repo_path, factory, process_runner, config, &bundle) {
+        match run_multi_agent_assessment(
+            repo_path,
+            factory,
+            process_runner,
+            config,
+            &bundle,
+            on_progress,
+        ) {
             Ok(payload) => {
                 append_run_log(
                     "info",
@@ -114,6 +155,7 @@ fn run_multi_agent_assessment(
     process_runner: &dyn ProcessRunner,
     config: &QualityAssessmentConfig,
     bundle: &EvidenceBundle,
+    on_progress: Option<&(dyn Fn(QualityProgressEvent) + Send + Sync)>,
 ) -> Result<AssessmentPayload, GardenerError> {
     let start_time = std::time::Instant::now();
 
@@ -169,6 +211,11 @@ fn run_multi_agent_assessment(
     );
 
     // --- Step 1: Domain discovery agent ---
+    if let Some(cb) = on_progress {
+        cb(QualityProgressEvent::PhaseStarted(
+            "domain-discovery".to_string(),
+        ));
+    }
     let domain_prompt = quality_dimension_prompts::build_domain_discovery_prompt(&shared_context);
     let domain_output = execute_agent(
         factory,
@@ -177,7 +224,13 @@ fn run_multi_agent_assessment(
         repo_path,
         "domain-discovery",
         &domain_prompt,
+        on_progress,
     )?;
+    if let Some(cb) = on_progress {
+        cb(QualityProgressEvent::AgentCompleted(
+            "domain-discovery".to_string(),
+        ));
+    }
     let domain_list = parse_domain_list(&domain_output);
 
     let discovery_elapsed = start_time.elapsed();
@@ -303,6 +356,9 @@ fn run_multi_agent_assessment(
                         "quality_assessment.dimension_started",
                         json!({ "dimension": dim }),
                     );
+                    if let Some(cb) = on_progress {
+                        cb(QualityProgressEvent::PhaseStarted(dim.to_string()));
+                    }
 
                     match execute_agent(
                         factory,
@@ -311,6 +367,7 @@ fn run_multi_agent_assessment(
                         repo_path,
                         &format!("quality-{dim}"),
                         prompt,
+                        on_progress,
                     ) {
                         Ok(output) => {
                             // Write report to cache
@@ -331,6 +388,9 @@ fn run_multi_agent_assessment(
                                     "output_len": output.len(),
                                 }),
                             );
+                            if let Some(cb) = on_progress {
+                                cb(QualityProgressEvent::AgentCompleted(dim.to_string()));
+                            }
                             reports
                                 .lock()
                                 .expect("reports mutex poisoned")
@@ -345,6 +405,12 @@ fn run_multi_agent_assessment(
                                     "error": e.to_string(),
                                 }),
                             );
+                            if let Some(cb) = on_progress {
+                                cb(QualityProgressEvent::AgentFailed {
+                                    agent_name: dim.to_string(),
+                                    error: e.to_string(),
+                                });
+                            }
                             errors
                                 .lock()
                                 .expect("errors mutex poisoned")
@@ -380,6 +446,11 @@ fn run_multi_agent_assessment(
     );
 
     // --- Step 3: Synthesizer agent ---
+    if let Some(cb) = on_progress {
+        cb(QualityProgressEvent::PhaseStarted(
+            "synthesizer".to_string(),
+        ));
+    }
     let report_refs: Vec<(&str, &str)> = reports
         .iter()
         .map(|(name, content)| (name.as_str(), content.as_str()))
@@ -393,13 +464,20 @@ fn run_multi_agent_assessment(
         repo_path,
         "quality-synthesizer",
         &synthesizer_prompt,
+        on_progress,
     )?;
+    if let Some(cb) = on_progress {
+        cb(QualityProgressEvent::AgentCompleted(
+            "synthesizer".to_string(),
+        ));
+    }
 
     // Parse and validate the final payload
     let payload = parse_assessment_payload(&synthesizer_output)
         .map_err(|e| GardenerError::Process(format!("Synthesizer output parse failed: {e}")))?;
-    let validated = validate_payload(payload)
-        .map_err(|e| GardenerError::Process(format!("Synthesizer output validation failed: {e}")))?;
+    let validated = validate_payload(payload).map_err(|e| {
+        GardenerError::Process(format!("Synthesizer output validation failed: {e}"))
+    })?;
 
     let total_elapsed = start_time.elapsed();
     append_run_log(
@@ -422,6 +500,7 @@ fn execute_agent(
     repo_path: &Path,
     agent_id: &str,
     prompt: &str,
+    on_progress: Option<&(dyn Fn(QualityProgressEvent) + Send + Sync)>,
 ) -> Result<String, GardenerError> {
     let adapter = factory.get(config.backend).ok_or_else(|| {
         GardenerError::Process(format!(
@@ -457,7 +536,22 @@ fn execute_agent(
         json!({ "agent_id": agent_id, "backend": format!("{:?}", config.backend) }),
     );
 
-    let result = adapter.execute(process_runner, &context, prompt, None)?;
+    // Derive the agent display name from agent_id (strip "quality-" prefix if present)
+    let display_name = agent_id.strip_prefix("quality-").unwrap_or(agent_id);
+
+    let result = if let Some(cb) = on_progress {
+        let mut on_event = |event: &AgentEvent| {
+            if let Some(summary) = summarize_agent_event(event) {
+                cb(QualityProgressEvent::AgentUpdate {
+                    agent_name: display_name.to_string(),
+                    summary,
+                });
+            }
+        };
+        adapter.execute(process_runner, &context, prompt, Some(&mut on_event))?
+    } else {
+        adapter.execute(process_runner, &context, prompt, None)?
+    };
 
     if result.terminal == AgentTerminal::Failure {
         return Err(GardenerError::Process(format!(
@@ -600,10 +694,7 @@ fn format_complexity_metrics(
 
 fn format_debt_summary(bundle: &EvidenceBundle) -> String {
     let mut out = String::new();
-    out.push_str(&format!(
-        "Total debt markers: {}\n",
-        bundle.debt.total
-    ));
+    out.push_str(&format!("Total debt markers: {}\n", bundle.debt.total));
 
     // Count by keyword type
     let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
@@ -698,7 +789,10 @@ fn format_coverage_summary(bundle: &EvidenceBundle) -> String {
         bundle.coverage.coverage_available
     ));
     if let Some(ref summary) = bundle.coverage.summary {
-        out.push_str(&format!("Overall coverage: {:.1}%\n", summary.coverage_percent));
+        out.push_str(&format!(
+            "Overall coverage: {:.1}%\n",
+            summary.coverage_percent
+        ));
     }
     out.push_str(&format!(
         "Coverage thresholds detected: {}\n",
@@ -789,8 +883,7 @@ fn parse_assessment_payload(raw_text: &str) -> Result<AssessmentPayload, String>
     let body_start = start + START_MARKER.len();
     let body = raw_text[body_start..end].trim();
 
-    serde_json::from_str::<AssessmentPayload>(body)
-        .map_err(|e| format!("JSON parse error: {e}"))
+    serde_json::from_str::<AssessmentPayload>(body).map_err(|e| format!("JSON parse error: {e}"))
 }
 
 /// Validate and clamp an AssessmentPayload. Fixes out-of-range scores, fills defaults.
@@ -944,8 +1037,7 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
         + (if has_ci { 30 } else { 0 });
 
     let has_tests = bundle.tree.total_test_files > 0;
-    let local_feedback_loop =
-        (if has_ci { 50u8 } else { 0 }) + (if has_tests { 50 } else { 0 });
+    let local_feedback_loop = (if has_ci { 50u8 } else { 0 }) + (if has_tests { 50 } else { 0 });
 
     let coverage_available = bundle.coverage.coverage_available;
     let has_coverage_thresholds = bundle.ci_lint.coverage_thresholds.detected;
@@ -1041,12 +1133,7 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
     };
 
     // Languages detected
-    let languages_detected: Vec<String> = bundle
-        .tree
-        .language_summary
-        .keys()
-        .cloned()
-        .collect();
+    let languages_detected: Vec<String> = bundle.tree.language_summary.keys().cloned().collect();
 
     // Repo-wide rationale
     let mut repo_wide_rationale = BTreeMap::new();
@@ -1069,7 +1156,11 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
         format!(
             "Linter: {}. Pre-commit hooks: {}. CI: {}.",
             if has_linter { "detected" } else { "not found" },
-            if has_pre_commit { "detected" } else { "not found" },
+            if has_pre_commit {
+                "detected"
+            } else {
+                "not found"
+            },
             if has_ci { "detected" } else { "not found" },
         ),
     );
@@ -1085,16 +1176,21 @@ pub fn deterministic_fallback(bundle: &EvidenceBundle) -> AssessmentPayload {
         "coverage_infrastructure".to_string(),
         format!(
             "Coverage tooling: {}. Coverage thresholds: {}.",
-            if coverage_available { "available" } else { "not detected" },
-            if has_coverage_thresholds { "configured" } else { "not configured" },
+            if coverage_available {
+                "available"
+            } else {
+                "not detected"
+            },
+            if has_coverage_thresholds {
+                "configured"
+            } else {
+                "not configured"
+            },
         ),
     );
     repo_wide_rationale.insert(
         "documentation_quality".to_string(),
-        format!(
-            "{} documentation file(s) found.",
-            total_doc_files,
-        ),
+        format!("{} documentation file(s) found.", total_doc_files,),
     );
 
     AssessmentPayload {
@@ -1142,17 +1238,14 @@ fn discover_domains(bundle: &EvidenceBundle) -> BTreeMap<String, Vec<String>> {
 
         // Process sub-packages first
         for manifest in sub_manifests.iter().chain(root_manifests.iter()) {
-            let domain_name = manifest
-                .name
-                .clone()
-                .unwrap_or_else(|| {
-                    let p = Path::new(&manifest.path);
-                    p.parent()
-                        .and_then(|pp| pp.to_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("root")
-                        .to_string()
-                });
+            let domain_name = manifest.name.clone().unwrap_or_else(|| {
+                let p = Path::new(&manifest.path);
+                p.parent()
+                    .and_then(|pp| pp.to_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("root")
+                    .to_string()
+            });
 
             let pkg_dir = Path::new(&manifest.path)
                 .parent()
@@ -1168,8 +1261,7 @@ fn discover_domains(bundle: &EvidenceBundle) -> BTreeMap<String, Vec<String>> {
                     true
                 } else {
                     // Use boundary-aware check: file must be directly under pkg_dir/
-                    file_path.starts_with(&format!("{pkg_dir}/"))
-                        || file_path == pkg_dir
+                    file_path.starts_with(&format!("{pkg_dir}/")) || file_path == pkg_dir
                 };
                 if matches {
                     domain_map
@@ -1455,7 +1547,7 @@ Some text after"#;
         let runner = crate::runtime::FakeProcessRunner::default();
 
         let (payload, bundle, _agent_used) =
-            run_assessment(dir.path(), None, &runner, &config).expect("should succeed");
+            run_assessment(dir.path(), None, &runner, &config, None).expect("should succeed");
 
         assert!(!payload.domains.is_empty());
         assert!(!bundle.tree.directories.is_empty());

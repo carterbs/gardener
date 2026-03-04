@@ -6,7 +6,6 @@ This directory is the canonical index for agent-oriented repository navigation. 
 
 - [`AGENTS.md`](../AGENTS.md)
 - [`README.md`](../README.md)
-- [Quality Grades](./quality-grades.md)
 
 ## Second: execution and workflow
 

@@ -1,35 +1,31 @@
 ## Agent Steering Assessment
 
-### Repo-Wide Score: 56
-The steering docs are concise and high-signal, with concrete runtime entrypoint commands and a useful cross-tool pointer from `CLAUDE.md` to `AGENTS.md`. However, they are under-scoped: they lack architecture mapping, explicit test/verification commands, and domain-specific guidance for `scripts/`, which limits autonomous execution quality.
+### Repo-Wide Score: 61
+The steering docs are very concise and contain concrete runtime/commit/worktree directives, which is high-signal. However, they miss two major effectiveness drivers: architecture pointers and explicit test/validation commands. Coverage is heavily skewed to runtime execution and does not guide agents through validation or fixture domains.
 
 ### Per-Domain Scores
-- runtime-orchestration: 64 - `AGENTS.md` gives specific Rust runtime invocation commands and key workflow constraints (worktree + commit policy), but omits module boundaries, test commands, and quality-grading/reconciliation navigation pointers.
-- developer-validation-tooling: 34 - No steering content explains how to run or validate `scripts/fixtures/check-migrations-wired` or related maintenance checks, so agents must discover tooling by trial-and-error.
+- runtime-orchestration: 78 - `AGENTS.md` gives clear Rust-first direction and exact runtime commands, plus strong commit/worktree constraints.
+- runtime-validation: 38 - No explicit test commands (`cargo test` targets, integration/contract/lint entrypoints) or guidance on when/how to run validation suites.
+- migration-wiring-fixtures: 27 - No mention of fixture usage, migration wiring checks, or commands for verifying pass/fail fixture behavior.
 
 ### Key Findings
-- Strong specificity where present: concrete `cargo run -p gardener --bin gardener -- ...` commands are directly actionable.
-- Excellent signal-to-noise ratio: 21 total lines across both files, no boilerplate bloat.
-- Major coverage gap: no architecture pointers or explicit test/build/check commands for either domain.
+- Strong specificity for runtime execution: exact `cargo run -p gardener --bin gardener -- ...` commands reduce ambiguity.
+- Excellent signal-to-noise ratio (21 total lines across both files), with minimal boilerplate and clean progressive disclosure (`CLAUDE.md` -> `AGENTS.md`).
+- Critical coverage gaps: missing architecture map and test/verification commands substantially limit autonomous agent reliability.
 
 ### Deficiencies
 
-- **MissingTooling | P1** Missing explicit test/verification command matrix
-  - What: `AGENTS.md` includes runtime run commands but no exact commands for unit tests, integration tests, linting, formatting, or migration-wiring checks (e.g., `cargo test -p gardener`, targeted test suites under `tools/gardener/tests`, or script validation entrypoints).
-  - Agent impact: agents cannot reliably choose the fastest valid verification loop, causing extra discovery turns, skipped checks, or incomplete regression detection.
-  - Fix: add a “Verification Commands” section with exact copy/paste commands for build, test (unit/integration), lint/format, and script/fixture checks.
+- **MissingTooling | P1** Missing test and verification command matrix
+  - What: `AGENTS.md` defines run commands but no concrete test/build/lint commands for `tools/gardener/tests/` or repo-level validation flows.
+  - Agent impact: Agents guess validation steps, causing missed regressions, extra turns, or incorrect “done” states after code changes.
+  - Fix: Add a compact “Verification” section with exact commands (unit, integration, fixture checks, lint/format) and when each is required.
 
-- **CoverageGap | P1** No domain-level guidance for `scripts/` validation tooling
-  - What: steering docs do not document purpose, entrypoints, or expected usage for `scripts/fixtures/check-migrations-wired/` and related guardrail automation.
-  - Agent impact: maintenance/validation tasks in `developer-validation-tooling` become guesswork, increasing risk of missed migration wiring regressions and failed CI parity.
-  - Fix: add a short `scripts/` subsection in `AGENTS.md` (or `scripts/AGENTS.md`) listing command entrypoints, expected inputs/outputs, and when to run them.
+- **CoverageGap | P1** No architecture pointers for core modules
+  - What: Steering docs do not map key runtime areas in `tools/gardener/src/` (orchestration, TUI, worker lifecycle, git/worktree ops, quality pipeline).
+  - Agent impact: Slower navigation and higher risk of editing wrong components, increasing failed attempts and patch churn.
+  - Fix: Add a short “Architecture Pointers” section listing major modules/paths and their responsibilities (1 line each).
 
-- **MissingDocumentation | P2** Architecture pointers are absent
-  - What: no map of key modules in `tools/gardener/src` (orchestration phases, adapters, grading logic, CLI boundaries) and where tests live.
-  - Agent impact: slower onboarding and more navigation errors; agents spend turns searching instead of making correct localized edits.
-  - Fix: add a compact “Architecture Pointers” block naming 5-10 high-value paths (runtime core, grading, adapters, CLI, integration tests) with one-line purpose each.
-
-- **ConventionViolation | P2** Tool-specific duplication risks divergence
-  - What: `CLAUDE.md` only says “read AGENTS.md”; this is good for progressive disclosure, but no explicit statement that `AGENTS.md` is canonical for all agents (Codex/Cursor/etc.) and no sync policy.
-  - Agent impact: future tool-specific files may drift, causing inconsistent behavior across agents and conflicting instructions.
-  - Fix: add one line in both files declaring `AGENTS.md` as canonical cross-tool steering and requiring any tool-specific file to remain a thin pointer.
+- **CoverageGap | P2** Fixture/migration domain not represented
+  - What: No guidance references `scripts/fixtures/check-migrations-wired/` or how fixture-driven migration wiring validation is expected to run.
+  - Agent impact: Agents underuse fixture checks and can miss migration wiring regressions tied to backlog-store behavior.
+  - Fix: Add a “Fixtures” subsection with fixture path purpose and exact command(s) to run pass/fail wiring checks.

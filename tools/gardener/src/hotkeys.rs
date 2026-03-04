@@ -55,14 +55,22 @@ pub const OPERATOR_BINDINGS: [HotkeyBinding; 3] = [
     },
 ];
 
-pub const REPORT_BINDINGS: [HotkeyBinding; 2] = [
+pub const REPORT_BINDINGS: [HotkeyBinding; 4] = [
+    HotkeyBinding {
+        key: 'j',
+        action: "scroll down",
+    },
+    HotkeyBinding {
+        key: 'k',
+        action: "scroll up",
+    },
     HotkeyBinding {
         key: 'b',
         action: "back",
     },
     HotkeyBinding {
         key: 'g',
-        action: "regenerate report",
+        action: "regenerate",
     },
 ];
 
@@ -89,8 +97,8 @@ pub fn action_for_key(key: char) -> Option<HotkeyAction> {
 pub fn action_for_key_with_mode(key: char, operator_hotkeys: bool) -> Option<HotkeyAction> {
     match key {
         'q' => Some(HotkeyAction::Quit),
-        'j' => Some(HotkeyAction::ScrollDown),
-        'k' => Some(HotkeyAction::ScrollUp),
+        'j' | '\x1f' => Some(HotkeyAction::ScrollDown),
+        'k' | '\x1e' => Some(HotkeyAction::ScrollUp),
         'r' if operator_hotkeys => Some(HotkeyAction::Retry),
         'l' if operator_hotkeys => Some(HotkeyAction::ReleaseLease),
         'p' if operator_hotkeys => Some(HotkeyAction::ParkEscalate),

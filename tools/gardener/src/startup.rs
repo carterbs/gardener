@@ -5,18 +5,20 @@ use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::pr_audit::reconcile_open_prs;
 use crate::priority::Priority;
-use crate::protocol::{AgentEvent, AgentEventKind};
-use crate::quality_assessment_runner::QualityAssessmentConfig;
-use crate::quality_grades::render_quality_grade_document;
+use crate::protocol::{summarize_agent_event, AgentEvent};
+use crate::quality_assessment_runner::{QualityAssessmentConfig, QualityProgressEvent};
+use crate::quality_grade_compute::GradeReport;
 use crate::quality_pipeline::run_quality_pipeline;
 use crate::repo_intelligence::read_profile;
 use crate::runtime::{Clock, FileSystem, ProcessRequest, ProcessRunner, ProductionRuntime};
 use crate::seed_runner::SeedTask;
 use crate::seeding::{
-    recommend_seed_tasks_with_events, refine_seed_tasks_with_events, seed_backlog_if_needed_with_events,
+    recommend_seed_tasks_with_events, refine_seed_tasks_with_events,
+    seed_backlog_if_needed_with_events,
 };
 use crate::task_identity::TaskKind;
 use crate::triage::profile_path;
+use crate::tui::now_hhmmss;
 use crate::types::RuntimeScope;
 use crate::worktree_audit::reconcile_worktrees;
 use serde_json::json;
@@ -64,11 +66,13 @@ pub fn refresh_quality_report(
     cfg: &AppConfig,
     scope: &RuntimeScope,
     force: bool,
-) -> Result<(PathBuf, bool), GardenerError> {
+) -> Result<(PathBuf, bool, GradeReport), GardenerError> {
     let quality_path = quality_report_path(cfg, scope);
     let stamp_path = quality_stamp_path(&quality_path);
+    let cache_path = grade_report_cache_path(&quality_path);
     let should_regen = force
         || !runtime.file_system.exists(&quality_path)
+        || !runtime.file_system.exists(&cache_path)
         || report_stamp_is_stale(runtime, cfg, &stamp_path, scope)?;
 
     append_run_log(
@@ -84,35 +88,17 @@ pub fn refresh_quality_report(
     if should_regen {
         let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
 
-        // Try the new pipeline first; fall back to legacy profile-based rendering
-        let quality_doc = match try_pipeline_quality_report(cfg, repo_root, runtime) {
-            Ok(doc) => {
-                append_run_log(
-                    "info",
-                    "startup.quality_report.pipeline_succeeded",
-                    json!({ "quality_path": quality_path.display().to_string() }),
-                );
-                doc
-            }
-            Err(pipeline_err) => {
-                append_run_log(
-                    "warn",
-                    "startup.quality_report.pipeline_fallback",
-                    json!({
-                        "error": pipeline_err.to_string(),
-                        "reason": "falling back to legacy profile-based renderer",
-                    }),
-                );
-                // Legacy path: read profile and render via the old renderer
-                let profile_loc = profile_path(scope, cfg);
-                let profile = read_profile(runtime.file_system.as_ref(), &profile_loc)?;
-                render_quality_grade_document(
-                    &profile_loc.display().to_string(),
-                    &profile,
-                    repo_root,
-                )
-            }
+        let (quality_doc, grade_report) = if runtime.terminal.stdin_is_tty() {
+            run_quality_with_heartbeat(runtime, cfg, repo_root)?
+        } else {
+            try_pipeline_quality_report(cfg, repo_root, runtime, None)?
         };
+
+        append_run_log(
+            "info",
+            "startup.quality_report.pipeline_succeeded",
+            json!({ "quality_path": quality_path.display().to_string() }),
+        );
 
         if let Some(parent) = quality_path.parent() {
             runtime.file_system.create_dir_all(parent)?;
@@ -129,6 +115,13 @@ pub fn refresh_quality_report(
         runtime
             .file_system
             .write_string(&stamp_path, &now.to_string())?;
+        // Persist the GradeReport as a sidecar JSON cache for future TTL-hit runs.
+        let grade_cache_json = serde_json::to_string(&grade_report).map_err(|e| {
+            GardenerError::Process(format!("failed to serialize grade report: {e}"))
+        })?;
+        runtime
+            .file_system
+            .write_string(&cache_path, &grade_cache_json)?;
         append_run_log(
             "info",
             "startup.quality_report.refreshed",
@@ -137,8 +130,22 @@ pub fn refresh_quality_report(
                 "stamp_ts": now,
             }),
         );
+        return Ok((quality_path, true, grade_report));
     }
-    Ok((quality_path, should_regen))
+
+    // TTL hit: load the cached GradeReport from the sidecar JSON file.
+    let cache_path = grade_report_cache_path(&quality_path);
+    let grade_report = runtime
+        .file_system
+        .read_to_string(&cache_path)
+        .ok()
+        .and_then(|json| serde_json::from_str::<GradeReport>(&json).ok())
+        .ok_or_else(|| {
+            GardenerError::Process(
+                "quality report exists but grade-report cache is missing or corrupt; re-run with --force to regenerate".to_string(),
+            )
+        })?;
+    Ok((quality_path, false, grade_report))
 }
 
 /// Attempt to generate a quality report using the new pipeline.
@@ -146,7 +153,8 @@ fn try_pipeline_quality_report(
     cfg: &AppConfig,
     repo_root: &Path,
     runtime: &ProductionRuntime,
-) -> Result<String, GardenerError> {
+    on_progress: Option<&(dyn Fn(QualityProgressEvent) + Send + Sync)>,
+) -> Result<(String, GradeReport), GardenerError> {
     let backend = cfg.quality.backend.unwrap_or(cfg.seeding.backend);
     let model = cfg
         .quality
@@ -161,15 +169,16 @@ fn try_pipeline_quality_report(
     };
 
     let factory = AdapterFactory::with_defaults();
-    let (doc, _report) = run_quality_pipeline(
+    let (doc, report) = run_quality_pipeline(
         repo_root,
         Some(&factory),
         runtime.process_runner.as_ref(),
         None, // no store — backlog emission is handled separately during seeding
         &assessment_config,
+        on_progress,
     )?;
 
-    Ok(doc)
+    Ok((doc, report))
 }
 
 pub fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> PathBuf {
@@ -347,7 +356,8 @@ where
         cfg.startup.validation_command = Some(profile.user_validated.validation_command.clone());
     }
 
-    let (quality_path, quality_written) = refresh_quality_report(runtime, cfg, scope, false)?;
+    let (quality_path, quality_written, grade_report) =
+        refresh_quality_report(runtime, cfg, scope, false)?;
     let quality_doc = runtime.file_system.read_to_string(&quality_path)?;
 
     let wt = reconcile_worktrees();
@@ -507,6 +517,7 @@ where
                 &backlog_snapshot,
                 &rejected_tasks_fmt,
                 &mut progress,
+                Some(&grade_report),
             )?;
             print_seed_recommendations(runtime, &recommendations)?;
             progress(&format!(
@@ -530,6 +541,7 @@ where
                 &backlog_snapshot,
                 &rejected_tasks_fmt,
                 &mut progress,
+                Some(&grade_report),
             ) {
                 append_run_log(
                     "warn",
@@ -718,6 +730,102 @@ fn should_seed_backlog(
     run_seeding && !test_mode && (existing_backlog_count == 0 || force_seed_backlog)
 }
 
+/// Run the quality pipeline in a background thread with heartbeat TUI updates.
+fn run_quality_with_heartbeat(
+    runtime: &ProductionRuntime,
+    cfg: &AppConfig,
+    repo_root: &Path,
+) -> Result<(String, GradeReport), GardenerError> {
+    append_run_log(
+        "debug",
+        "startup.quality_report.heartbeat.started",
+        json!({
+            "repo_root": repo_root.display().to_string(),
+        }),
+    );
+
+    enum QualityMessage {
+        Progress(QualityProgressEvent),
+        Done(Result<(String, GradeReport), GardenerError>),
+    }
+
+    let (tx, rx) = mpsc::channel::<QualityMessage>();
+
+    std::thread::scope(|thread_scope| {
+        let tx_clone = tx.clone();
+        thread_scope.spawn(move || {
+            let on_progress = |event: QualityProgressEvent| {
+                let _ = tx_clone.send(QualityMessage::Progress(event));
+            };
+            let result = try_pipeline_quality_report(cfg, repo_root, runtime, Some(&on_progress));
+            let _ = tx.send(QualityMessage::Done(result));
+        });
+
+        let is_tty = runtime.terminal.stdin_is_tty();
+
+        // Show dimension intro screen while agents start up
+        if is_tty {
+            runtime.terminal.draw_quality_intro()?;
+        }
+
+        let mut activity_lines: Vec<String> = Vec::new();
+        let max_activity_lines = {
+            let (_, h) = runtime.terminal.draw_dimensions();
+            (h as usize).saturating_sub(5).max(20)
+        };
+        loop {
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(QualityMessage::Progress(event)) => {
+                    let ts = now_hhmmss();
+                    let summary = summarize_quality_event(&event);
+                    let line = format!("{ts} {summary}");
+                    activity_lines.push(line);
+                    if activity_lines.len() > max_activity_lines {
+                        activity_lines.drain(..activity_lines.len() - max_activity_lines);
+                    }
+                    if is_tty {
+                        runtime.terminal.draw_quality_grading(&activity_lines)?;
+                    } else {
+                        runtime
+                            .terminal
+                            .write_line(&format!("startup quality grading: {summary}"))?;
+                    }
+                }
+                Ok(QualityMessage::Done(result)) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Re-render current state to keep terminal alive; no spam lines
+                    if is_tty {
+                        runtime.terminal.draw_quality_grading(&activity_lines)?;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(GardenerError::Process(
+                        "quality grading worker channel disconnected".to_string(),
+                    ));
+                }
+            }
+        }
+    })
+}
+
+/// Format a QualityProgressEvent into a human-readable string.
+fn summarize_quality_event(event: &QualityProgressEvent) -> String {
+    match event {
+        QualityProgressEvent::PhaseStarted(name) => format!("[{name}] Started"),
+        QualityProgressEvent::AgentUpdate {
+            agent_name,
+            summary,
+        } => {
+            format!("[{agent_name}] {summary}")
+        }
+        QualityProgressEvent::AgentCompleted(name) => format!("[{name}] Completed"),
+        QualityProgressEvent::AgentFailed { agent_name, error } => {
+            format!("[{agent_name}] FAILED: {error}")
+        }
+        QualityProgressEvent::PhaseCompleted(name) => format!("[{name}] Completed"),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_seed_with_heartbeat<F>(
     runtime: &ProductionRuntime,
@@ -728,6 +836,7 @@ fn run_seed_with_heartbeat<F>(
     backlog_snapshot: &str,
     rejected_tasks: &str,
     progress: &mut F,
+    grade_report: Option<&GradeReport>,
 ) -> Result<(), GardenerError>
 where
     F: FnMut(&str) -> Result<(), GardenerError>,
@@ -749,7 +858,7 @@ where
     std::thread::scope(|thread_scope| {
         thread_scope.spawn(|| {
             let mut on_event = |event: &AgentEvent| {
-                if let Some(summary) = summarize_seed_agent_event(event) {
+                if let Some(summary) = summarize_agent_event(event) {
                     let _ = tx.send(SeedProgressMessage::AgentUpdate(summary));
                 }
             };
@@ -762,6 +871,7 @@ where
                 backlog_snapshot,
                 rejected_tasks,
                 Some(&mut on_event),
+                grade_report,
             );
             let _ = tx.send(SeedProgressMessage::Done(result));
         });
@@ -773,13 +883,13 @@ where
             // reserve ~5 rows for header/footer/border chrome, fill the rest
             (h as usize).saturating_sub(5).max(20)
         };
-        let mut waited_seconds = 0u64;
         let mut last_event: Option<String> = None;
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
-                        activity_lines.push(update.clone());
+                        let line = format!("{} {update}", now_hhmmss());
+                        activity_lines.push(line);
                         if activity_lines.len() > max_activity_lines {
                             activity_lines.drain(..activity_lines.len() - max_activity_lines);
                         }
@@ -796,27 +906,9 @@ where
                 }
                 Ok(SeedProgressMessage::Done(result)) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    waited_seconds = waited_seconds.saturating_add(10);
-                    let msg = format!(
-                        "Backlog seeding agent still running ({waited_seconds}s elapsed); waiting for model output"
-                    );
-                    activity_lines.push(msg.clone());
-                    if activity_lines.len() > max_activity_lines {
-                        activity_lines.drain(..activity_lines.len() - max_activity_lines);
-                    }
+                    // Re-render current state to keep terminal alive; no spam lines
                     if is_tty {
                         runtime.terminal.draw_seeding(&activity_lines)?;
-                    } else {
-                        runtime.terminal.write_line(&format!(
-                            "startup backlog seeding: still running, elapsed={}s",
-                            waited_seconds
-                        ))?;
-                    }
-                    progress(&msg)?;
-                    if waited_seconds == 60 {
-                        progress(
-                            "Backlog seeding is taking longer than expected; this can happen during first-run auth or slow model/network response",
-                        )?;
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -839,6 +931,7 @@ fn run_seed_recommendations_with_heartbeat<F>(
     backlog_snapshot: &str,
     rejected_tasks: &str,
     progress: &mut F,
+    grade_report: Option<&GradeReport>,
 ) -> Result<Vec<SeedTask>, GardenerError>
 where
     F: FnMut(&str) -> Result<(), GardenerError>,
@@ -860,7 +953,7 @@ where
     std::thread::scope(|thread_scope| {
         thread_scope.spawn(|| {
             let mut on_event = |event: &AgentEvent| {
-                if let Some(summary) = summarize_seed_agent_event(event) {
+                if let Some(summary) = summarize_agent_event(event) {
                     let _ = tx.send(SeedProgressMessage::AgentUpdate(summary));
                 }
             };
@@ -873,6 +966,7 @@ where
                 backlog_snapshot,
                 rejected_tasks,
                 Some(&mut on_event),
+                grade_report,
             );
             let _ = tx.send(SeedProgressMessage::Done(result));
         });
@@ -883,13 +977,13 @@ where
             let (_, h) = runtime.terminal.draw_dimensions();
             (h as usize).saturating_sub(5).max(20)
         };
-        let mut waited_seconds = 0u64;
         let mut last_event: Option<String> = None;
         loop {
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
-                        activity_lines.push(update.clone());
+                        let line = format!("{} {update}", now_hhmmss());
+                        activity_lines.push(line);
                         if activity_lines.len() > max_activity_lines {
                             activity_lines.drain(..activity_lines.len() - max_activity_lines);
                         }
@@ -906,27 +1000,9 @@ where
                 }
                 Ok(SeedProgressMessage::Done(result)) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    waited_seconds = waited_seconds.saturating_add(10);
-                    let msg = format!(
-                        "Backlog seeding dry-run still running ({waited_seconds}s elapsed); waiting for model output"
-                    );
-                    activity_lines.push(msg.clone());
-                    if activity_lines.len() > max_activity_lines {
-                        activity_lines.drain(..activity_lines.len() - max_activity_lines);
-                    }
+                    // Re-render current state to keep terminal alive; no spam lines
                     if is_tty {
                         runtime.terminal.draw_seeding(&activity_lines)?;
-                    } else {
-                        runtime.terminal.write_line(&format!(
-                            "startup backlog seeding dry-run: still running, elapsed={}s",
-                            waited_seconds
-                        ))?;
-                    }
-                    progress(&msg)?;
-                    if waited_seconds == 60 {
-                        progress(
-                            "Backlog seeding dry-run is taking longer than expected; this can happen during first-run auth or slow model/network response",
-                        )?;
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -949,6 +1025,7 @@ fn run_seed_refinement_with_heartbeat(
     backlog_snapshot: &str,
     rejected_tasks: &str,
     tasks_with_feedback: &[(SeedTask, String)],
+    grade_report: Option<&GradeReport>,
 ) -> Result<Vec<SeedTask>, GardenerError> {
     append_run_log(
         "debug",
@@ -966,7 +1043,7 @@ fn run_seed_refinement_with_heartbeat(
     std::thread::scope(|thread_scope| {
         thread_scope.spawn(|| {
             let mut on_event = |event: &AgentEvent| {
-                if let Some(summary) = summarize_seed_agent_event(event) {
+                if let Some(summary) = summarize_agent_event(event) {
                     let _ = tx.send(SeedProgressMessage::AgentUpdate(summary));
                 }
             };
@@ -980,6 +1057,7 @@ fn run_seed_refinement_with_heartbeat(
                 rejected_tasks,
                 tasks_with_feedback,
                 Some(&mut on_event),
+                grade_report,
             );
             let _ = tx.send(SeedProgressMessage::Done(result));
         });
@@ -992,7 +1070,8 @@ fn run_seed_refinement_with_heartbeat(
             match rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(SeedProgressMessage::AgentUpdate(update)) => {
                     if last_event.as_deref() != Some(update.as_str()) {
-                        activity_lines.push(update.clone());
+                        let line = format!("{} {update}", now_hhmmss());
+                        activity_lines.push(line);
                         if activity_lines.len() > MAX_ACTIVITY_LINES {
                             activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
                         }
@@ -1004,12 +1083,8 @@ fn run_seed_refinement_with_heartbeat(
                 }
                 Ok(SeedProgressMessage::Done(result)) => return result,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Re-render current state to keep terminal alive; no spam lines
                     if is_tty {
-                        activity_lines
-                            .push("Refining tasks… (waiting)".to_string());
-                        if activity_lines.len() > MAX_ACTIVITY_LINES {
-                            activity_lines.drain(..activity_lines.len() - MAX_ACTIVITY_LINES);
-                        }
                         runtime.terminal.draw_seeding(&activity_lines)?;
                     }
                 }
@@ -1071,7 +1146,12 @@ pub fn run_interactive_seeding(
     let rejected_tasks_formatted = format_rejected_seeds(store);
     let existing_count = store.count_active_tasks()?;
 
-    if !should_seed_backlog(true, cfg.execution.test_mode, existing_count, force_seed_backlog) {
+    if !should_seed_backlog(
+        true,
+        cfg.execution.test_mode,
+        existing_count,
+        force_seed_backlog,
+    ) {
         append_run_log(
             "info",
             "startup.interactive_seeding.skipped",
@@ -1106,6 +1186,7 @@ pub fn run_interactive_seeding(
             &backlog_snapshot,
             &rejected_tasks_formatted,
             &mut progress,
+            None, // GradeReport not available in interactive path; falls back to Markdown parsing
         )?;
 
         if pending_tasks.is_empty() {
@@ -1148,10 +1229,8 @@ pub fn run_interactive_seeding(
                         seeded += 1;
                     }
                     crate::tui::ReviewDecision::Discard(reason) => {
-                        let _ = store.insert_rejected_seed(
-                            &pending_tasks[index],
-                            reason.as_deref(),
-                        );
+                        let _ =
+                            store.insert_rejected_seed(&pending_tasks[index], reason.as_deref());
                     }
                     crate::tui::ReviewDecision::Refine(feedback) => {
                         to_refine.push((pending_tasks[index].clone(), feedback));
@@ -1184,6 +1263,7 @@ pub fn run_interactive_seeding(
                 &backlog_snapshot,
                 &rejected_tasks_formatted,
                 &to_refine,
+                None, // GradeReport not available in interactive refinement path
             )?;
 
             if pending_tasks.is_empty() {
@@ -1211,6 +1291,7 @@ pub fn run_interactive_seeding(
             &backlog_snapshot,
             &rejected_tasks_formatted,
             &mut progress,
+            None, // GradeReport not available in interactive auto-seed path
         ) {
             append_run_log(
                 "warn",
@@ -1278,7 +1359,10 @@ fn format_rejected_seeds(store: &BacklogStore) -> String {
             let mut lines = Vec::new();
             for seed in &seeds {
                 if seed.rejection_reason.is_empty() {
-                    lines.push(format!("- \"{}\" ({}) — rejected (no reason given)", seed.title, seed.domain));
+                    lines.push(format!(
+                        "- \"{}\" ({}) — rejected (no reason given)",
+                        seed.title, seed.domain
+                    ));
                 } else {
                     lines.push(format!(
                         "- \"{}\" ({}) — rejected because: \"{}\"",
@@ -1292,137 +1376,19 @@ fn format_rejected_seeds(store: &BacklogStore) -> String {
     }
 }
 
-fn summarize_seed_agent_event(event: &AgentEvent) -> Option<String> {
-    match event.kind {
-        AgentEventKind::ThreadStarted => Some("Agent session started".to_string()),
-        AgentEventKind::TurnStarted => Some("Agent turn started".to_string()),
-        AgentEventKind::ToolCall => {
-            let label =
-                extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
-            let command = extract_command_preview(&event.payload);
-            Some(match command {
-                Some(cmd) => format!("Agent activity: {label} started: `{cmd}`"),
-                None => format!("Agent activity: {label} started"),
-            })
-        }
-        AgentEventKind::ToolResult => {
-            let label =
-                extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
-            let command = extract_command_preview(&event.payload);
-            Some(match command {
-                Some(cmd) => format!("Agent activity: {label} completed: `{cmd}`"),
-                None => format!("Agent activity: {label} completed"),
-            })
-        }
-        AgentEventKind::Message => {
-            extract_message_preview(&event.payload).map(|msg| format!("Agent thought: {msg}"))
-        }
-        AgentEventKind::TurnCompleted => Some("Agent turn completed".to_string()),
-        AgentEventKind::TurnFailed => Some(format!(
-            "Agent turn failed: {}",
-            extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone())
-        )),
-        AgentEventKind::Unknown => None,
-    }
-}
-
-fn extract_event_label(payload: &serde_json::Value) -> Option<String> {
-    let candidates = [
-        payload
-            .pointer("/item/type")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/item/name")
-            .and_then(serde_json::Value::as_str),
-        payload.pointer("/name").and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/tool_name")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/reason")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/error/message")
-            .and_then(serde_json::Value::as_str),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .map(ToString::to_string)
-}
-
-fn extract_message_preview(payload: &serde_json::Value) -> Option<String> {
-    let candidates = [
-        payload
-            .pointer("/delta/text")
-            .and_then(serde_json::Value::as_str),
-        payload.pointer("/text").and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/message")
-            .and_then(serde_json::Value::as_str),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .map(|s| {
-            let mut clipped = s.to_string();
-            if clipped.len() > 120 {
-                clipped.truncate(120);
-                clipped.push_str("...");
-            }
-            clipped
-        })
-}
-
-fn extract_command_preview(payload: &serde_json::Value) -> Option<String> {
-    let candidates = [
-        payload
-            .pointer("/item/command")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/item/command_line")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/item/cmd")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/command")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/command_line")
-            .and_then(serde_json::Value::as_str),
-        payload.pointer("/cmd").and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/item/input/command")
-            .and_then(serde_json::Value::as_str),
-        payload
-            .pointer("/item/input/cmd")
-            .and_then(serde_json::Value::as_str),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|s| !s.is_empty())
-        .map(|s| {
-            let mut clipped = s.to_string();
-            if clipped.len() > 120 {
-                clipped.truncate(120);
-                clipped.push_str("...");
-            }
-            clipped
-        })
-}
-
 pub fn quality_stamp_path(quality_path: &std::path::Path) -> PathBuf {
     PathBuf::from(format!("{}.stamp", quality_path.display()))
 }
 
+/// Path for the sidecar GradeReport JSON cache (alongside the quality Markdown report).
+fn grade_report_cache_path(quality_path: &std::path::Path) -> PathBuf {
+    PathBuf::from(format!("{}.grade-report.json", quality_path.display()))
+}
 
+/// Public accessor for the sidecar GradeReport JSON cache path.
+pub fn grade_report_cache_path_for(quality_path: &std::path::Path) -> PathBuf {
+    grade_report_cache_path(quality_path)
+}
 
 fn report_stamp_is_stale(
     runtime: &ProductionRuntime,
@@ -1484,12 +1450,10 @@ fn report_stamp_is_stale_with_context(
 #[cfg(test)]
 mod tests {
     use super::{
-        backlog_db_path, backup_db_if_exists, extract_command_preview, extract_event_label,
-        extract_message_preview, print_seed_recommendations, quality_stamp_path,
-        report_stamp_is_stale, should_seed_backlog, summarize_seed_agent_event,
+        backlog_db_path, backup_db_if_exists, print_seed_recommendations, quality_stamp_path,
+        report_stamp_is_stale, should_seed_backlog,
     };
     use crate::config::AppConfig;
-    use crate::protocol::{AgentEvent, AgentEventKind};
     use crate::repo_intelligence::{self, RepoIntelligenceProfile};
     use crate::runtime::{
         FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput,
@@ -1579,73 +1543,6 @@ mod tests {
     fn quality_stamp_path_appends_extension() {
         let path = quality_stamp_path(std::path::Path::new("/tmp/report.md"));
         assert_eq!(path, std::path::PathBuf::from("/tmp/report.md.stamp"));
-    }
-
-    #[test]
-    fn extract_event_helpers_read_nested_and_fallback_fields() {
-        assert_eq!(
-            extract_event_label(&serde_json::json!({
-                "item": { "name": "test" },
-                "tool_name": "fallback"
-            })),
-            Some("test".to_string())
-        );
-        assert_eq!(
-            extract_command_preview(&serde_json::json!({
-                "item": {
-                    "command_line": "cargo test --all-targets --help"
-                }
-            })),
-            Some("cargo test --all-targets --help".to_string())
-        );
-        assert_eq!(
-            extract_message_preview(&serde_json::json!({
-                "delta": {
-                    "text": "short payload"
-                }
-            })),
-            Some("short payload".to_string())
-        );
-    }
-
-    #[test]
-    fn summarize_seed_agent_event_handles_multiple_kinds() {
-        assert_eq!(
-            summarize_seed_agent_event(&AgentEvent {
-                protocol_version: 1,
-                kind: AgentEventKind::ThreadStarted,
-                raw_type: "thread.started".into(),
-                payload: serde_json::json!({}),
-            }),
-            Some("Agent session started".to_string())
-        );
-        assert!(summarize_seed_agent_event(&AgentEvent {
-            protocol_version: 1,
-            kind: AgentEventKind::ToolCall,
-            raw_type: "item.started".into(),
-            payload: serde_json::json!({"item": {"command":"echo hi"}}),
-        })
-        .as_deref()
-        .expect("tool call preview")
-        .contains("echo hi"));
-        assert_eq!(
-            summarize_seed_agent_event(&AgentEvent {
-                protocol_version: 1,
-                kind: AgentEventKind::TurnFailed,
-                raw_type: "turn.failed".into(),
-                payload: serde_json::json!({}),
-            }),
-            Some("Agent turn failed: turn.failed".to_string())
-        );
-        assert_eq!(
-            summarize_seed_agent_event(&AgentEvent {
-                protocol_version: 1,
-                kind: AgentEventKind::Unknown,
-                raw_type: "unknown".into(),
-                payload: serde_json::json!({}),
-            }),
-            None
-        );
     }
 
     #[test]

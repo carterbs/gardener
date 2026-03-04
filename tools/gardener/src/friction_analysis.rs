@@ -93,7 +93,16 @@ pub fn extract_worker_timeline(
         let parsed: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => {
-                // Malformed line — skip silently
+                // Malformed line — report and skip
+                append_run_log(
+                    "warn",
+                    "friction_analysis.malformed_log_entry",
+                    json!({
+                        "source": "friction_analysis.extract_worker_timeline",
+                        "line": idx + 1,
+                        "error": "invalid JSON"
+                    }),
+                );
                 continue;
             }
         };
@@ -200,16 +209,26 @@ fn matches_run_and_worker(entry: &Value, run_id: &str, worker_id: &str) -> bool 
 
         match key {
             "run.id" if val == run_id => run_match = true,
-            // Legacy flat attribute
-            "payload.worker_id" if val == worker_id => worker_match = true,
             // Current format: worker_id nested in gardener.payload JSON string
-            "gardener.payload" => {
-                if let Ok(payload) = serde_json::from_str::<Value>(val) {
+            "gardener.payload" => match serde_json::from_str::<Value>(val) {
+                Ok(payload) => {
                     if payload.get("worker_id").and_then(Value::as_str) == Some(worker_id) {
                         worker_match = true;
                     }
                 }
-            }
+                Err(_) => {
+                    append_run_log(
+                        "warn",
+                        "friction_analysis.malformed_gardener_payload",
+                        json!({
+                            "source": "friction_analysis.matches_run_and_worker",
+                            "run_id": run_id,
+                            "worker_id": worker_id,
+                            "error": "gardener.payload was not valid JSON"
+                        }),
+                    );
+                }
+            },
             _ => {}
         }
 
@@ -243,51 +262,40 @@ fn compact_payload(entry: &Value) -> String {
     let mut parts = Vec::new();
     for attr in attrs {
         let key = attr.get("key").and_then(Value::as_str).unwrap_or_default();
-        match key {
-            // Current format: all payload fields in a single JSON string
-            "gardener.payload" => {
-                let val = attr
-                    .pointer("/value/stringValue")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if let Ok(payload) = serde_json::from_str::<Value>(val) {
-                    if let Some(obj) = payload.as_object() {
-                        for (k, v) in obj {
-                            // Skip verbose/meta fields
-                            if k == "worker_id" || k == "run_id" {
-                                continue;
-                            }
-                            let s = match v {
-                                Value::String(s) => s.clone(),
-                                Value::Number(n) => n.to_string(),
-                                Value::Bool(b) => b.to_string(),
-                                _ => continue,
-                            };
-                            if !s.is_empty() {
-                                parts.push(format!("{k}={s}"));
-                            }
+        if key == "gardener.payload" {
+            let val = attr
+                .pointer("/value/stringValue")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Ok(payload) = serde_json::from_str::<Value>(val) {
+                if let Some(obj) = payload.as_object() {
+                    for (k, v) in obj {
+                        // Skip verbose/meta fields
+                        if k == "worker_id" || k == "run_id" {
+                            continue;
+                        }
+                        let s = match v {
+                            Value::String(s) => s.clone(),
+                            Value::Number(n) => n.to_string(),
+                            Value::Bool(b) => b.to_string(),
+                            _ => continue,
+                        };
+                        if !s.is_empty() {
+                            parts.push(format!("{k}={s}"));
                         }
                     }
                 }
+            } else {
+                append_run_log(
+                    "warn",
+                    "friction_analysis.malformed_gardener_payload",
+                    json!({
+                        "source": "friction_analysis.compact_payload",
+                        "event_type": extract_event_type(entry).unwrap_or_default(),
+                        "error": "gardener.payload was not valid JSON"
+                    }),
+                );
             }
-            // Legacy flat attributes
-            k if k.starts_with("payload.") || k == "error" || k == "stderr" => {
-                let short_key = k.strip_prefix("payload.").unwrap_or(k);
-                let val = attr
-                    .pointer("/value/stringValue")
-                    .and_then(Value::as_str)
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        attr.pointer("/value/intValue")
-                            .and_then(Value::as_i64)
-                            .map(|n| n.to_string())
-                    })
-                    .unwrap_or_default();
-                if !val.is_empty() {
-                    parts.push(format!("{short_key}={val}"));
-                }
-            }
-            _ => {}
         }
     }
     parts.join(" ")
@@ -786,15 +794,22 @@ mod tests {
         severity: &str,
         severity_num: u8,
     ) -> String {
+        let payload = json!({
+            "run_id": run_id,
+            "worker_id": worker_id,
+            "task_id": "task-1",
+        });
         serde_json::to_string(&json!({
             "logRecord": {
                 "severityText": severity,
                 "severityNumber": severity_num,
                 "attributes": [
                     { "key": "run.id", "value": { "stringValue": run_id } },
-                    { "key": "payload.worker_id", "value": { "stringValue": worker_id } },
                     { "key": "event.type", "value": { "stringValue": event_type } },
-                    { "key": "payload.task_id", "value": { "stringValue": "task-1" } }
+                    {
+                        "key": "gardener.payload",
+                        "value": { "stringValue": payload.to_string() }
+                    }
                 ]
             }
         }))

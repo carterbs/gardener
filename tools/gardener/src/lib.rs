@@ -623,6 +623,13 @@ pub fn run_with_runtime(
                             if task.status == TaskStatus::Unresolved {
                                 let _ = store.set_unresolved_to_merge_pending(&task.task_id);
                             }
+                            // A previous run may have marked the task complete while
+                            // the PR was never actually merged (e.g. interrupted merge
+                            // worker, or the merge phase finished without a real merge).
+                            // Re-promote so the merge worker picks it up.
+                            if task.status == TaskStatus::Complete {
+                                let _ = store.reopen_complete_to_merge_pending(&task.task_id);
+                            }
                         } else {
                             if task.status == TaskStatus::Unresolved {
                                 let _ = store.set_unresolved_to_ready(&task.task_id);

@@ -173,11 +173,6 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<usize>>,
     },
-    ReopenCompleteToMergePending {
-        task_id: String,
-        now: i64,
-        reply: oneshot::Sender<StoreResult<bool>>,
-    },
     InsertRejectedSeed {
         title: String,
         details: String,
@@ -583,26 +578,6 @@ impl BacklogStore {
                             &writer_path,
                             operation,
                             &result.as_ref().map(|count| json!({ "count": count })),
-                            result.as_ref().err(),
-                        );
-                        let _ = reply.send(result);
-                    }
-                    WriteCmd::ReopenCompleteToMergePending {
-                        task_id,
-                        now,
-                        reply,
-                    } => {
-                        let result =
-                            reopen_complete_to_merge_pending(&write_conn, &task_id, now);
-                        log_write_result(
-                            &writer_path,
-                            operation,
-                            &result.as_ref().map(|changed| {
-                                json!({
-                                    "task_id": task_id,
-                                    "changed": changed,
-                                })
-                            }),
                             result.as_ref().err(),
                         );
                         let _ = reply.send(result);
@@ -1208,40 +1183,6 @@ impl BacklogStore {
         result
     }
 
-    /// Re-open a completed task whose PR is still open on GitHub, transitioning
-    /// it back to `merge_pending` so the merge worker can pick it up.
-    pub fn reopen_complete_to_merge_pending(&self, task_id: &str) -> StoreResult<bool> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.sender()?
-            .blocking_send(WriteCmd::ReopenCompleteToMergePending {
-                task_id: task_id.to_string(),
-                now: system_time_unix(),
-                reply: reply_tx,
-            })
-            .map_err(|e| GardenerError::Database(e.to_string()))?;
-        let result = reply_rx
-            .blocking_recv()
-            .map_err(|e| GardenerError::Database(e.to_string()))?;
-        match &result {
-            Ok(true) => {
-                append_run_log(
-                    "info",
-                    "backlog.task.reopened_to_merge_pending",
-                    json!({ "task_id": task_id }),
-                );
-            }
-            Ok(false) => {}
-            Err(e) => {
-                append_run_log(
-                    "error",
-                    "backlog.task.reopened_to_merge_pending.failed",
-                    json!({ "task_id": task_id, "error": e.to_string() }),
-                );
-            }
-        }
-        result
-    }
-
     pub fn recover_stale_leases(&self, now: i64) -> StoreResult<usize> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
@@ -1575,13 +1516,6 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
         WriteCmd::PromoteReadyWithPr { now, .. } => (
             "promote_ready_with_pr",
             json!({
-                "now": now,
-            }),
-        ),
-        WriteCmd::ReopenCompleteToMergePending { task_id, now, .. } => (
-            "reopen_complete_to_merge_pending",
-            json!({
-                "task_id": task_id,
                 "now": now,
             }),
         ),
@@ -2149,27 +2083,6 @@ fn promote_ready_with_pr(conn: &Connection, now: i64) -> StoreResult<usize> {
         )
         .map_err(db_err)?;
     Ok(changed)
-}
-
-fn reopen_complete_to_merge_pending(
-    conn: &Connection,
-    task_id: &str,
-    now: i64,
-) -> StoreResult<bool> {
-    append_run_log(
-        "debug",
-        "backlog_store.reopen_complete_to_merge_pending.started",
-        json!({ "task_id": task_id }),
-    );
-    let changed = conn
-        .execute(
-            "UPDATE backlog_tasks
-             SET status = 'merge_pending', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
-             WHERE task_id = ?2 AND status = 'complete'",
-            params![now, task_id],
-        )
-        .map_err(db_err)?;
-    Ok(changed > 0)
 }
 
 fn recover_stale(conn: &Connection, now: i64) -> StoreResult<usize> {

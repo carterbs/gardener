@@ -1,7 +1,9 @@
 use crate::agent::{validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::protocol::{map_claude_event, AgentEvent, AgentTerminal, StepResult};
+use crate::protocol::{
+    map_claude_event, AgentEvent, AgentEventKind, AgentTerminal, StepResult, CLAUDE_PROTOCOL_EVENTS,
+};
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use crate::types::AgentKind;
 use serde_json::{json, Value};
@@ -127,6 +129,7 @@ impl AgentAdapter for ClaudeAdapter {
         })?;
 
         let mut raw_events = Vec::new();
+        let mut protocol_violations = Vec::new();
         let mut stdout_diagnostics = Vec::new();
         let mut stderr_diagnostics = Vec::new();
         let mut on_stdout_line = |line: &str| {
@@ -136,6 +139,14 @@ impl AgentAdapter for ClaudeAdapter {
             match serde_json::from_str::<Value>(line) {
                 Ok(raw) => {
                     let event = map_claude_event(&raw);
+                    if event.kind == AgentEventKind::Unknown {
+                        let violation = format!(
+                            "protocol violation: unsupported claude event `{}`",
+                            event.raw_type
+                        );
+                        stdout_diagnostics.push(violation);
+                        protocol_violations.push(event.raw_type.clone());
+                    }
                     let kind = format!("{:?}", event.kind);
                     let raw_type = event.raw_type.clone();
                     let command = extract_action_command(&event.payload);
@@ -202,6 +213,40 @@ impl AgentAdapter for ClaudeAdapter {
         let mut diagnostics = stderr_diagnostics;
         diagnostics.extend(stdout_diagnostics);
         let events = raw_events.iter().map(map_claude_event).collect::<Vec<_>>();
+
+        if !protocol_violations.is_empty() {
+            protocol_violations.sort();
+            protocol_violations.dedup();
+            append_run_log(
+                "error",
+                "adapter.claude.protocol_violation",
+                json!({
+                    "worker_id": context.worker_id,
+                    "session_id": context.session_id,
+                    "backend": "claude",
+                    "model": context.model,
+                    "unsupported_event_types": protocol_violations,
+                    "event_count": raw_events.len(),
+                    "stderr_line_count": diagnostics.len()
+                }),
+            );
+            return Ok(StepResult {
+                terminal: AgentTerminal::Failure,
+                events,
+                payload: json!({
+                    "type": "turn.failed",
+                    "reason": "protocol_violation",
+                    "message": format!(
+                        "unsupported event type(s) for claude protocol: {}",
+                        protocol_violations.join(", ")
+                    ),
+                    "unsupported_event_types": protocol_violations,
+                    "event_count": raw_events.len(),
+                    "supported_event_types": CLAUDE_PROTOCOL_EVENTS,
+                }),
+                diagnostics,
+            });
+        }
 
         if let Some(terminal_result) = raw_events
             .iter()

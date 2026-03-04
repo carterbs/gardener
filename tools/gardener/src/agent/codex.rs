@@ -1,7 +1,10 @@
 use crate::agent::{validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
-use crate::protocol::{map_codex_event, parse_json_records, AgentEvent, AgentTerminal, StepResult};
+use crate::protocol::{
+    map_codex_event, parse_json_records, AgentEvent, AgentEventKind, AgentTerminal, StepResult,
+    CODEX_PROTOCOL_EVENTS,
+};
 use crate::runtime::{ProcessRequest, ProcessRunner};
 use crate::types::AgentKind;
 use serde_json::{json, Value};
@@ -140,6 +143,7 @@ impl AgentAdapter for CodexAdapter {
 
         let mut raw_events = Vec::new();
         let mut event_sequence = 0_u64;
+        let mut protocol_violations = Vec::new();
         let mut stdout_diagnostics = Vec::new();
         let mut stderr_diagnostics = Vec::new();
         let mut on_stdout_line = |line: &str| {
@@ -151,6 +155,14 @@ impl AgentAdapter for CodexAdapter {
                     for raw in records {
                         event_sequence += 1;
                         let event = map_codex_event(&raw);
+                        if event.kind == AgentEventKind::Unknown {
+                            let violation = format!(
+                                "protocol violation: unsupported codex event `{}`",
+                                event.raw_type
+                            );
+                            stdout_diagnostics.push(violation);
+                            protocol_violations.push(event.raw_type.clone());
+                        }
                         let kind = format!("{:?}", event.kind);
                         let raw_type = event.raw_type.clone();
                         let command = extract_action_command(&event.payload);
@@ -220,8 +232,44 @@ impl AgentAdapter for CodexAdapter {
         diagnostics.extend(stdout_diagnostics);
         let events = raw_events.iter().map(map_codex_event).collect::<Vec<_>>();
 
+        if !protocol_violations.is_empty() {
+            protocol_violations.sort();
+            protocol_violations.dedup();
+            append_run_log(
+                "error",
+                "adapter.codex.protocol_violation",
+                json!({
+                    "worker_id": context.worker_id,
+                    "session_id": context.session_id,
+                    "backend": "codex",
+                    "model": context.model,
+                    "unsupported_event_types": protocol_violations,
+                    "event_count": raw_events.len(),
+                    "event_sequence": event_sequence,
+                    "stderr_line_count": diagnostics.len()
+                }),
+            );
+            return Ok(StepResult {
+                terminal: AgentTerminal::Failure,
+                events,
+                payload: json!({
+                    "type": "turn.failed",
+                    "reason": "protocol_violation",
+                    "message": format!(
+                        "unsupported event type(s) for codex protocol: {}",
+                        protocol_violations.join(", ")
+                    ),
+                    "unsupported_event_types": protocol_violations,
+                    "event_count": raw_events.len(),
+                    "event_sequence": event_sequence,
+                    "supported_event_types": CODEX_PROTOCOL_EVENTS,
+                }),
+                diagnostics,
+            });
+        }
+
         if let Some(failed) = raw_events.iter().find(|ev| {
-            ev.get("type") == Some(&json!("turn.failed")) || ev.get("type") == Some(&json!("error"))
+            ev.get("type") == Some(&json!("turn.failed"))
         }) {
             let failure_type = failed
                 .get("type")

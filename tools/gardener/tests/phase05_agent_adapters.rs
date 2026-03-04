@@ -133,7 +133,7 @@ fn codex_happy_path_returns_success() {
             .events
             .iter()
             .any(|e| e.kind == AgentEventKind::ToolCall),
-        "should contain ToolCall events from item.started/item.updated"
+        "should contain a ToolCall event"
     );
     assert_eq!(runner.spawned()[0].program, "codex");
 }

@@ -4,6 +4,27 @@ use serde_json::{Deserializer, Value};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+pub const CODEX_PROTOCOL_EVENTS: [&str; 6] = [
+    "thread.started",
+    "turn.started",
+    "item.started",
+    "item.completed",
+    "turn.completed",
+    "turn.failed",
+];
+
+pub const CLAUDE_PROTOCOL_EVENTS: [&str; 9] = [
+    "system",
+    "assistant",
+    "message_start",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "tool_use",
+    "tool_result",
+    "result",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentEventKind {
@@ -46,10 +67,10 @@ pub fn map_codex_event(raw: &Value) -> AgentEvent {
     let kind = match event_type {
         "thread.started" => AgentEventKind::ThreadStarted,
         "turn.started" => AgentEventKind::TurnStarted,
-        "item.started" | "item.updated" => AgentEventKind::ToolCall,
+        "item.started" => AgentEventKind::ToolCall,
         "item.completed" => AgentEventKind::ToolResult,
         "turn.completed" => AgentEventKind::TurnCompleted,
-        "turn.failed" | "error" => AgentEventKind::TurnFailed,
+        "turn.failed" => AgentEventKind::TurnFailed,
         _ => AgentEventKind::Unknown,
     };
 
@@ -70,6 +91,7 @@ pub fn map_claude_event(raw: &Value) -> AgentEvent {
         "message_start" => AgentEventKind::ThreadStarted,
         "content_block_start" => AgentEventKind::TurnStarted,
         "content_block_delta" => AgentEventKind::Message,
+        "content_block_stop" => AgentEventKind::Message,
         "tool_use" => AgentEventKind::ToolCall,
         "tool_result" => AgentEventKind::ToolResult,
         "result" => {
@@ -255,6 +277,14 @@ mod tests {
         let mapped = map_codex_event(&raw);
         assert_eq!(mapped.kind, AgentEventKind::Unknown);
         assert_eq!(mapped.raw_type, "future.variant");
+    }
+
+    #[test]
+    fn codex_legacy_event_aliases_are_not_mapped() {
+        let updated = map_codex_event(&json!({"type": "item.updated"}));
+        let error = map_codex_event(&json!({"type": "error"}));
+        assert_eq!(updated.kind, AgentEventKind::Unknown);
+        assert_eq!(error.kind, AgentEventKind::Unknown);
     }
 
     #[test]

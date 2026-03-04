@@ -16,6 +16,8 @@ use std::time::SystemTime;
 
 const RESIZE_SENTINEL_KEY: char = '\0';
 pub const INTERRUPT_SENTINEL_KEY: char = '\x03';
+pub const ARROW_UP_SENTINEL: char = '\x1e';
+pub const ARROW_DOWN_SENTINEL: char = '\x1f';
 const COPY_SHORTCUT_KEY: char = 'c';
 const DEFAULT_TERMINAL_WIDTH: u16 = 120;
 const DEFAULT_TERMINAL_HEIGHT: u16 = 30;
@@ -116,6 +118,16 @@ pub trait Terminal: Send + Sync {
         let frame = crate::tui::render_seeding(activity, width, height);
         self.draw(&frame)
     }
+    fn draw_quality_grading(&self, activity: &[String]) -> Result<(), GardenerError> {
+        let (width, height) = self.draw_dimensions();
+        let frame = crate::tui::render_quality_grading(activity, width, height);
+        self.draw(&frame)
+    }
+    fn draw_quality_intro(&self) -> Result<(), GardenerError> {
+        let (width, height) = self.draw_dimensions();
+        let frame = crate::tui::render_quality_intro(width, height);
+        self.draw(&frame)
+    }
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
         self.write_line(&format!("{title}: {message}"))
     }
@@ -184,20 +196,29 @@ fn start_key_listener_if_needed() {
                 continue;
             };
             if let crossterm::event::Event::Key(key) = event {
-                if let crossterm::event::KeyCode::Char(c) = key.code {
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL)
-                        && is_copy_shortcut_key(c)
-                    {
-                        enqueue_key(INTERRUPT_SENTINEL_KEY);
-                        request_interrupt();
-                    } else {
-                        enqueue_key(c);
-                        if c == 'q' {
+                match key.code {
+                    crossterm::event::KeyCode::Char(c) => {
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                            && is_copy_shortcut_key(c)
+                        {
+                            enqueue_key(INTERRUPT_SENTINEL_KEY);
                             request_interrupt();
+                        } else {
+                            enqueue_key(c);
+                            if c == 'q' {
+                                request_interrupt();
+                            }
                         }
                     }
+                    crossterm::event::KeyCode::Up => {
+                        enqueue_key(ARROW_UP_SENTINEL);
+                    }
+                    crossterm::event::KeyCode::Down => {
+                        enqueue_key(ARROW_DOWN_SENTINEL);
+                    }
+                    _ => {}
                 }
             } else if let crossterm::event::Event::Resize(_, _) = event {
                 enqueue_key(RESIZE_SENTINEL_KEY);
@@ -710,6 +731,16 @@ impl Terminal for ProductionTerminal {
         crate::tui::draw_seeding_live(activity)
     }
 
+    fn draw_quality_grading(&self, activity: &[String]) -> Result<(), GardenerError> {
+        start_key_listener_if_needed();
+        crate::tui::draw_quality_grading_live(activity)
+    }
+
+    fn draw_quality_intro(&self) -> Result<(), GardenerError> {
+        start_key_listener_if_needed();
+        crate::tui::draw_quality_intro_live()
+    }
+
     fn draw_shutdown_screen(&self, title: &str, message: &str) -> Result<(), GardenerError> {
         start_key_listener_if_needed();
         crate::tui::draw_shutdown_screen_live(title, message)
@@ -757,6 +788,8 @@ impl Terminal for ProductionTerminal {
                         Ok(Some(c))
                     }
                 }
+                crossterm::event::KeyCode::Up => Ok(Some(ARROW_UP_SENTINEL)),
+                crossterm::event::KeyCode::Down => Ok(Some(ARROW_DOWN_SENTINEL)),
                 _ => Ok(None),
             },
             crossterm::event::Event::Resize(_, _) => Ok(Some(RESIZE_SENTINEL_KEY)),

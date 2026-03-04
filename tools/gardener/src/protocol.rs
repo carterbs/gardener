@@ -112,9 +112,141 @@ pub fn parse_json_records(input: &str) -> Result<Vec<Value>, GardenerError> {
     Ok(out)
 }
 
+// ── Shared agent-event summarization helpers ──────────────────────────
+
+/// Summarize an `AgentEvent` into a short human-readable line for streaming UIs.
+pub fn summarize_agent_event(event: &AgentEvent) -> Option<String> {
+    match event.kind {
+        AgentEventKind::ThreadStarted => Some("Agent session started".to_string()),
+        AgentEventKind::TurnStarted => Some("Agent turn started".to_string()),
+        AgentEventKind::TurnCompleted => Some("Agent turn completed".to_string()),
+        AgentEventKind::TurnFailed => Some(format!(
+            "Agent turn failed: {}",
+            extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone())
+        )),
+        AgentEventKind::ToolCall => {
+            let label =
+                extract_event_label(&event.payload).unwrap_or_else(|| event.raw_type.clone());
+            let command = extract_command_preview(&event.payload);
+            Some(match command {
+                Some(cmd) => format!("Agent activity: {label} started: {cmd}"),
+                None => format!("Agent activity: {label} started"),
+            })
+        }
+        AgentEventKind::ToolResult => {
+            // Tool completions are noisy — the "started" line already shows the command
+            None
+        }
+        AgentEventKind::Message => {
+            extract_message_preview(&event.payload).map(|msg| format!("Agent thought: {msg}"))
+        }
+        AgentEventKind::Unknown => None,
+    }
+}
+
+/// Extract a human-readable label from an event payload (tool name, error, etc.).
+pub fn extract_event_label(payload: &Value) -> Option<String> {
+    let candidates = [
+        payload.pointer("/item/type").and_then(Value::as_str),
+        payload.pointer("/item/name").and_then(Value::as_str),
+        payload.pointer("/name").and_then(Value::as_str),
+        payload.pointer("/tool_name").and_then(Value::as_str),
+        payload.pointer("/reason").and_then(Value::as_str),
+        payload.pointer("/error/message").and_then(Value::as_str),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Extract a command string from an event payload, stripping shell wrappers.
+pub fn extract_command_preview(payload: &Value) -> Option<String> {
+    let candidates = [
+        payload.pointer("/item/command").and_then(Value::as_str),
+        payload
+            .pointer("/item/command_line")
+            .and_then(Value::as_str),
+        payload.pointer("/item/cmd").and_then(Value::as_str),
+        payload.pointer("/command").and_then(Value::as_str),
+        payload.pointer("/command_line").and_then(Value::as_str),
+        payload.pointer("/cmd").and_then(Value::as_str),
+        payload
+            .pointer("/item/input/command")
+            .and_then(Value::as_str),
+        payload.pointer("/item/input/cmd").and_then(Value::as_str),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(strip_shell_wrapper)
+        .map(|s| {
+            let mut clipped = s;
+            if clipped.len() > 120 {
+                clipped.truncate(120);
+                clipped.push_str("...");
+            }
+            clipped
+        })
+}
+
+/// Extract a short message/thought preview from an event payload.
+pub fn extract_message_preview(payload: &Value) -> Option<String> {
+    let candidates = [
+        payload.pointer("/delta/text").and_then(Value::as_str),
+        payload.pointer("/text").and_then(Value::as_str),
+        payload.pointer("/message").and_then(Value::as_str),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| {
+            let mut clipped = s.to_string();
+            if clipped.len() > 120 {
+                clipped.truncate(120);
+                clipped.push_str("...");
+            }
+            clipped
+        })
+}
+
+/// Strip shell wrappers like `/bin/zsh -lc '...'` or `/bin/zsh -lc "..."` from commands.
+/// Handles both single and double quote variants, and both `-lc` and `-c` flags.
+fn strip_shell_wrapper(cmd: &str) -> String {
+    let trimmed = cmd.trim();
+    // Prefixes to strip, in order of specificity
+    let prefixes = [
+        "/bin/zsh -lc ",
+        "/bin/zsh -c ",
+        "/bin/bash -lc ",
+        "/bin/bash -c ",
+    ];
+    for prefix in &prefixes {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            // Strip matching outer quotes (single or double)
+            let rest = rest.trim();
+            if let Some(inner) = rest.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+                return inner.to_string();
+            }
+            if let Some(inner) = rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+                return inner.to_string();
+            }
+            // No quotes or mismatched — return as-is without the prefix
+            return rest.to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{map_codex_event, parse_json_records, parse_jsonl, AgentEventKind};
+    use super::*;
     use serde_json::json;
 
     #[test]
@@ -145,5 +277,118 @@ mod tests {
     fn parse_json_records_rejects_malformed_stream() {
         let err = parse_json_records("{\"type\":\"thread.started\"}\n{bad").expect_err("invalid");
         assert!(format!("{err}").contains("invalid json stream"));
+    }
+
+    #[test]
+    fn extract_helpers_read_nested_and_fallback_fields() {
+        assert_eq!(
+            extract_event_label(&json!({"item": {"name": "test"}, "tool_name": "fallback"})),
+            Some("test".to_string())
+        );
+        assert_eq!(
+            extract_command_preview(&json!({"item": {"command_line": "cargo test --all-targets"}})),
+            Some("cargo test --all-targets".to_string())
+        );
+        assert_eq!(
+            extract_message_preview(&json!({"delta": {"text": "short payload"}})),
+            Some("short payload".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_shell_wrapper_single_quotes() {
+        assert_eq!(
+            extract_command_preview(&json!({"command": "/bin/zsh -lc 'cat Cargo.toml'"})),
+            Some("cat Cargo.toml".to_string())
+        );
+        assert_eq!(
+            extract_command_preview(&json!({"command": "/bin/bash -c 'ls -la'"})),
+            Some("ls -la".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_shell_wrapper_double_quotes() {
+        // Real pattern from codex agent output
+        assert_eq!(
+            extract_command_preview(&json!({
+                "command": "/bin/zsh -lc \"sed -n '1,200p' AGENTS.md && echo '---' && sed -n '1,200p' CLAUDE.md\""
+            })),
+            Some(
+                "sed -n '1,200p' AGENTS.md && echo '---' && sed -n '1,200p' CLAUDE.md".to_string()
+            )
+        );
+        assert_eq!(
+            extract_command_preview(&json!({
+                "command": "/bin/zsh -lc \"wc -l AGENTS.md CLAUDE.md\""
+            })),
+            Some("wc -l AGENTS.md CLAUDE.md".to_string())
+        );
+        assert_eq!(
+            extract_command_preview(&json!({
+                "command": "/bin/zsh -lc \"rg --files -g 'README*' -g 'Makefile' | head -n 200\""
+            })),
+            Some("rg --files -g 'README*' -g 'Makefile' | head -n 200".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_shell_wrapper_no_wrapper_passthrough() {
+        assert_eq!(
+            extract_command_preview(&json!({"command": "pwd && ls -la"})),
+            Some("pwd && ls -la".to_string())
+        );
+        assert_eq!(
+            extract_command_preview(
+                &json!({"command": "rg --files .github/workflows tools/gardener scripts | head -n 300"})
+            ),
+            Some("rg --files .github/workflows tools/gardener scripts | head -n 300".to_string())
+        );
+        assert_eq!(
+            extract_command_preview(
+                &json!({"command": "cat /Users/bradcarter/.codex/skills/research-codebase/SKILL.md"})
+            ),
+            Some("cat /Users/bradcarter/.codex/skills/research-codebase/SKILL.md".to_string())
+        );
+    }
+
+    #[test]
+    fn summarize_agent_event_handles_all_kinds() {
+        assert_eq!(
+            summarize_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::ThreadStarted,
+                raw_type: "thread.started".into(),
+                payload: json!({}),
+            }),
+            Some("Agent session started".to_string())
+        );
+        assert!(summarize_agent_event(&AgentEvent {
+            protocol_version: 1,
+            kind: AgentEventKind::ToolCall,
+            raw_type: "item.started".into(),
+            payload: json!({"item": {"command": "echo hi"}}),
+        })
+        .as_deref()
+        .expect("tool call preview")
+        .contains("echo hi"));
+        assert_eq!(
+            summarize_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::TurnFailed,
+                raw_type: "turn.failed".into(),
+                payload: json!({}),
+            }),
+            Some("Agent turn failed: turn.failed".to_string())
+        );
+        assert_eq!(
+            summarize_agent_event(&AgentEvent {
+                protocol_version: 1,
+                kind: AgentEventKind::Unknown,
+                raw_type: "unknown".into(),
+                payload: json!({}),
+            }),
+            None
+        );
     }
 }

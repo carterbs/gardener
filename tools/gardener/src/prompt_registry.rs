@@ -13,7 +13,7 @@ pub struct PromptRegistry {
     templates: BTreeMap<WorkerState, PromptTemplate>,
 }
 
-pub const SEEDING_PROMPT_VERSION_SEEDING: &str = "seeding-v4";
+pub const SEEDING_PROMPT_VERSION_SEEDING: &str = "seeding-v5";
 pub const SEEDING_PROMPT_VERSION_LEGACY: &str = SEEDING_PROMPT_VERSION_SEEDING;
 pub const SEEDING_PROMPT_VERSION_DIRECT: &str = SEEDING_PROMPT_VERSION_SEEDING;
 
@@ -62,6 +62,12 @@ Inputs
 Quality risks extracted from report
 {QUALITY_RISKS}
 
+Structural deficiencies identified by quality grading
+{STRUCTURAL_DEFICIENCIES}
+
+Domain-level assessment notes
+{DOMAIN_NOTES}
+
 Relevant repo anchors
 1) AGENTS.md
 {AGENTS_MD}
@@ -81,6 +87,7 @@ Backlog DB skill reference (.codex/skills/backlog-db/SKILL.md)
 Task contract
 Create exactly 10 tasks. Prefer a practical mix of immediate fixes and cleanup debt.
 - At least 2 tasks should map to primary_gap.
+- At least 2 tasks should address structural deficiencies identified by quality grading (if any exist).
 - At least 2 tasks should be cleanup/debt reduction tasks.
 - At least 4 tasks should directly reduce repository friction for agents (docs, automation, diagnostics, workflow).
 - priority must be one of P0, P1, P2.

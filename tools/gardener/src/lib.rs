@@ -30,27 +30,27 @@ pub mod prompt_knowledge;
 pub mod prompt_registry;
 pub mod prompts;
 pub mod protocol;
-pub mod quality_domain_catalog;
-pub mod quality_evidence;
-pub mod quality_grades;
 pub mod quality_assertion_counter;
 pub mod quality_assessment_prompt;
 pub mod quality_assessment_runner;
-pub mod quality_dimension_prompts;
 pub mod quality_assessment_types;
 pub mod quality_backlog_emitter;
 pub mod quality_ci_lint_detector;
 pub mod quality_complexity_analyzer;
 pub mod quality_coverage_parser;
 pub mod quality_debt_scanner;
+pub mod quality_dimension_prompts;
 pub mod quality_doc_scanner;
+pub mod quality_domain_catalog;
+pub mod quality_evidence;
 pub mod quality_evidence_bundle;
 pub mod quality_file_sampler;
 pub mod quality_grade_compute;
 pub mod quality_grade_renderer;
-pub mod quality_pipeline;
+pub mod quality_grades;
 pub mod quality_instrumentation_detector;
 pub mod quality_language_registry;
+pub mod quality_pipeline;
 pub mod quality_scoring;
 pub mod quality_test_detector;
 pub mod quality_tree_walker;
@@ -90,8 +90,8 @@ use logging::{
 use runtime::{clear_interrupt, ProcessRequest, ProductionRuntime};
 use serde_json::json;
 use startup::{
-    backlog_db_path, quality_report_path, quality_stamp_path, run_interactive_seeding, run_startup_audits,
-    run_startup_audits_with_progress,
+    backlog_db_path, quality_report_path, quality_stamp_path, run_interactive_seeding,
+    run_startup_audits, run_startup_audits_with_progress,
 };
 use std::collections::{BTreeSet, HashMap};
 use triage::{ensure_profile_for_run, triage_needed, TriageDecision};
@@ -111,7 +111,11 @@ pub struct Cli {
     pub working_dir: Option<std::path::PathBuf>,
     #[arg(long)]
     pub num_workers: Option<u32>,
-    #[arg(long = "worker-count", conflicts_with = "num_workers", help = "Deprecated: use --num-workers")]
+    #[arg(
+        long = "worker-count",
+        conflicts_with = "num_workers",
+        help = "Deprecated: use --num-workers"
+    )]
     pub worker_count: Option<u32>,
     #[arg(long)]
     pub task: Option<String>,
@@ -376,6 +380,10 @@ pub fn run_with_runtime(
 
         if cli.quality_grades_only {
             runtime.terminal.write_line("phase3 quality-grades-only")?;
+            // Show dimension intro screen while agents start up
+            if runtime.terminal.stdin_is_tty() {
+                runtime.terminal.draw_quality_intro()?;
+            }
             let repo_root = startup
                 .scope
                 .repo_root
@@ -387,21 +395,21 @@ pub fn run_with_runtime(
                 .model
                 .clone()
                 .unwrap_or_else(|| cfg.seeding.model.clone());
-            let assessment_config =
-                quality_assessment_runner::QualityAssessmentConfig {
-                    backend,
-                    model,
-                    max_turns: cfg.quality.max_turns,
-                    ..quality_assessment_runner::QualityAssessmentConfig::default()
-                };
+            let assessment_config = quality_assessment_runner::QualityAssessmentConfig {
+                backend,
+                model,
+                max_turns: cfg.quality.max_turns,
+                ..quality_assessment_runner::QualityAssessmentConfig::default()
+            };
             // quality-grades-only is read-only: no backlog store to avoid side effects
             let factory = AdapterFactory::with_defaults();
-            let (doc, _report) = quality_pipeline::run_quality_pipeline(
+            let (doc, report) = quality_pipeline::run_quality_pipeline(
                 repo_root,
                 Some(&factory),
                 runtime.process_runner.as_ref(),
                 None,
                 &assessment_config,
+                None,
             )?;
             let quality_path = quality_report_path(&cfg, &startup.scope);
             if let Some(parent) = quality_path.parent() {
@@ -418,6 +426,12 @@ pub fn run_with_runtime(
             runtime
                 .file_system
                 .write_string(&stamp_path, &now.to_string())?;
+            // Persist the GradeReport sidecar cache for future TTL-hit runs.
+            let cache_path = startup::grade_report_cache_path_for(&quality_path);
+            let json = serde_json::to_string(&report).map_err(|e| {
+                GardenerError::Process(format!("failed to serialize grade report: {e}"))
+            })?;
+            runtime.file_system.write_string(&cache_path, &json)?;
             runtime.terminal.write_line(&format!(
                 "quality report written to {}",
                 quality_path.display()
@@ -1009,14 +1023,9 @@ mod tests {
 
     #[test]
     fn parse_conflicting_worker_count_and_num_workers_is_rejected() {
-        let err = super::Cli::try_parse_from([
-            "gardener",
-            "--num-workers",
-            "5",
-            "--worker-count",
-            "6",
-        ])
-        .expect_err("conflicting worker count flags should fail");
+        let err =
+            super::Cli::try_parse_from(["gardener", "--num-workers", "5", "--worker-count", "6"])
+                .expect_err("conflicting worker count flags should fail");
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 

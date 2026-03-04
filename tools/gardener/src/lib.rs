@@ -479,7 +479,7 @@ pub fn run_with_runtime(
             && !cli.triage_only
             && !cli.retriage
         {
-            Some(1)
+            Some(cli_parallelism_override.unwrap_or(1))
         } else {
             None
         };

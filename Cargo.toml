@@ -3,6 +3,7 @@ members = ["tools/gardener"]
 resolver = "2"
 
 [workspace.lints.clippy]
+if_same_then_else = "deny"
 unwrap_used = "deny"
 unnecessary_sort_by = "deny"
 expect_used = "deny"

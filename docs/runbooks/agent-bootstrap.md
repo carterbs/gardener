@@ -13,6 +13,7 @@ git worktree and needs to make Gardener runnable end-to-end.
   - `AGENTS.md`
   - `CLAUDE.md`
   - `docs/README.md`
+- Review canonical validation command usage: [AGENTS.md#validation-commands](../../AGENTS.md#validation-commands)
 
 ## Bootstrap sequence
 

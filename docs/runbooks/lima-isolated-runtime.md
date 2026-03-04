@@ -7,9 +7,10 @@ Run Gardener overnight with host file exposure narrowed to the repository only, 
 ## Security posture
 
 - Gardener runs inside a Lima Linux VM instance.
-- Host mount scope is one writable path: the repository root.
+- Host mount scope is one writable path: the repository root mounted at `/workspace/host-gardener`.
 - No host home-directory mount (no direct `~/Downloads`, `~/.ssh`, `~/Documents`, etc.).
 - Git pushes and PR creation happen via `gh auth login` inside the VM.
+- Runtime working copy is VM-local at `/workspace/gardener` (not a host mount).
 
 ## Files
 
@@ -68,7 +69,7 @@ Reconciliation-only:
 
 ## Worktree compatibility
 
-Gardener creates worker worktrees under the mounted repository. Because the full repo path is mounted read/write, the native worktree lifecycle continues to work inside the VM.
+`scripts/lima-gardener.sh` bootstraps `/workspace/gardener` by cloning from `/workspace/host-gardener` if needed, so the primary runtime checkout remains VM-local. Worker worktrees are then created from that VM-local checkout.
 
 ## Overnight operation
 
@@ -82,6 +83,8 @@ cd /workspace/gardener
 . "$HOME/.cargo/env"
 cargo run -p gardener --bin gardener -- --config gardener.toml
 ```
+
+If you need to refresh the VM-local checkout from host state, delete `/workspace/gardener` in the VM and run `./scripts/lima-gardener.sh up` again.
 
 Detach: `Ctrl-b d`
 

@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATE_PATH="$REPO_ROOT/tools/lima/gardener-isolated.yaml.tmpl"
 GENERATED_TEMPLATE="/tmp/${INSTANCE_NAME}.yaml"
-GUEST_REPO_PATH="/workspace/gardener"
+HOST_MOUNT_PATH="/workspace/host-gardener"
+GUEST_REPO_PATH="${GARDENER_GUEST_REPO_PATH:-/workspace/gardener}"
 
 usage() {
   cat <<USAGE
@@ -39,7 +40,26 @@ generate_template() {
 }
 
 lima_shell() {
-  limactl shell "$INSTANCE_NAME" -- "$@"
+  limactl shell --workdir / "$INSTANCE_NAME" -- "$@"
+}
+
+ensure_guest_repo() {
+  local bootstrap_cmd
+  bootstrap_cmd="$(cat <<EOF
+set -euo pipefail
+if [[ -d '$GUEST_REPO_PATH/.git' ]]; then
+  exit 0
+fi
+if [[ ! -d '$HOST_MOUNT_PATH/.git' ]]; then
+  echo "error: host-mounted repo missing at $HOST_MOUNT_PATH" >&2
+  exit 1
+fi
+mkdir -p "$(dirname '$GUEST_REPO_PATH')"
+rm -rf '$GUEST_REPO_PATH'
+git clone '$HOST_MOUNT_PATH' '$GUEST_REPO_PATH'
+EOF
+)"
+  lima_shell bash -lc "$bootstrap_cmd"
 }
 
 start_instance() {
@@ -71,6 +91,7 @@ shift || true
 case "$cmd" in
   up)
     start_instance
+    ensure_guest_repo
     ;;
   status)
     require_cmd limactl
@@ -78,14 +99,17 @@ case "$cmd" in
     ;;
   shell)
     require_cmd limactl
-    lima_shell bash -lc "cd '$GUEST_REPO_PATH'; exec bash"
+    ensure_guest_repo
+    limactl shell --workdir "$GUEST_REPO_PATH" "$INSTANCE_NAME"
     ;;
   auth)
     require_cmd limactl
+    ensure_guest_repo
     lima_shell bash -lc "cd '$GUEST_REPO_PATH'; gh auth login"
     ;;
   run)
     require_cmd limactl
+    ensure_guest_repo
     run_gardener "$@"
     ;;
   stop)

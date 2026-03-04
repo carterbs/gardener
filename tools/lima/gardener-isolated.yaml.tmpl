@@ -5,7 +5,7 @@ vmType: "vz"
 arch: "aarch64"
 cpus: 4
 memory: "8GiB"
-disk: "60GiB"
+disk: "100GiB"
 
 images:
   - location: "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-arm64.img"
@@ -13,7 +13,7 @@ images:
 
 mounts:
   - location: "__REPO_PATH__"
-    mountPoint: "/workspace/gardener"
+    mountPoint: "/workspace/host-gardener"
     writable: true
 
 mountType: "virtiofs"
@@ -53,3 +53,7 @@ provision:
       fi
       . "$HOME/.cargo/env"
       rustup component add rustfmt clippy
+      # Share a single Cargo target dir across all worktrees to avoid
+      # each one caching ~4-6 GiB of duplicate build artifacts.
+      mkdir -p "$HOME/.cargo-shared-target"
+      printf '[build]\ntarget-dir = "%s/.cargo-shared-target"\n' "$HOME" > "$HOME/.cargo/config.toml"

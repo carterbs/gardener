@@ -934,8 +934,10 @@ fn reconcile_startup_backlog_open_prs(
         } else {
             if task.status == TaskStatus::Unresolved {
                 let _ = store.set_unresolved_to_ready(&task.task_id);
+            } else if task.status == TaskStatus::MergePending {
+                let _ = store.set_merge_pending_to_ready(&task.task_id);
             }
-            if task.related_pr.is_some() {
+            if task.related_pr.is_some() || task.related_branch.is_some() {
                 let _ = store.clear_related_pr(&task.task_id);
             }
         }
@@ -1130,5 +1132,44 @@ mod tests {
             .expect("task exists");
         assert_eq!(updated.status, TaskStatus::MergePending);
         assert_eq!(updated.related_pr, Some(142));
+    }
+
+    #[test]
+    fn startup_reconcile_demotes_merge_pending_task_without_open_pr() {
+        let dir = TempDir::new().expect("tempdir");
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        let row = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: "merge pending stale metadata".to_string(),
+                details: "closed PR should not remain in merge queue".to_string(),
+                rationale: "regression test".to_string(),
+                scope_key: "startup".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: Some(140),
+                related_branch: Some("gardener/manual-runtime-f5f2a381c995e9".to_string()),
+            })
+            .expect("seed");
+        let _ = store.claim_next("worker-a", 60).expect("claim");
+        assert!(store
+            .mark_in_progress(&row.task_id, "worker-a")
+            .expect("mark in progress"));
+        assert!(store
+            .mark_merge_pending(&row.task_id, "worker-a")
+            .expect("mark merge pending"));
+
+        let startup_backlog = store.list_tasks().expect("list tasks");
+        let open_pr_map = HashMap::new();
+        super::reconcile_startup_backlog_open_prs(&store, &startup_backlog, &open_pr_map);
+
+        let updated = store
+            .get_task(&row.task_id)
+            .expect("fetch task")
+            .expect("task exists");
+        assert_eq!(updated.status, TaskStatus::Ready);
+        assert_eq!(updated.related_pr, None);
+        assert_eq!(updated.related_branch, None);
     }
 }

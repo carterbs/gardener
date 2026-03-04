@@ -147,6 +147,11 @@ enum WriteCmd {
         now: i64,
         reply: oneshot::Sender<StoreResult<bool>>,
     },
+    SetMergePendingReady {
+        task_id: String,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<bool>>,
+    },
     ClearRelatedPr {
         task_id: String,
         reply: oneshot::Sender<StoreResult<bool>>,
@@ -486,6 +491,26 @@ impl BacklogStore {
                                 json!({
                                     "task_id": task_id,
                                     "new_status": TaskStatus::MergePending.as_str(),
+                                    "changed": changed,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::SetMergePendingReady {
+                        task_id,
+                        now,
+                        reply,
+                    } => {
+                        let result = set_merge_pending_to_ready(&write_conn, &task_id, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|changed| {
+                                json!({
+                                    "task_id": task_id,
+                                    "new_status": TaskStatus::Ready.as_str(),
                                     "changed": changed,
                                 })
                             }),
@@ -1019,6 +1044,44 @@ impl BacklogStore {
         result
     }
 
+    pub fn set_merge_pending_to_ready(&self, task_id: &str) -> StoreResult<bool> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::SetMergePendingReady {
+                task_id: task_id.to_string(),
+                now: system_time_unix(),
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        let result = reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        match &result {
+            Ok(true) => {
+                append_run_log(
+                    "info",
+                    "backlog.task.merge_pending_to_ready",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Ok(false) => {
+                append_run_log(
+                    "warn",
+                    "backlog.task.merge_pending_to_ready.rejected",
+                    json!({ "task_id": task_id }),
+                );
+            }
+            Err(e) => {
+                append_run_log(
+                    "error",
+                    "backlog.task.merge_pending_to_ready.failed",
+                    json!({ "task_id": task_id, "error": e.to_string() }),
+                );
+            }
+        }
+        result
+    }
+
     pub fn clear_related_pr(&self, task_id: &str) -> StoreResult<bool> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.sender()?
@@ -1526,6 +1589,13 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
                 "now": now,
             }),
         ),
+        WriteCmd::SetMergePendingReady { task_id, now, .. } => (
+            "set_merge_pending_ready",
+            json!({
+                "task_id": task_id,
+                "now": now,
+            }),
+        ),
         WriteCmd::ClearRelatedPr { task_id, .. } => (
             "clear_related_pr",
             json!({
@@ -2025,6 +2095,26 @@ fn set_unresolved_status(
              SET status = ?1, lease_owner = NULL, lease_expires_at = NULL, last_updated = ?2
              WHERE task_id = ?3 AND status = 'unresolved'",
             params![status.as_str(), now, task_id],
+        )
+        .map_err(db_err)?;
+    Ok(changed > 0)
+}
+
+fn set_merge_pending_to_ready(conn: &Connection, task_id: &str, now: i64) -> StoreResult<bool> {
+    append_run_log(
+        "debug",
+        "backlog_store.set_merge_pending_to_ready.started",
+        json!({
+            "task_id": task_id,
+            "status": TaskStatus::Ready.as_str(),
+        }),
+    );
+    let changed = conn
+        .execute(
+            "UPDATE backlog_tasks
+             SET status = 'ready', lease_owner = NULL, lease_expires_at = NULL, last_updated = ?1
+             WHERE task_id = ?2 AND status = 'merge_pending'",
+            params![now, task_id],
         )
         .map_err(db_err)?;
     Ok(changed > 0)
@@ -2595,6 +2685,34 @@ mod tests {
 
         let task = store.get_task(&row.task_id).expect("fetch").expect("row");
         assert_eq!(task.status, TaskStatus::MergePending);
+        assert_eq!(task.lease_owner, None);
+        assert_eq!(task.lease_expires_at, None);
+    }
+
+    #[test]
+    fn set_merge_pending_to_ready_demotes_poisoned_merge_queue_rows() {
+        let (store, _dir) = temp_store();
+        let row = store
+            .upsert_task(task("merge-poison-row", Priority::P1))
+            .expect("seed");
+
+        let _ = store.claim_next("worker-a", 60).expect("claim");
+        let in_progress = store
+            .mark_in_progress(&row.task_id, "worker-a")
+            .expect("in progress");
+        assert!(in_progress);
+        let merge_pending = store
+            .mark_merge_pending(&row.task_id, "worker-a")
+            .expect("to merge pending");
+        assert!(merge_pending);
+
+        let demoted = store
+            .set_merge_pending_to_ready(&row.task_id)
+            .expect("demote merge pending to ready");
+        assert!(demoted);
+
+        let task = store.get_task(&row.task_id).expect("fetch").expect("row");
+        assert_eq!(task.status, TaskStatus::Ready);
         assert_eq!(task.lease_owner, None);
         assert_eq!(task.lease_expires_at, None);
     }

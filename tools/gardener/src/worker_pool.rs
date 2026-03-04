@@ -510,86 +510,52 @@ pub fn run_worker_pool_fsm(
             if *active_merging >= 1 {
                 return Ok(None);
             }
-            let Some(task) = store.claim_merge_pending(MERGE_WORKER_ID)? else {
-                return Ok(None);
-            };
-            let task_id = task.task_id.clone();
-            let pr_number = match task.related_pr.and_then(|n| u64::try_from(n).ok()) {
-                Some(pr) => pr,
-                None => {
-                    append_run_log(
-                        "warn",
-                        "worker_pool.merge_preseed.invalid_pr",
-                        json!({
-                            "task_id": task_id,
-                            "worker_id": MERGE_WORKER_ID,
-                        }),
-                    );
-                    let requeued = store.mark_unresolved(&task.task_id, MERGE_WORKER_ID)?;
-                    if !requeued {
+            loop {
+                let Some(task) = store.claim_merge_pending(MERGE_WORKER_ID)? else {
+                    return Ok(None);
+                };
+                let task_id = task.task_id.clone();
+                let pr_number = match task.related_pr.and_then(|n| u64::try_from(n).ok()) {
+                    Some(pr) => pr,
+                    None => {
                         append_run_log(
-                            "error",
-                            "worker_pool.merge_preseed.invalid_pr_requeue_failed",
+                            "warn",
+                            "worker_pool.merge_preseed.invalid_pr",
                             json!({
                                 "task_id": task_id,
                                 "worker_id": MERGE_WORKER_ID,
                             }),
                         );
+                        let demoted = store.release_lease(&task.task_id, MERGE_WORKER_ID)?;
+                        if !demoted {
+                            append_run_log(
+                                "error",
+                                "worker_pool.merge_preseed.invalid_pr_requeue_failed",
+                                json!({
+                                    "task_id": task_id,
+                                    "worker_id": MERGE_WORKER_ID,
+                                }),
+                            );
+                            return Ok(None);
+                        }
+                        // Keep scanning merge_pending in this cycle so one poisoned row
+                        // cannot block the remaining merge queue.
+                        continue;
                     }
-                    return Ok(None);
-                }
-            };
-            let branch = task
-                .related_branch
-                .clone()
-                .unwrap_or_else(|| worktree_branch_for(&task.task_id));
-            let worktree_path = worktree_path_for(repo_root, &task.task_id);
-            if let Err(error) = worktree_client.create_or_resume(&worktree_path, &branch) {
-                append_run_log(
-                    "warn",
-                    "worker_pool.merge_preseed.worktree_failed",
-                    json!({
-                        "task_id": task_id,
-                        "branch": branch,
-                        "error": error.to_string(),
-                        "worker_id": MERGE_WORKER_ID,
-                    }),
-                );
-                let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
-                if !requeued {
-                    append_run_log(
-                        "error",
-                        "worker_pool.merge_preseed.requeue_failed",
-                        json!({
-                            "task_id": task_id,
-                            "worker_id": MERGE_WORKER_ID,
-                        }),
-                    );
-                }
-                return Ok(None);
-            }
-            if let Some(mtx) = merge_tx {
-                let identity = WorkerIdentity::new(MERGE_WORKER_ID);
-                let task_summary = task.title;
-                let merge_request = MergeRequest {
-                    slot_idx: 0,
-                    task_id: task.task_id.clone(),
-                    task_summary: task_summary.clone(),
-                    attempt_count: task.attempt_count,
-                    worker_id: identity.worker_id,
-                    session_id: identity.session.session_id,
-                    worktree_path,
-                    branch,
-                    pr_number,
-                    logs: Vec::new(),
-                    handoff_evidence_bundle: None,
                 };
-                if mtx.send(merge_request).is_err() {
+                let branch = task
+                    .related_branch
+                    .clone()
+                    .unwrap_or_else(|| worktree_branch_for(&task.task_id));
+                let worktree_path = worktree_path_for(repo_root, &task.task_id);
+                if let Err(error) = worktree_client.create_or_resume(&worktree_path, &branch) {
                     append_run_log(
-                        "error",
-                        "worker_pool.merge_preseed.dispatch_failed",
+                        "warn",
+                        "worker_pool.merge_preseed.worktree_failed",
                         json!({
                             "task_id": task_id,
+                            "branch": branch,
+                            "error": error.to_string(),
                             "worker_id": MERGE_WORKER_ID,
                         }),
                     );
@@ -597,7 +563,7 @@ pub fn run_worker_pool_fsm(
                     if !requeued {
                         append_run_log(
                             "error",
-                            "worker_pool.merge_preseed.dispatch_requeue_failed",
+                            "worker_pool.merge_preseed.requeue_failed",
                             json!({
                                 "task_id": task_id,
                                 "worker_id": MERGE_WORKER_ID,
@@ -606,29 +572,68 @@ pub fn run_worker_pool_fsm(
                     }
                     return Ok(None);
                 }
-                *active_merging = active_merging.saturating_add(1);
-                return Ok(Some((pr_number, task_id, task_summary)));
-            }
-            append_run_log(
-                "warn",
-                "worker_pool.merge_preseed.channel_closed",
-                json!({
-                    "task_id": task_id,
-                    "worker_id": MERGE_WORKER_ID,
-                }),
-            );
-            let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
-            if !requeued {
+                if let Some(mtx) = merge_tx {
+                    let identity = WorkerIdentity::new(MERGE_WORKER_ID);
+                    let task_summary = task.title;
+                    let merge_request = MergeRequest {
+                        slot_idx: 0,
+                        task_id: task.task_id.clone(),
+                        task_summary: task_summary.clone(),
+                        attempt_count: task.attempt_count,
+                        worker_id: identity.worker_id,
+                        session_id: identity.session.session_id,
+                        worktree_path,
+                        branch,
+                        pr_number,
+                        logs: Vec::new(),
+                        handoff_evidence_bundle: None,
+                    };
+                    if mtx.send(merge_request).is_err() {
+                        append_run_log(
+                            "error",
+                            "worker_pool.merge_preseed.dispatch_failed",
+                            json!({
+                                "task_id": task_id,
+                                "worker_id": MERGE_WORKER_ID,
+                            }),
+                        );
+                        let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
+                        if !requeued {
+                            append_run_log(
+                                "error",
+                                "worker_pool.merge_preseed.dispatch_requeue_failed",
+                                json!({
+                                    "task_id": task_id,
+                                    "worker_id": MERGE_WORKER_ID,
+                                }),
+                            );
+                        }
+                        return Ok(None);
+                    }
+                    *active_merging = active_merging.saturating_add(1);
+                    return Ok(Some((pr_number, task_id, task_summary)));
+                }
                 append_run_log(
-                    "error",
-                    "worker_pool.merge_preseed.channel_closed_requeue_failed",
+                    "warn",
+                    "worker_pool.merge_preseed.channel_closed",
                     json!({
                         "task_id": task_id,
                         "worker_id": MERGE_WORKER_ID,
                     }),
                 );
+                let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
+                if !requeued {
+                    append_run_log(
+                        "error",
+                        "worker_pool.merge_preseed.channel_closed_requeue_failed",
+                        json!({
+                            "task_id": task_id,
+                            "worker_id": MERGE_WORKER_ID,
+                        }),
+                    );
+                }
+                return Ok(None);
             }
-            Ok(None)
         };
         let mut claimed = Vec::new();
         let mut active_merging = 0usize;
@@ -2015,12 +2020,11 @@ fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::Path
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_pool_stream_event, execution_task_packet, hotkey_action, available_doing_slots,
+        apply_pool_stream_event, available_doing_slots, execution_task_packet,
         handle_doing_complete_transition, handle_doing_non_complete_transition,
-        DoingSummaryHandling,
-        is_non_regressive_state_transition, run_worker_pool_fsm, wait_for_quit,
-        handle_merge_summary, MergeSummaryHandling, PoolStreamEvent, WorkerRow,
-        INTERRUPT_SENTINEL_KEY,
+        handle_merge_summary, hotkey_action, is_non_regressive_state_transition,
+        run_worker_pool_fsm, wait_for_quit, DoingSummaryHandling, MergeSummaryHandling,
+        PoolStreamEvent, WorkerRow, INTERRUPT_SENTINEL_KEY,
     };
     use crate::backlog_store::{BacklogStore, BacklogTask, NewTask, TaskStatus};
     use crate::config::AppConfig;
@@ -2052,6 +2056,38 @@ mod tests {
                 related_branch: None,
             })
             .expect("seed task");
+    }
+
+    fn seed_merge_pending_without_pr(
+        store: &BacklogStore,
+        title: &str,
+        lease_owner: &str,
+    ) -> String {
+        let row = store
+            .upsert_task(NewTask {
+                kind: TaskKind::Maintenance,
+                title: title.to_string(),
+                details: "details".to_string(),
+                scope_key: "scope".to_string(),
+                rationale: "seeded merge_pending regression task".to_string(),
+                priority: Priority::P1,
+                source: "test".to_string(),
+                related_pr: None,
+                related_branch: None,
+            })
+            .expect("seed merge-pending task");
+        let claimed = store
+            .claim_next(lease_owner, 300)
+            .expect("claim seeded task")
+            .expect("task claimed");
+        assert_eq!(claimed.task_id, row.task_id);
+        assert!(store
+            .mark_in_progress(&row.task_id, lease_owner)
+            .expect("mark in progress"));
+        assert!(store
+            .mark_merge_pending(&row.task_id, lease_owner)
+            .expect("mark merge pending"));
+        row.task_id
     }
 
     fn test_scope(dir: &TempDir) -> RuntimeScope {
@@ -2351,6 +2387,54 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn run_worker_pool_fsm_skips_invalid_merge_pending_rows_in_same_cycle() {
+        let dir = TempDir::new().expect("tempdir");
+        let scope = test_scope(&dir);
+        let db_path = dir.path().join(".cache/gardener/backlog.sqlite");
+        let store = BacklogStore::open(&db_path).expect("open store");
+        let first = seed_merge_pending_without_pr(&store, "invalid merge task 1", "seed-1");
+        let second = seed_merge_pending_without_pr(&store, "invalid merge task 2", "seed-2");
+
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.orchestrator.parallelism = 1;
+        cfg.quality_report.path = dir
+            .path()
+            .join(".gardener/quality.md")
+            .display()
+            .to_string();
+
+        let terminal = FakeTerminal::new(false);
+        let runtime = ProductionRuntime {
+            clock: Arc::new(FakeClock::default()),
+            file_system: Arc::new(ProductionFileSystem),
+            process_runner: Arc::new(FakeProcessRunner::default()),
+            terminal: Arc::new(terminal.clone()),
+        };
+
+        let _ = run_worker_pool_fsm(&runtime, &scope, &cfg, &store, &terminal, 1, None)
+            .expect("run fsm");
+
+        let first_task = store
+            .get_task(&first)
+            .expect("fetch first task")
+            .expect("first task exists");
+        let second_task = store
+            .get_task(&second)
+            .expect("fetch second task")
+            .expect("second task exists");
+        assert_ne!(first_task.status, TaskStatus::MergePending);
+        assert_ne!(second_task.status, TaskStatus::MergePending);
+        let remaining_merge_pending = store
+            .list_tasks()
+            .expect("list tasks")
+            .into_iter()
+            .filter(|task| task.status == TaskStatus::MergePending)
+            .count();
+        assert_eq!(remaining_merge_pending, 0);
     }
 
     #[test]

@@ -1074,6 +1074,7 @@ mod tests {
             std::path::Path::new("/repo"),
             "worker-1",
             "feat: lint\n\nMerge open PR #140 on branch gardener/manual-runtime-f5f2a381c995e9",
+            "test-worker",
         )
         .expect("check should succeed");
 
@@ -1116,6 +1117,7 @@ mod tests {
             std::path::Path::new("/repo"),
             "worker-1",
             "feat: lint\n\nMerge open PR #140 on branch gardener/manual-runtime-f5f2a381c995e9",
+            "test-worker",
         )
         .expect("check should succeed");
 

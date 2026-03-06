@@ -237,8 +237,7 @@ fn codex_completed_before_failed_still_reports_failure() {
 }
 
 #[test]
-fn codex_error_event_is_treated_as_failure() {
-    // BUG B8: Codex currently treats any "error" event as terminal failure.
+fn codex_error_event_is_treated_as_protocol_violation() {
     let runner = FakeProcessRunner::default();
     runner.push_response(Ok(ProcessOutput {
         exit_code: 0,
@@ -252,7 +251,10 @@ fn codex_error_event_is_treated_as_failure() {
         .execute(&runner, &codex_context(), "do a task", None)
         .expect("result must parse");
     assert_eq!(result.terminal, AgentTerminal::Failure);
-    assert_eq!(result.payload["reason"], json!("rate_limit_warning"));
+    assert_eq!(result.payload["type"], json!("turn.failed"));
+    assert_eq!(result.payload["reason"], json!("protocol_violation"));
+    assert_eq!(result.payload["unsupported_event_types"], json!(["error"]));
+    assert!(result.diagnostics.iter().any(|line| line.contains("unsupported codex event `error`")));
 }
 
 #[test]
@@ -290,6 +292,53 @@ fn codex_empty_stdout_exit_zero_is_error() {
         .as_str()
         .unwrap_or("")
         .contains("missing turn.completed or turn.failed"));
+}
+
+#[test]
+fn codex_unknown_event_type_in_output_is_protocol_violation() {
+    let runner = FakeProcessRunner::default();
+    runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout:
+            "{\"type\":\"future.variant\",\"value\":1}\n{\"type\":\"turn.completed\",\"result\":{\"summary\":\"completed\"}}\n"
+                .to_string(),
+        stderr: String::new(),
+    }));
+    let adapter = CodexAdapter;
+    let result = adapter
+        .execute(&runner, &codex_context(), "do a task", None)
+        .expect("result must parse");
+    assert_eq!(result.terminal, AgentTerminal::Failure);
+    assert_eq!(result.payload["reason"], json!("protocol_violation"));
+    assert_eq!(result.payload["unsupported_event_types"], json!(["future.variant"]));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|line| line.contains("unsupported codex event `future.variant`")));
+}
+
+#[test]
+fn claude_unknown_event_type_in_output_is_protocol_violation() {
+    let runner = FakeProcessRunner::default();
+    runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout:
+            "{\"type\":\"message_start\",\"message\":{\"id\":\"msg_01\"}}\n{\"type\":\"legacy.event\"}\n{\"type\":\"result\",\"subtype\":\"success\",\"result\":{\"summary\":\"done\"}}\n"
+                .to_string(),
+        stderr: String::new(),
+    }));
+    let adapter = ClaudeAdapter;
+    let result = adapter
+        .execute(&runner, &claude_context(), "do a task", None)
+        .expect("result must parse");
+    assert_eq!(result.terminal, AgentTerminal::Failure);
+    assert_eq!(result.payload["type"], json!("turn.failed"));
+    assert_eq!(result.payload["reason"], json!("protocol_violation"));
+    assert_eq!(result.payload["unsupported_event_types"], json!(["legacy.event"]));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|line| line.contains("unsupported claude event `legacy.event`")));
 }
 
 #[test]

@@ -8,6 +8,7 @@ use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::prompt_registry::{ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry};
 use crate::protocol::AgentTerminal;
+use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::runtime::{Clock, FileSystem, ProcessRunner};
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::worker::evidence::log_event_from;
@@ -65,7 +66,14 @@ pub(crate) fn execute_merge_phase(
     };
 
     for attempt in 0..MAX_MERGE_REMEDIATION {
-        let status = gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL)?;
+        let status = retry_with_backoff(
+            &RetryConfig {
+                operation_name: "poll_mergeability",
+                max_attempts: 2,
+                ..Default::default()
+            },
+            || gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL),
+        )?;
         if let Ok(pr_view) = gh.view_pr(pr) {
             if pr_view.state.eq_ignore_ascii_case("MERGED") || pr_view.merged_at.is_some() {
                 append_run_log(
@@ -205,7 +213,13 @@ pub(crate) fn execute_merge_phase(
                 emit_worker_tool_command(task_id, on_event, &format!("gh pr merge {pr}"));
                 match gh.merge_pr(pr) {
                     Ok(()) => {
-                        let view = gh.view_pr(pr)?;
+                        let view = retry_with_backoff(
+                            &RetryConfig {
+                                operation_name: "view_pr_after_merge",
+                                ..Default::default()
+                            },
+                            || gh.view_pr(pr),
+                        )?;
                         let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
                         merge_output = MergingOutput {
                             merged: true,
@@ -470,24 +484,19 @@ pub(crate) fn execute_merge_phase(
                 let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
                 if !has_explicit_failed_checks(&failed_checks) {
                     if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                        emit_worker_activity_state(
-                            worker_id,
-                            task_id,
-                            WorkerActivityState::Failed,
-                            on_event,
-                        );
-                        return Ok(WorkerRunSummary {
-                            worker_id: req.worker_id.clone(),
-                            session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed,
-                            logs,
-                            teardown: None,
-                            failure_reason: Some(
-                                "PR is blocked by branch protection rules (no explicit failed checks found)"
-                                    .to_string(),
-                            ),
-                        });
-                    }
+                            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
+                            return Ok(WorkerRunSummary {
+                                worker_id: req.worker_id.clone(),
+                                session_id: req.session_id.clone(),
+                                final_state: WorkerState::Parked,
+                                logs,
+                                teardown: None,
+                                failure_reason: Some(
+                                    "PR blocked by branch protection rules, parked for retry"
+                                        .to_string(),
+                                ),
+                            });
+                        }
                     continue;
                 }
                 emit_worker_activity_state_with(
@@ -598,7 +607,13 @@ pub(crate) fn execute_merge_phase(
                 emit_worker_tool_command(task_id, on_event, &format!("gh pr merge {pr}"));
                 match gh.merge_pr(pr) {
                     Ok(()) => {
-                        let view = gh.view_pr(pr)?;
+                        let view = retry_with_backoff(
+                            &RetryConfig {
+                                operation_name: "view_pr_after_merge",
+                                ..Default::default()
+                            },
+                            || gh.view_pr(pr),
+                        )?;
                         let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
                         merge_output = MergingOutput {
                             merged: true,
@@ -645,24 +660,16 @@ pub(crate) fn execute_merge_phase(
         cfg,
         scope,
     ) {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
         append_run_log(
-            "error",
-            "worker.merging.post_validation_failed",
+            "warn",
+            "worker.recovery.post_merge_validation_failed_but_merged",
             serde_json::json!({
                 "worker_id": worker_id,
                 "task_id": task_id,
-                "error": err.to_string()
+                "error": err.to_string(),
+                "merge_sha": merge_output.merge_sha
             }),
         );
-        return Ok(WorkerRunSummary {
-            worker_id: req.worker_id.clone(),
-            session_id: req.session_id.clone(),
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason: Some(format!("post-merge validation failed: {err}")),
-        });
     }
 
     {
@@ -1030,6 +1037,134 @@ mod tests {
                 && request.args[0] == "pr"
                 && request.args[1] == "merge"
         }));
+    }
+
+    #[test]
+    fn execute_merge_phase_completes_when_post_merge_validation_fails_after_merge() {
+        let runner = FakeProcessRunner::default();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scope = RuntimeScope {
+            process_cwd: dir.path().to_path_buf(),
+            repo_root: Some(dir.path().to_path_buf()),
+            working_dir: dir.path().to_path_buf(),
+        };
+        let mut cfg = AppConfig::default();
+        cfg.execution.test_mode = true;
+        cfg.validation.command = "npm run validate".to_string();
+
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergedAt":null,"mergeCommit":null,"headRefName":"gardener/manual-test","state":"OPEN"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"[{"bucket":"PASS"}]"#.to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: r#"{"mergedAt":"2026-03-06T12:00:00Z","mergeCommit":{"oid":"cafebabe"},"headRefName":"gardener/manual-test","state":"MERGED"}"#.to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "failed validation".to_string(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "false\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let req = MergeRequest {
+            slot_idx: 0,
+            task_id: "manual:test:post-merge-validation".to_string(),
+            task_summary: "test".to_string(),
+            attempt_count: 1,
+            worker_id: "merge-worker".to_string(),
+            session_id: "session-1".to_string(),
+            worktree_path: dir.path().join("worktree"),
+            branch: "gardener/manual-test".to_string(),
+            pr_number: 42,
+            logs: Vec::new(),
+            handoff_evidence_bundle: None,
+        };
+
+        let fs = ProductionFileSystem;
+        let clock = ProductionClock;
+        let summary = execute_merge_phase(&req, &cfg, &runner, &fs, &clock, &scope, None)
+            .expect("merge phase should return summary");
+
+        assert_eq!(summary.final_state, WorkerState::Complete);
+        assert!(summary.failure_reason.is_none());
+        assert!(summary.teardown.as_ref().is_some_and(|t| t.worktree_cleaned));
     }
 
     #[test]

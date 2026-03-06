@@ -58,6 +58,7 @@ pub mod quality_tree_walker;
 pub mod quality_untested_finder;
 pub mod repo_intelligence;
 pub mod review_phase;
+pub mod retry;
 pub mod runtime;
 pub mod seed_runner;
 pub mod seeding;

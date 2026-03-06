@@ -9,6 +9,7 @@ use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::prompt_registry::pr_creation_template;
 use crate::protocol::AgentTerminal;
+use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
@@ -20,7 +21,7 @@ use crate::worker::simulated::execute_task_simulated;
 use crate::worker::stream_events::{
     emit_adapter_tool_event, emit_worker_activity_state, extract_failure_reason,
 };
-use crate::worker::types::{MergeRequest, WorkerOutcome, WorkerRunSummary};
+use crate::worker::types::{MergeRequest, WorkerLogEvent, WorkerOutcome, WorkerRunSummary, WorkerStreamEvent};
 use crate::worker::worktree_naming::{worktree_branch_for, worktree_path_for};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
@@ -106,6 +107,87 @@ fn should_complete_merged_pr_without_diff(
         }),
     );
     Ok(should_complete)
+}
+
+fn failed_summary(
+    identity: &WorkerIdentity,
+    logs: Vec<WorkerLogEvent>,
+    failure_reason: Option<String>,
+) -> WorkerRunSummary {
+    WorkerRunSummary {
+        worker_id: identity.worker_id.clone(),
+        session_id: identity.session.session_id.clone(),
+        final_state: WorkerState::Failed,
+        logs,
+        teardown: None,
+        failure_reason,
+    }
+}
+
+fn fsm_failure_outcome(
+    err: GardenerError,
+    operation: &str,
+    worker_id: &str,
+    task_id: &str,
+    identity: &WorkerIdentity,
+    logs: Vec<WorkerLogEvent>,
+    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
+) -> WorkerOutcome {
+    append_run_log(
+        "error",
+        "worker.recovery.fsm_transition_failed",
+        json!({
+            "worker_id": worker_id,
+            "task_id": task_id,
+            "operation": operation,
+            "error": err.to_string()
+        }),
+    );
+    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
+    WorkerOutcome::Completed(failed_summary(
+        identity,
+        logs,
+        Some(format!("internal FSM error: {err}")),
+    ))
+}
+
+fn salvage_doing_work_from_git(
+    git: &GitClient<'_>,
+    pre_doing_sha: &str,
+    task_summary: &str,
+    worker_id: &str,
+    task_id: &str,
+) -> Result<Option<DoingOutput>, GardenerError> {
+    let commits = git.commits_since(pre_doing_sha).unwrap_or_default();
+    if let Some(subject) = commits.into_iter().next() {
+        append_run_log(
+            "warn",
+            "worker.recovery.doing_salvage_from_commits",
+            json!({
+                "worker_id": worker_id,
+                "task_id": task_id,
+                "commit_subject": &subject
+            }),
+        );
+        return Ok(Some(DoingOutput { summary: subject }));
+    }
+
+    if !git.worktree_is_clean()? {
+        let msg = fallback_commit_message(task_summary);
+        git.commit_all(&msg)?;
+        append_run_log(
+            "warn",
+            "worker.recovery.doing_salvage_from_dirty_worktree",
+            json!({
+                "worker_id": worker_id,
+                "task_id": task_id,
+                "commit_message": &msg
+            }),
+        );
+        return Ok(Some(DoingOutput { summary: msg }));
+    }
+
+    Ok(None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -244,24 +326,15 @@ fn execute_task_live(
     })?;
     logs.push(log_event_from(&understand_result, WorkerState::Understand));
     if understand_result.terminal == AgentTerminal::Failure {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
-        let failure_reason = extract_failure_reason(&understand_result.payload);
         append_run_log(
-            "error",
-            "worker.task.terminal_failure",
+            "warn",
+            "worker.recovery.understand_terminal_fallback",
             json!({
                 "worker_id": identity.worker_id,
-                "state": "understand"
+                "task_id": task_id,
+                "reason": extract_failure_reason(&understand_result.payload)
             }),
         );
-        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason,
-        }));
     }
     let understand = parse_understand_output(&understand_result.payload, worker_id, task_summary);
     append_run_log(
@@ -276,7 +349,17 @@ fn execute_task_live(
             "branch": branch
         }),
     );
-    fsm.apply_understand(&understand, attempt_count > 1)?;
+    if let Err(err) = fsm.apply_understand(&understand, attempt_count > 1) {
+        return Ok(fsm_failure_outcome(
+            err,
+            "apply_understand",
+            worker_id,
+            task_id,
+            &identity,
+            logs,
+            on_event,
+        ));
+    }
 
     if fsm.state == WorkerState::Planning {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Planning, on_event);
@@ -297,33 +380,34 @@ fn execute_task_live(
         })?;
         logs.push(log_event_from(&planning_result, WorkerState::Planning));
         if planning_result.terminal == AgentTerminal::Failure {
-            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
-            let failure_reason = extract_failure_reason(&planning_result.payload);
             append_run_log(
-                "error",
-                "worker.task.terminal_failure",
+                "warn",
+                "worker.recovery.planning_terminal_skip",
                 json!({
                     "worker_id": identity.worker_id,
-                    "state": "planning"
+                    "task_id": task_id,
+                    "reason": extract_failure_reason(&planning_result.payload)
                 }),
             );
-            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-                worker_id: identity.worker_id,
-                session_id: identity.session.session_id,
-                final_state: WorkerState::Failed,
-                logs,
-                teardown: None,
-                failure_reason,
-            }));
         }
-        fsm.transition(WorkerState::Doing)?;
+        if let Err(err) = fsm.transition(WorkerState::Doing) {
+            return Ok(fsm_failure_outcome(
+                err,
+                "planning_to_doing",
+                worker_id,
+                task_id,
+                &identity,
+                logs,
+                on_event,
+            ));
+        }
     }
 
     let git = GitClient::new(process_runner, &worktree_path);
     let pre_doing_sha = git.head_sha()?.unwrap_or_default();
 
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Doing, on_event);
-    let doing_result = run_agent_turn(AgentTurnInput {
+    let doing_output = match run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
         scope,
@@ -337,78 +421,131 @@ fn execute_task_live(
         attempt_count,
         prompt_override: None,
         on_event: Some(&on_adapter_event),
-    })?;
-    logs.push(log_event_from(&doing_result, WorkerState::Doing));
-    if doing_result.terminal == AgentTerminal::Failure {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
-        let failure_reason = extract_failure_reason(&doing_result.payload);
-        append_run_log(
-            "error",
-            "worker.task.terminal_failure",
-            json!({
-                "worker_id": identity.worker_id,
-                "state": "doing"
-            }),
-        );
-        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
-            logs,
-            teardown: None,
-            failure_reason,
-        }));
-    }
-    let doing_output = match parse_doing_output(&doing_result.payload, worker_id, task_summary) {
-        Ok(output) => output,
-        Err(parse_err) => {
-            let commits = git.commits_since(&pre_doing_sha).unwrap_or_default();
-            if let Some(subject) = commits.into_iter().next() {
-                append_run_log(
-                    "warn",
-                    "worker.doing.payload_fallback_to_git",
-                    json!({
-                        "worker_id": worker_id,
-                        "task_id": task_id,
-                        "parse_error": parse_err.to_string(),
-                        "commit_subject": &subject
-                    }),
-                );
-                DoingOutput { summary: subject }
-            } else if !git.worktree_is_clean()? {
-                let msg = fallback_commit_message(task_summary);
-                git.commit_all(&msg)?;
-                append_run_log(
-                    "warn",
-                    "worker.doing.payload_fallback_to_dirty_worktree",
-                    json!({
-                        "worker_id": worker_id,
-                        "task_id": task_id,
-                        "parse_error": parse_err.to_string(),
-                        "commit_message": &msg
-                    }),
-                );
-                DoingOutput { summary: msg }
-            } else {
-                emit_worker_activity_state(
+    }) {
+        Ok(doing_result) => {
+            logs.push(log_event_from(&doing_result, WorkerState::Doing));
+            if doing_result.terminal == AgentTerminal::Failure {
+                match salvage_doing_work_from_git(
+                    &git,
+                    &pre_doing_sha,
+                    task_summary,
                     worker_id,
                     task_id,
-                    WorkerActivityState::Failed,
-                    on_event,
-                );
-                return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-                    worker_id: identity.worker_id,
-                    session_id: identity.session.session_id,
-                    final_state: WorkerState::Failed,
-                    logs,
-                    teardown: None,
-                    failure_reason: Some(parse_err.to_string()),
-                }));
+                )? {
+                    Some(output) => {
+                        append_run_log(
+                            "warn",
+                            "worker.recovery.doing_terminal_failure_salvaged",
+                            json!({
+                                "worker_id": identity.worker_id,
+                                "task_id": task_id,
+                                "reason": extract_failure_reason(&doing_result.payload),
+                                "summary": output.summary
+                            }),
+                        );
+                        output
+                    }
+                    None => {
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Failed,
+                            on_event,
+                        );
+                        return Ok(WorkerOutcome::Completed(failed_summary(
+                            &identity,
+                            logs,
+                            extract_failure_reason(&doing_result.payload),
+                        )));
+                    }
+                }
+            } else {
+                match parse_doing_output(&doing_result.payload, worker_id, task_summary) {
+                    Ok(output) => output,
+                    Err(parse_err) => match salvage_doing_work_from_git(
+                        &git,
+                        &pre_doing_sha,
+                        task_summary,
+                        worker_id,
+                        task_id,
+                    )? {
+                        Some(output) => {
+                            append_run_log(
+                                "warn",
+                                "worker.recovery.doing_payload_salvaged",
+                                json!({
+                                    "worker_id": worker_id,
+                                    "task_id": task_id,
+                                    "parse_error": parse_err.to_string(),
+                                    "summary": output.summary
+                                }),
+                            );
+                            output
+                        }
+                        None => {
+                            emit_worker_activity_state(
+                                worker_id,
+                                task_id,
+                                WorkerActivityState::Failed,
+                                on_event,
+                            );
+                            return Ok(WorkerOutcome::Completed(failed_summary(
+                                &identity,
+                                logs,
+                                Some(parse_err.to_string()),
+                            )));
+                        }
+                    },
+                }
+            }
+        }
+        Err(agent_err) => {
+            append_run_log(
+                "error",
+                "worker.recovery.doing_agent_crash",
+                json!({
+                    "worker_id": worker_id,
+                    "task_id": task_id,
+                    "error": agent_err.to_string()
+                }),
+            );
+            match salvage_doing_work_from_git(&git, &pre_doing_sha, task_summary, worker_id, task_id)?
+            {
+                Some(output) => {
+                    append_run_log(
+                        "warn",
+                        "worker.recovery.doing_agent_crash_salvaged",
+                        json!({
+                            "worker_id": worker_id,
+                            "task_id": task_id,
+                            "summary": output.summary
+                        }),
+                    );
+                    output
+                }
+                None => {
+                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
+                    return Ok(WorkerOutcome::Completed(failed_summary(
+                        &identity,
+                        logs,
+                        Some(format!("agent process crashed: {agent_err}")),
+                    )));
+                }
             }
         }
     };
     let _ = doing_output;
-    fsm.on_doing_turn_completed()?;
+    if let Err(err) = fsm.on_doing_turn_completed() {
+        return Ok(fsm_failure_outcome(
+            err,
+            "doing_turn_completed",
+            worker_id,
+            task_id,
+            &identity,
+            logs,
+            on_event,
+        ));
+    }
     if fsm.state == WorkerState::Parked {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
         append_run_log(
@@ -432,7 +569,17 @@ fn execute_task_live(
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Commit, on_event);
     git.commit_all(&fallback_commit_message(task_summary))?;
 
-    fsm.transition(WorkerState::Gitting)?;
+    if let Err(err) = fsm.transition(WorkerState::Gitting) {
+        return Ok(fsm_failure_outcome(
+            err,
+            "doing_to_gitting",
+            worker_id,
+            task_id,
+            &identity,
+            logs,
+            on_event,
+        ));
+    }
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Gitting, on_event);
     append_run_log(
         "info",
@@ -580,9 +727,18 @@ fn execute_task_live(
         on_event: Some(&on_adapter_event),
     })?;
     if pr_result.terminal == AgentTerminal::Failure {
-        return Err(GardenerError::Process(
-            "pr creation agent failed".to_string(),
-        ));
+        append_run_log(
+            "warn",
+            "worker.recovery.pr_creation_deterministic_fallback",
+            json!({
+                "worker_id": identity.worker_id,
+                "task_id": task_id,
+                "reason": extract_failure_reason(&pr_result.payload)
+            }),
+        );
+        let title = fallback_commit_message(task_summary);
+        let body = format!("Automated PR for task: {task_summary}");
+        gh.create_pr(&title, &body).map(|_| ())?;
     }
     if should_complete_merged_pr_without_diff(process_runner, &worktree_path, task_summary)? {
         append_run_log(
@@ -603,7 +759,13 @@ fn execute_task_live(
             failure_reason: None,
         }));
     }
-    let (number, _url) = gh.find_pr_for_branch(&branch)?;
+    let (number, _url) = retry_with_backoff(
+        &RetryConfig {
+            operation_name: "find_pr_for_branch",
+            ..Default::default()
+        },
+        || gh.find_pr_for_branch(&branch),
+    )?;
     let pr_number = number;
     append_run_log(
         "info",
@@ -615,7 +777,17 @@ fn execute_task_live(
         }),
     );
 
-    fsm.transition(WorkerState::Reviewing)?;
+    if let Err(err) = fsm.transition(WorkerState::Reviewing) {
+        return Ok(fsm_failure_outcome(
+            err,
+            "gitting_to_reviewing",
+            worker_id,
+            task_id,
+            &identity,
+            logs,
+            on_event,
+        ));
+    }
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Reviewing, on_event);
     let reviewing_result = run_agent_turn(AgentTurnInput {
         cfg,
@@ -634,26 +806,26 @@ fn execute_task_live(
     })?;
     logs.push(log_event_from(&reviewing_result, WorkerState::Reviewing));
     if reviewing_result.terminal == AgentTerminal::Failure {
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
-        let failure_reason = extract_failure_reason(&reviewing_result.payload);
         append_run_log(
-            "error",
-            "worker.task.terminal_failure",
+            "warn",
+            "worker.recovery.review_terminal_parked",
             json!({
                 "worker_id": identity.worker_id,
-                "state": "reviewing"
+                "task_id": task_id,
+                "pr_number": pr_number,
+                "reason": extract_failure_reason(&reviewing_result.payload)
             }),
         );
+        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
         return Ok(WorkerOutcome::Completed(WorkerRunSummary {
             worker_id: identity.worker_id,
             session_id: identity.session.session_id,
-            final_state: WorkerState::Failed,
+            final_state: WorkerState::Parked,
             logs,
             teardown: None,
-            failure_reason,
+            failure_reason: Some("review agent failed after PR creation".to_string()),
         }));
     }
-
     let reviewing_output = parse_reviewing_output(&reviewing_result.payload);
     log_and_persist_review_output(scope, task_id, &identity.worker_id, &reviewing_output);
     if reviewing_output.verdict == ReviewVerdict::NeedsChanges {
@@ -670,9 +842,29 @@ fn execute_task_live(
                 "suggestions": reviewing_output.suggestions
             }),
         );
-        fsm.on_review_loop_back()?;
+        if let Err(err) = fsm.on_review_loop_back() {
+            return Ok(fsm_failure_outcome(
+                err,
+                "review_loop_back",
+                worker_id,
+                task_id,
+                &identity,
+                logs,
+                on_event,
+            ));
+        }
         if fsm.state != WorkerState::Parked {
-            fsm.transition(WorkerState::Parked)?;
+            if let Err(err) = fsm.transition(WorkerState::Parked) {
+                return Ok(fsm_failure_outcome(
+                    err,
+                    "reviewing_to_parked",
+                    worker_id,
+                    task_id,
+                    &identity,
+                    logs,
+                    on_event,
+                ));
+            }
         }
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
         let reason = match action {
@@ -710,7 +902,17 @@ fn execute_task_live(
                 "suggestions": reviewing_output.suggestions
             }),
         );
-        fsm.transition(WorkerState::Merging)?;
+        if let Err(err) = fsm.transition(WorkerState::Merging) {
+            return Ok(fsm_failure_outcome(
+                err,
+                "reviewing_to_merging",
+                worker_id,
+                task_id,
+                &identity,
+                logs,
+                on_event,
+            ));
+        }
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging, on_event);
     }
 
@@ -752,11 +954,12 @@ fn execute_task_live(
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_review_action, execute_task, parse_merge_open_pr_number,
+        decide_review_action, execute_task, parse_merge_open_pr_number, salvage_doing_work_from_git,
         should_complete_merged_pr_without_diff, ReviewAction,
     };
     use crate::config::AppConfig;
     use crate::fsm::{ReviewVerdict, MAX_REVIEW_LOOPS};
+    use crate::git::GitClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use crate::types::{RuntimeScope, WorkerState};
     use crate::worker::types::WorkerOutcome;
@@ -895,5 +1098,102 @@ mod tests {
         .expect("check should succeed");
 
         assert!(!should_complete);
+    }
+
+    #[test]
+    fn salvage_doing_work_from_git_prefers_existing_commit_subject() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "feat: recovered work\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let git = GitClient::new(&runner, "/repo");
+        let salvaged = salvage_doing_work_from_git(
+            &git,
+            "abc123",
+            "feature: add recovery",
+            "worker-1",
+            "task-1",
+        )
+        .expect("salvage should succeed");
+
+        assert_eq!(
+            salvaged.expect("should salvage").summary,
+            "feat: recovered work"
+        );
+    }
+
+    #[test]
+    fn salvage_doing_work_from_git_commits_dirty_worktree_when_needed() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: " M src/lib.rs\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: " M src/lib.rs\n".to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "[main abc123] feat: feature: add recovery\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let git = GitClient::new(&runner, "/repo");
+        let salvaged = salvage_doing_work_from_git(
+            &git,
+            "abc123",
+            "feature: add recovery",
+            "worker-1",
+            "task-1",
+        )
+        .expect("salvage should succeed");
+
+        assert_eq!(
+            salvaged.expect("should salvage").summary,
+            "feat: feature: add recovery"
+        );
+    }
+
+    #[test]
+    fn salvage_doing_work_from_git_returns_none_for_clean_tree_without_commits() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+
+        let git = GitClient::new(&runner, "/repo");
+        let salvaged = salvage_doing_work_from_git(
+            &git,
+            "abc123",
+            "feature: add recovery",
+            "worker-1",
+            "task-1",
+        )
+        .expect("salvage should succeed");
+
+        assert!(salvaged.is_none());
     }
 }

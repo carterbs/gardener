@@ -3,7 +3,7 @@ use gardener::output_envelope::parse_last_envelope;
 use gardener::runtime::{
     FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, ProcessOutput, ProductionRuntime,
 };
-use gardener::triage::{triage_needed, TriageDecision};
+use gardener::triage::{ensure_profile_for_run, profile_path, triage_needed, TriageDecision};
 use gardener::triage_agent_detection::{is_non_interactive, EnvMap};
 use gardener::triage_discovery::DiscoveryAssessment;
 use gardener::types::{RuntimeScope, WorkerState};
@@ -32,10 +32,7 @@ fn default_config() -> AppConfig {
 }
 
 fn default_profile_path() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-        .join(".gardener")
-        .join("repo")
-        .join("repo-intelligence.toml")
+    profile_path(&default_scope(), &default_config())
 }
 
 // --- Triage Decision Tests ---
@@ -158,5 +155,55 @@ fn interactive_detected_with_tty_no_ci() {
     assert!(
         reason.is_none(),
         "TTY without CI should be interactive, got: {reason:?}"
+    );
+}
+
+#[test]
+fn ensure_profile_uses_stale_profile_in_non_interactive_mode() {
+    let fixture_path = default_profile_path();
+    let profile_toml = include_str!("fixtures/triage/expected-profiles/phase03-profile.toml");
+    let fs = FakeFileSystem::with_file(fixture_path, profile_toml);
+    let process = FakeProcessRunner::default();
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process),
+        terminal: Arc::new(FakeTerminal::new(false)),
+    };
+    let scope = default_scope();
+    let cfg = default_config();
+    let mut env = EnvMap::new();
+    env.insert("CI".to_string(), "1".to_string());
+    let resolved_path = profile_path(&scope, &cfg);
+    assert_eq!(resolved_path, default_profile_path());
+    assert!(runtime.file_system.exists(&resolved_path));
+
+    let profile = ensure_profile_for_run(&runtime, &scope, &cfg, &env, true, None)
+        .expect("stale non-interactive profile should be accepted")
+        .expect("profile should be loaded");
+    assert_eq!(profile.meta.schema_version, 1);
+}
+
+#[test]
+fn ensure_profile_still_blocks_non_interactive_when_profile_missing() {
+    let fs = FakeFileSystem::default();
+    let process = FakeProcessRunner::default();
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process),
+        terminal: Arc::new(FakeTerminal::new(false)),
+    };
+    let scope = default_scope();
+    let cfg = default_config();
+    let mut env = EnvMap::new();
+    env.insert("CI".to_string(), "1".to_string());
+
+    let err = ensure_profile_for_run(&runtime, &scope, &cfg, &env, true, None)
+        .expect_err("missing profile should remain blocked in non-interactive mode");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("No repo intelligence profile was found"),
+        "unexpected error: {msg}"
     );
 }

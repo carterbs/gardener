@@ -404,13 +404,32 @@ pub fn ensure_profile_for_run(
             Ok(Some(profile))
         }
         TriageDecision::Needed => {
-            if is_non_interactive(env, runtime.terminal.as_ref()).is_some() {
+            if let Some(reason) = is_non_interactive(env, runtime.terminal.as_ref()) {
                 let path = profile_path(scope, cfg);
+                match read_profile(runtime.file_system.as_ref(), &path) {
+                    Ok(profile) => {
+                        append_run_log(
+                            "warn",
+                            "triage.ensure_profile.non_interactive_fallback",
+                            json!({
+                                "output_path": path.display().to_string(),
+                                "reason": format!("{reason:?}"),
+                                "head_sha": profile.meta.head_sha,
+                                "readiness_grade": profile.agent_readiness.readiness_grade,
+                                "force_retriage": force_retriage
+                            }),
+                        );
+                        return Ok(Some(profile));
+                    }
+                    Err(GardenerError::Io(_)) => {}
+                    Err(error) => return Err(error),
+                }
                 append_run_log(
                     "error",
                     "triage.ensure_profile.blocked_non_interactive",
                     json!({
-                        "output_path": path.display().to_string()
+                        "output_path": path.display().to_string(),
+                        "reason": format!("{reason:?}")
                     }),
                 );
                 return Err(GardenerError::Cli(format!(

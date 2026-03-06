@@ -2,45 +2,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const MIN_INSTRUMENTATION_COVERAGE: f64 = 90.0;
+#[path = "support/testability_boundary.rs"]
+mod testability_boundary;
 
-const EXCLUDED_FILES: &[&str] = &[
-    "errors.rs",
-    "hotkeys.rs",
-    // log_retention.rs is the log-rotation/pruning infrastructure. Calling
-    // append_run_log from within it while the write lock is held would deadlock.
-    "log_retention.rs",
-    "main.rs",
-    "output_envelope.rs",
-    "priority.rs",
-    "prompt_context.rs",
-    "prompt_knowledge.rs",
-    "prompt_registry.rs",
-    "prompts.rs",
-    "protocol.rs",
-    // Quality pipeline modules — pure computation, data scanning, and prompt
-    // construction with no side effects that warrant instrumentation.
-    "quality_assertion_counter.rs",
-    "quality_ci_lint_detector.rs",
-    "quality_complexity_analyzer.rs",
-    "quality_debt_scanner.rs",
-    "quality_dimension_prompts.rs",
-    "quality_doc_scanner.rs",
-    "quality_domain_catalog.rs",
-    "quality_evidence_bundle.rs",
-    "quality_file_sampler.rs",
-    "quality_grade_compute.rs",
-    "quality_grade_renderer.rs",
-    "quality_instrumentation_detector.rs",
-    "quality_test_detector.rs",
-    "quality_tree_walker.rs",
-    "quality_untested_finder.rs",
-    "runtime/mod.rs",
-    "task_identity.rs",
-    "tui.rs",
-    "types.rs",
-    "worker_identity.rs",
-];
+use testability_boundary::{BoundaryManifest, InstrumentationPolicy, Role};
+
+const MIN_INSTRUMENTATION_COVERAGE: f64 = 90.0;
 
 const INSTRUMENTATION_MARKERS: &[&str] = &["append_run_log(", "structured_fallback_line("];
 const SIDE_EFFECT_MARKERS: &[&str] = &[
@@ -81,23 +48,24 @@ struct FileStats {
 #[test]
 fn linter_instrumentation_coverage_by_file() {
     let src_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut rust_files = Vec::new();
-    collect_rust_files(&src_root, &mut rust_files);
-    rust_files.sort();
+    let manifest = BoundaryManifest::load();
 
     let mut failures = Vec::new();
     let mut graded = BTreeMap::new();
 
-    for file in rust_files {
-        let relative = file
-            .strip_prefix(&src_root)
-            .expect("strip prefix")
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        if EXCLUDED_FILES.iter().any(|excluded| relative == *excluded) {
+    for entry in manifest.boundary_entries() {
+        if entry.instrumentation != InstrumentationPolicy::Required {
             continue;
         }
+        if entry.role != Role::BoundaryOrchestration {
+            continue;
+        }
+        let file = manifest.repo_root.join(&entry.path);
+        let relative = file
+            .strip_prefix(&src_root)
+            .unwrap_or_else(|_| panic!("{} must live under {}", entry.path, src_root.display()))
+            .to_string_lossy()
+            .replace('\\', "/");
 
         let source = fs::read_to_string(&file).expect("read source file");
         let stats = grade_file(&relative, &source);

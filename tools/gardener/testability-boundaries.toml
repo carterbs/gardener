@@ -1,0 +1,55 @@
+[scope]
+roots = [
+  "tools/gardener/src/tui",
+  "tools/gardener/src/worktree_audit",
+]
+
+allowlisted_paths = [
+  "tools/gardener/src/tui/dashboard.rs",
+  "tools/gardener/src/tui/formatting.rs",
+  "tools/gardener/src/tui/mod.rs",
+  "tools/gardener/src/tui/report.rs",
+  "tools/gardener/src/tui/seed_review.rs",
+  "tools/gardener/src/tui/startup.rs",
+  "tools/gardener/src/tui/state.rs",
+  "tools/gardener/src/tui/tests.rs",
+  "tools/gardener/src/tui/wizard.rs",
+  "tools/gardener/src/worktree_audit/mod.rs",
+]
+
+[[file]]
+path = "tools/gardener/src/tui/backlog.rs"
+role = "unit-core"
+
+[[file]]
+path = "tools/gardener/src/tui/terminal.rs"
+role = "boundary-orchestration"
+owning_tests = ["tui_live_smoke"]
+boundary_modes = ["pty"]
+instrumentation = "required"
+
+[[file]]
+path = "tools/gardener/src/tui/quality.rs"
+role = "boundary-orchestration"
+owning_tests = ["tui_live_smoke"]
+boundary_modes = ["pty"]
+instrumentation = "required"
+
+[[file]]
+path = "tools/gardener/src/tui/triage.rs"
+role = "unit-core"
+
+[[file]]
+path = "tools/gardener/src/worktree_audit/live.rs"
+role = "boundary-orchestration"
+owning_tests = ["worktree_audit_live"]
+boundary_modes = ["temp-repo"]
+instrumentation = "required"
+
+[[file]]
+path = "tools/gardener/src/worktree_audit/logic.rs"
+role = "unit-core"
+
+[[file]]
+path = "tools/gardener/src/worktree_audit/model.rs"
+role = "unit-core"

@@ -157,6 +157,65 @@ impl<'a> GitClient<'a> {
         Ok(subjects)
     }
 
+    pub fn head_ahead_behind_main(&self) -> Result<(u64, u64), GardenerError> {
+        let out = self.run([
+            "git",
+            "rev-list",
+            "--left-right",
+            "--count",
+            "origin/main...HEAD",
+        ])?;
+        if out.exit_code != 0 {
+            append_run_log(
+                "error",
+                "git.head_ahead_behind_main.failed",
+                json!({
+                    "cwd": self.cwd.display().to_string(),
+                    "exit_code": out.exit_code,
+                    "stderr": out.stderr
+                }),
+            );
+            return Err(GardenerError::Process(format!(
+                "git rev-list --left-right --count origin/main...HEAD failed: {}",
+                out.stderr
+            )));
+        }
+        let counts = out.stdout.trim();
+        let mut parts = counts.split_whitespace();
+        let behind = parts
+            .next()
+            .ok_or_else(|| {
+                GardenerError::Process(format!("unexpected rev-list ahead/behind output: {counts}"))
+            })?
+            .parse::<u64>()
+            .map_err(|e| {
+                GardenerError::Process(format!(
+                    "invalid behind count in rev-list ahead/behind output `{counts}`: {e}"
+                ))
+            })?;
+        let ahead = parts
+            .next()
+            .ok_or_else(|| {
+                GardenerError::Process(format!("unexpected rev-list ahead/behind output: {counts}"))
+            })?
+            .parse::<u64>()
+            .map_err(|e| {
+                GardenerError::Process(format!(
+                    "invalid ahead count in rev-list ahead/behind output `{counts}`: {e}"
+                ))
+            })?;
+        append_run_log(
+            "debug",
+            "git.head_ahead_behind_main",
+            json!({
+                "cwd": self.cwd.display().to_string(),
+                "behind": behind,
+                "ahead": ahead
+            }),
+        );
+        Ok((ahead, behind))
+    }
+
     pub fn verify_ancestor(
         &self,
         maybe_ancestor: &str,
@@ -1620,6 +1679,43 @@ mod tests {
         assert!(err.to_string().contains("git merge origin/main failed"));
         let spawned = runner.spawned();
         assert!(spawned[2].args.contains(&"--abort".to_string()));
+    }
+
+    #[test]
+    fn head_ahead_behind_main_parses_counts() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "3\t2\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let (ahead, behind) = GitClient::new(&runner, "/repo")
+            .head_ahead_behind_main()
+            .expect("ahead/behind should parse");
+
+        assert_eq!((ahead, behind), (2, 3));
+        let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec!["rev-list", "--left-right", "--count", "origin/main...HEAD"]
+        );
+    }
+
+    #[test]
+    fn head_ahead_behind_main_rejects_invalid_output() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "wat".to_string(),
+            stderr: String::new(),
+        }));
+
+        let err = GitClient::new(&runner, "/repo")
+            .head_ahead_behind_main()
+            .expect_err("invalid output should fail");
+
+        assert!(err.to_string().contains("rev-list ahead/behind output"));
     }
 
     #[test]

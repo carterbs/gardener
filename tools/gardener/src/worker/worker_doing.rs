@@ -3,26 +3,27 @@ use crate::agent_turn::{run_agent_turn, AgentTurnInput};
 use crate::config::AppConfig;
 use crate::do_phase::{fallback_commit_message, parse_doing_output};
 use crate::errors::GardenerError;
-use crate::fsm::{DoingOutput, FsmSnapshot, MAX_REVIEW_LOOPS, ReviewVerdict};
+use crate::fsm::{DoingOutput, FsmSnapshot, ReviewVerdict, MAX_REVIEW_LOOPS};
+use crate::git::GitClient;
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::prompt_registry::pr_creation_template;
 use crate::protocol::AgentTerminal;
+use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::understand_phase::parse_understand_output;
-use crate::worker::evidence::{collect_handoff_evidence_bundle, log_and_persist_review_output, log_event_from};
+use crate::worker::evidence::{
+    collect_handoff_evidence_bundle, log_and_persist_review_output, log_event_from,
+};
+use crate::worker::simulated::execute_task_simulated;
 use crate::worker::stream_events::{
-    emit_adapter_tool_event, emit_worker_activity_state,
-    extract_failure_reason,
+    emit_adapter_tool_event, emit_worker_activity_state, extract_failure_reason,
 };
 use crate::worker::types::{MergeRequest, WorkerOutcome, WorkerRunSummary};
 use crate::worker::worktree_naming::{worktree_branch_for, worktree_path_for};
-use crate::worker::simulated::execute_task_simulated;
 use crate::worker_identity::WorkerIdentity;
-use crate::review_phase::parse_reviewing_output;
 use crate::worktree::WorktreeClient;
-use crate::git::GitClient;
 use serde_json::json;
 
 const MAX_GITTING_REMEDIATION: u32 = 3;
@@ -44,6 +45,67 @@ fn decide_review_action(verdict: ReviewVerdict, review_loops: u32) -> ReviewActi
     } else {
         ReviewAction::Handoff
     }
+}
+
+fn parse_merge_open_pr_number(task_summary: &str) -> Option<u64> {
+    for line in task_summary.lines() {
+        let trimmed = line.trim();
+        let marker = "Merge open PR #";
+        let Some(suffix) = trimmed.strip_prefix(marker) else {
+            continue;
+        };
+        let digits: String = suffix.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        return digits.parse().ok();
+    }
+    None
+}
+
+fn should_complete_merged_pr_without_diff(
+    process_runner: &dyn ProcessRunner,
+    worktree_path: &std::path::Path,
+    task_summary: &str,
+) -> Result<bool, GardenerError> {
+    let Some(pr_number) = parse_merge_open_pr_number(task_summary) else {
+        return Ok(false);
+    };
+    let gh = crate::gh::GhClient::new(process_runner, worktree_path);
+    let pr = match gh.view_pr(pr_number) {
+        Ok(pr) => pr,
+        Err(err) => {
+            append_run_log(
+                "warn",
+                "worker.gitting.terminal_pr_check_skipped",
+                json!({
+                    "pr_number": pr_number,
+                    "worktree_path": worktree_path.display().to_string(),
+                    "error": err.to_string()
+                }),
+            );
+            return Ok(false);
+        }
+    };
+    if pr.state != "MERGED" {
+        return Ok(false);
+    }
+    let git = GitClient::new(process_runner, worktree_path);
+    let (ahead, behind) = git.head_ahead_behind_main()?;
+    let should_complete = ahead == 0;
+    append_run_log(
+        "info",
+        "worker.gitting.terminal_pr_check.completed",
+        json!({
+            "pr_number": pr_number,
+            "worktree_path": worktree_path.display().to_string(),
+            "pr_state": pr.state,
+            "ahead_of_main": ahead,
+            "behind_main": behind,
+            "complete_task": should_complete
+        }),
+    );
+    Ok(should_complete)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -80,7 +142,8 @@ pub(crate) fn execute_task(
         }),
     );
     if cfg.execution.test_mode {
-        return execute_task_simulated(cfg, worker_id, task_id, task_summary).map(WorkerOutcome::Completed);
+        return execute_task_simulated(cfg, worker_id, task_id, task_summary)
+            .map(WorkerOutcome::Completed);
     }
     execute_task_live(
         cfg,
@@ -158,7 +221,12 @@ fn execute_task_live(
         );
     }
 
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Understand, on_event);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::Understand,
+        on_event,
+    );
     let understand_result = run_agent_turn(AgentTurnInput {
         cfg,
         process_runner,
@@ -489,7 +557,12 @@ fn execute_task_live(
     }
 
     let gh = crate::gh::GhClient::new(process_runner, &worktree_path);
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PrCreating, on_event);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::PrCreating,
+        on_event,
+    );
     let pr_tpl = pr_creation_template();
     let pr_result = run_agent_turn(AgentTurnInput {
         cfg,
@@ -507,7 +580,28 @@ fn execute_task_live(
         on_event: Some(&on_adapter_event),
     })?;
     if pr_result.terminal == AgentTerminal::Failure {
-        return Err(GardenerError::Process("pr creation agent failed".to_string()));
+        return Err(GardenerError::Process(
+            "pr creation agent failed".to_string(),
+        ));
+    }
+    if should_complete_merged_pr_without_diff(process_runner, &worktree_path, task_summary)? {
+        append_run_log(
+            "info",
+            "worker.gitting.terminal_pr_completion",
+            json!({
+                "worker_id": identity.worker_id,
+                "task_id": task_id,
+                "branch": branch
+            }),
+        );
+        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
+            worker_id: identity.worker_id,
+            session_id: identity.session.session_id,
+            final_state: WorkerState::Complete,
+            logs,
+            teardown: None,
+            failure_reason: None,
+        }));
     }
     let (number, _url) = gh.find_pr_for_branch(&branch)?;
     let pr_number = number;
@@ -657,10 +751,13 @@ fn execute_task_live(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_review_action, execute_task, ReviewAction};
+    use super::{
+        decide_review_action, execute_task, parse_merge_open_pr_number,
+        should_complete_merged_pr_without_diff, ReviewAction,
+    };
     use crate::config::AppConfig;
-    use crate::runtime::FakeProcessRunner;
     use crate::fsm::{ReviewVerdict, MAX_REVIEW_LOOPS};
+    use crate::runtime::{FakeProcessRunner, ProcessOutput};
     use crate::types::{RuntimeScope, WorkerState};
     use crate::worker::types::WorkerOutcome;
     use std::path::PathBuf;
@@ -697,7 +794,10 @@ mod tests {
         };
 
         assert_eq!(summary.final_state, WorkerState::Complete);
-        assert!(summary.logs.iter().all(|event| !event.prompt_version.is_empty()));
+        assert!(summary
+            .logs
+            .iter()
+            .all(|event| !event.prompt_version.is_empty()));
         assert!(summary
             .logs
             .iter()
@@ -721,5 +821,79 @@ mod tests {
     fn review_needs_changes_at_cap_is_parked() {
         let action = decide_review_action(ReviewVerdict::NeedsChanges, MAX_REVIEW_LOOPS);
         assert_eq!(action, ReviewAction::Parked);
+    }
+
+    #[test]
+    fn parse_merge_open_pr_number_reads_manual_merge_tasks() {
+        let summary = "feat: something\n\nMerge open PR #140 on branch gardener/manual-runtime";
+        assert_eq!(parse_merge_open_pr_number(summary), Some(140));
+        assert_eq!(parse_merge_open_pr_number("plain task"), None);
+    }
+
+    #[test]
+    fn merged_pr_without_branch_diff_completes_task() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout:
+                "{\"mergedAt\":\"2026-03-04T18:04:38Z\",\"mergeCommit\":{\"oid\":\"abc\"},\"headRefName\":\"gardener/manual-runtime-f5f2a381c995e9\",\"state\":\"MERGED\"}"
+                    .to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "0\t0\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let should_complete = should_complete_merged_pr_without_diff(
+            &runner,
+            std::path::Path::new("/repo"),
+            "feat: lint\n\nMerge open PR #140 on branch gardener/manual-runtime-f5f2a381c995e9",
+        )
+        .expect("check should succeed");
+
+        assert!(should_complete);
+        let spawned = runner.spawned();
+        assert_eq!(
+            spawned[0].args,
+            vec![
+                "pr",
+                "view",
+                "140",
+                "--json",
+                "mergedAt,mergeCommit,headRefName,state"
+            ]
+        );
+        assert_eq!(
+            spawned[1].args,
+            vec!["rev-list", "--left-right", "--count", "origin/main...HEAD"]
+        );
+    }
+
+    #[test]
+    fn merged_pr_with_commits_ahead_stays_in_pr_flow() {
+        let runner = FakeProcessRunner::default();
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout:
+                "{\"mergedAt\":\"2026-03-04T18:04:38Z\",\"mergeCommit\":{\"oid\":\"abc\"},\"headRefName\":\"gardener/manual-runtime-f5f2a381c995e9\",\"state\":\"MERGED\"}"
+                    .to_string(),
+            stderr: String::new(),
+        }));
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "0\t2\n".to_string(),
+            stderr: String::new(),
+        }));
+
+        let should_complete = should_complete_merged_pr_without_diff(
+            &runner,
+            std::path::Path::new("/repo"),
+            "feat: lint\n\nMerge open PR #140 on branch gardener/manual-runtime-f5f2a381c995e9",
+        )
+        .expect("check should succeed");
+
+        assert!(!should_complete);
     }
 }

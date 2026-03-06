@@ -111,24 +111,23 @@ pub fn run_agent_turn(input: AgentTurnInput<'_>) -> Result<AgentTurnOutput, Gard
         }),
     );
 
-    let output_schema = if state == WorkerState::Doing {
-        let caps = adapter
-            .probe_capabilities(process_runner)
-            .unwrap_or_default();
-        if caps.supports_output_schema {
-            let schema_path = scope
-                .working_dir
-                .join(".cache/gardener/doing-output-schema.json");
-            let schema = r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#;
-            std::fs::write(&schema_path, schema)
-                .ok()
-                .map(|_| schema_path)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let output_schema = output_schema_for_state(state)
+        .and_then(|schema_json| {
+            let caps = adapter
+                .probe_capabilities(process_runner)
+                .unwrap_or_default();
+            if caps.supports_output_schema {
+                let schema_path = scope.working_dir.join(format!(
+                    ".cache/gardener/{}-output-schema.json",
+                    state.as_str()
+                ));
+                std::fs::write(&schema_path, schema_json)
+                    .ok()
+                    .map(|_| schema_path)
+            } else {
+                None
+            }
+        });
 
     let max_turns = Some(max_turns_for_state(cfg, state));
     let ctx = AdapterContext {
@@ -313,6 +312,21 @@ fn ctx_item(
         rationale: rationale.to_string(),
         rank,
         content: content.to_string(),
+    }
+}
+
+fn output_schema_for_state(state: WorkerState) -> Option<&'static str> {
+    match state {
+        WorkerState::Understand => Some(
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"task_type":{"type":"string","enum":["task","chore","infra","feature","bugfix","refactor"]},"reasoning":{"type":"string"}},"required":["task_type","reasoning"],"additionalProperties":false}"#,
+        ),
+        WorkerState::Doing => Some(
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"summary":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#,
+        ),
+        WorkerState::Reviewing => Some(
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"verdict":{"type":"string","enum":["approve","needs_changes"]},"suggestions":{"type":"array","items":{"type":"string"}}},"required":["verdict","suggestions"],"additionalProperties":false}"#,
+        ),
+        _ => None,
     }
 }
 

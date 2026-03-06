@@ -1,299 +1,258 @@
-# Coverage Boundary Separation Plan
+# Coverage Boundary Separation Execution Spec
 
-## Overview
+## Objective
 
-Keep a strict unit-test coverage gate, but only for files where line coverage is a strong proxy for runtime confidence. Move mixed-purpose files toward a clearer split between pure logic/render/state modules and terminal/process orchestration modules, then apply different validation rules to each class.
+Do the separation in one shot.
 
-## Current State Analysis
+The repository should end this change with a durable testability architecture:
 
-The TUI is already split into modules, but several files still mix pure logic with live terminal orchestration:
+- pure runtime logic lives in files where unit coverage is meaningful
+- side-effect adapters live in files where integration and instrumentation are the primary signal
+- CI can determine the required gate mechanically
+- no file sits in an ambiguous middle state
 
-- `tools/gardener/src/tui/terminal.rs:26-105` owns terminal singleton state, raw-mode setup, alternate-screen lifecycle, resize handling, and the `draw_live_frame` wrapper.
-- `tools/gardener/src/tui/terminal.rs:107-175` also exposes thin live wrappers plus string-render helpers, while `tools/gardener/src/tui/terminal.rs:177-321` contains pure frame rendering for seeding/shutdown.
-- `tools/gardener/src/tui/quality.rs:72-88` owns live drawing orchestration, but `tools/gardener/src/tui/quality.rs:105-249` is pure render/data shaping.
-- `tools/gardener/src/tui/wizard.rs:43-129` contains pure answer normalization and key-handling state transitions, while `tools/gardener/src/tui/wizard.rs:269-306` launches the real blocking TTY wizard.
-- `tools/gardener/src/tui/seed_review.rs:241-363` contains pure prompt/state transition helpers, while `tools/gardener/src/tui/seed_review.rs:365-412` launches the real blocking TTY wizard.
-- `tools/gardener/src/worktree_audit.rs:12-94` is a single orchestration function mixing cwd lookup, production process runner construction, worktree listing, pruning, and logging side effects.
+This is not a phased migration plan. This is the target shape for one change set that rewires code layout and validation together.
 
-Current tests already reveal the boundary problem:
+## Operating Principles
 
-- `tools/gardener/src/tui/wizard.rs:314-519` and `tools/gardener/src/tui/seed_review.rs:414-625` are strong unit tests against state transitions and rendered output.
-- `tools/gardener/tests/tui_live_smoke.rs:3-35` separately exercises live TUI paths under a pseudo-terminal, which is the right shape for boundary validation.
-- `tools/gardener/src/tui/terminal.rs:587-596` and `tools/gardener/src/tui/quality.rs:317-323` now use test-only bypass hooks to hit live wrapper lines without a real TTY. Those tests satisfy coverage mechanics, but they are weaker evidence than the pseudo-terminal smoke tests.
+The implementation should follow these rules:
 
-The current gates are also flat where the code is not:
+- enforce invariants mechanically, not by reviewer memory
+- optimize for agent legibility and repository-local truth
+- keep documentation as the system of record, but back it with tests and lints
+- prefer rigid boundaries with local implementation freedom inside those boundaries
+- do not create transitional buckets that become permanent
 
-- `scripts/test-gardener-coverage.sh:5-105` applies one repository-wide line coverage threshold.
-- `tools/gardener/tests/instrumentation_lint.rs:5-43` and `tools/gardener/tests/instrumentation_lint.rs:81-153` apply a per-file instrumentation threshold to a broad set of runtime files, with exclusions managed by filename list rather than by code role.
-- `tools/gardener/src/runtime/mod.rs:701-752` calls the live TUI wrappers as orchestration endpoints.
-- `tools/gardener/src/startup.rs:357-366` and `tools/gardener/src/startup.rs:1195-1203` call worktree reconciliation and seed-review blocking UI flows.
-- `tools/gardener/src/triage_interview.rs:93-104` launches the repo-health wizard directly when attached to a TTY.
+Those principles align with the repo direction and with `docs/references/codex-agent-team-article.md`: the foundation must be explicit, enforced, and legible to future agent runs.
 
-## Desired End State
+## Non-Negotiable End State
 
-The codebase should separate into two testability classes:
+When this lands, every Rust runtime file under the affected areas must be in exactly one of these classes:
 
-1. `unit-core` files
-   Pure parsing, normalization, state transitions, ordering, formatting, and render-model building. These keep a strict changed-file unit coverage gate.
+1. `unit-core`
+   Pure parsing, normalization, reducers, ordering, formatting, render-model building, and deterministic state transitions.
 
-2. `boundary-orchestration` files
-   Terminal lifecycle, process spawning, cwd/environment lookup, real git/worktree calls, blocking event loops, and other side-effect-heavy adapters. These are validated primarily by integration-style tests, targeted smoke tests, and instrumentation expectations rather than strict line coverage.
+2. `boundary-orchestration`
+   Terminal lifecycle, PTY handling, process spawning, cwd/env lookup, git/worktree calls, blocking loops, logging dispatch, and other side-effect adapters.
 
-In the end, a reviewer should be able to answer “what gate applies here?” from the file path alone, without reading the implementation.
+There is no `legacy-mixed` class.
 
-## Key Discoveries
+If a file cannot be clearly classified, the refactor is incomplete.
 
-- `tools/gardener/src/tui/backlog.rs:41-214` is already a clean `unit-core` module: width bucketing, backlog parsing, priority ordering, and bounded list shaping.
-- `tools/gardener/src/tui/wizard.rs:68-129` and `tools/gardener/src/tui/seed_review.rs:281-363` are also `unit-core` logic, even though each file later contains a blocking TTY launcher.
-- `tools/gardener/src/tui/terminal.rs:48-86`, `tools/gardener/src/tui/wizard.rs:269-306`, `tools/gardener/src/tui/seed_review.rs:365-412`, and `tools/gardener/src/worktree_audit.rs:12-94` are boundary adapters whose value is in correct side effects and runtime wiring, not in raw line execution count.
-- `tools/gardener/tests/tui_live_smoke.rs:3-35` already establishes the right validation pattern for boundary TUI code: real PTY execution with narrow scope.
-- The current friction is structural, not just numerical. The coverage gate is forcing wrapper-line execution because files still contain both pure logic and side-effect adapters.
+## Why This Exists
 
-## What We’re Not Doing
+The current TUI and worktree code mixes logic and side effects in ways that make the coverage gate produce bad incentives:
 
-- No change to runtime behavior in this planning phase.
-- No immediate rewrite of `runtime/mod.rs` or `startup.rs` beyond adjusting imports/call sites during later migration.
-- No removal of coverage gates. The goal is to retarget them, not weaken them.
-- No introduction of a large new test framework if existing `cargo test`, `script`, tempdirs, and current integration suites are sufficient.
+- `tools/gardener/src/tui/terminal.rs` mixes terminal lifecycle with pure frame rendering
+- `tools/gardener/src/tui/quality.rs` mixes live drawing entrypoints with pure render/data shaping
+- `tools/gardener/src/tui/wizard.rs` mixes answer normalization and reducers with a blocking TTY runner
+- `tools/gardener/src/tui/seed_review.rs` mixes pure prompt/state transition logic with a blocking TTY runner
+- `tools/gardener/src/worktree_audit.rs` mixes summary logic with cwd/process/git/logging side effects
 
-## Implementation Approach
+That mixed structure is why wrapper-line coverage became a problem. The fix is not weaker review. The fix is better code boundaries.
 
-Use file-system boundaries, not comments or conventions, as the primary mechanism. Split each mixed file so that the pure logic lives in path prefixes that are always eligible for strict unit coverage, and the live adapters live in path prefixes that are always validated by integration/smoke/orchestration gates.
+## One-Shot Structural Rewrite
 
-## Proposed Target Structure
+This change should split the current mixed files into stable role-based modules.
 
-### TUI
-
-- `tools/gardener/src/tui/views/`
-  - Pure ratatui frame builders and render helpers.
-  - Candidates: seeding/shutdown frames from `terminal.rs`, quality intro/grading frame builders from `quality.rs`, wizard frame builder from `wizard.rs`, seed-review frame builder from `seed_review.rs`.
+### TUI target layout
 
 - `tools/gardener/src/tui/state/`
-  - Pure state machines and input reducers.
-  - Candidates: `WizardState`, `WizardAction`, `finalize_answers` from `wizard.rs`; `SeedReviewState`, `InputMode`, `apply_input_mode_key`, `apply_review_mode_key`, `handle_seed_review_key`, `finalize_review_decisions` from `seed_review.rs`.
-
+  - pure reducers and state machines
+- `tools/gardener/src/tui/views/`
+  - pure ratatui frame builders, formatting helpers, and render-model shaping
 - `tools/gardener/src/tui/live/`
-  - Real terminal lifecycle and blocking loops only.
-  - Candidates: `with_live_terminal` and wrapper draws from `terminal.rs`; `draw_quality_live` from `quality.rs`; `run_repo_health_wizard`; `run_seed_review_wizard`.
+  - real terminal lifecycle, blocking loops, resize handling, and live wrapper entrypoints
 
-### Runtime / Worktree
+Expected moves:
+
+- move `WizardState`, `WizardAction`, answer normalization, and key-handling reducers out of `tools/gardener/src/tui/wizard.rs`
+- move `SeedReviewState`, `InputMode`, reducer helpers, and finalization logic out of `tools/gardener/src/tui/seed_review.rs`
+- move pure seeding/shutdown frame builders out of `tools/gardener/src/tui/terminal.rs`
+- move pure quality intro/grading frame builders and render helpers out of `tools/gardener/src/tui/quality.rs`
+- keep `with_live_terminal`, live draw wrappers, `run_repo_health_wizard`, and `run_seed_review_wizard` in `tui/live/`
+
+### Worktree target layout
 
 - `tools/gardener/src/worktree_audit/model.rs`
-  - `WorktreeAuditSummary` and pure summary/result types.
-
+  - summary and result types
 - `tools/gardener/src/worktree_audit/logic.rs`
-  - Pure classification helpers, e.g. count stale entries, map prune results to summary, build event payload structs if introduced.
-
+  - pure classification and result shaping
 - `tools/gardener/src/worktree_audit/live.rs`
-  - cwd lookup, `ProductionProcessRunner`, `WorktreeClient`, `list`, `prune_orphans`, logging dispatch.
+  - cwd lookup, runner creation, git worktree interaction, prune/list calls, logging, and top-level orchestration
 
-This does not require deep nesting everywhere on day one. A lighter version using `*_state.rs`, `*_view.rs`, and `*_live.rs` files under the existing `tui/` directory is acceptable if it preserves obvious gate boundaries.
+### Rule for call direction
 
-## Proposed Future Gate Shape
+- `unit-core` may not depend on `boundary-orchestration`
+- `views/` may depend on `state/` and other pure helpers
+- `live/` may depend on `state/`, `views/`, and boundary adapters
+- worktree `logic.rs` may not depend on process, fs, env, git invocation, or logging
 
-### Gate 1: Repository Line Coverage
+## Mechanical Enforcement
 
-Keep the existing repository-wide `cargo llvm-cov` line threshold in `scripts/test-gardener-coverage.sh`, but treat it as a coarse floor rather than the main signal for mixed runtime files.
+Path layout alone is not enough. The repository must enforce purity.
 
-### Gate 2: Strict Unit Coverage on `unit-core`
+### Purity contract for `unit-core`
 
-Add a changed-file or manifest-driven gate for files in approved `unit-core` paths. Initial target:
+Files classified as `unit-core` must not:
+
+- import terminal or PTY handling crates
+- spawn processes
+- read cwd or environment state
+- touch the filesystem
+- call git or worktree clients
+- emit logs or telemetry side effects
+- access runtime singletons
+
+This should be enforced with a structural lint or a dedicated test that checks disallowed imports and dependency edges for `unit-core` paths.
+
+### Boundary contract for `boundary-orchestration`
+
+Boundary files are allowed to do side effects, but they must be thin:
+
+- they orchestrate environment setup, IO, and lifecycle
+- they delegate deterministic decision making to `unit-core`
+- they are owned by explicit integration tests
+
+If a boundary file accumulates reducer logic, formatting policy, or domain decision rules, the refactor is regressing.
+
+## Validation Model
+
+This repo keeps the global coverage gate and adds role-aware enforcement.
+
+### Gate 1: Repository floor
+
+Keep the repository-wide `cargo llvm-cov` threshold in `scripts/test-gardener-coverage.sh` as the coarse floor for the crate.
+
+### Gate 2: Strict unit-core coverage
+
+All files in `unit-core` paths must meet strict per-file line coverage.
+
+Policy:
+
+- required threshold: `>= 90%` line coverage
+- evaluated on changed files in `unit-core`
+- uncovered lines are reported by file
+- no test-only bypass branches are allowed in `unit-core`
+
+Operational rules:
+
+- diff base is `origin/main`
+- renames are treated as the new path and must satisfy the gate under the new classification
+- extracted files are treated as new files and must meet the gate immediately
+- moved uncovered code does not get grandfathered
+
+### Gate 3: Boundary ownership and execution
+
+Every `boundary-orchestration` file must have at least one required owning integration test target.
+
+This is not optional.
+
+The repo should add a checked-in manifest, for example `tools/gardener/testability-boundaries.toml`, that records for every affected file:
+
+- role: `unit-core` or `boundary-orchestration`
+- owning test target(s)
+- for boundary files, whether the owner is PTY-backed, temp-repo-backed, or both
+
+CI must fail when:
+
+- a file has no classification
+- a boundary file has no owning test target
+- a changed boundary file’s owning test target did not run
+- a `unit-core` file violates purity rules
+
+### Gate 4: Instrumentation role awareness
+
+`tools/gardener/tests/instrumentation_lint.rs` should read the same role manifest.
+
+Policy:
+
+- `boundary-orchestration` files that own runtime observability remain subject to instrumentation expectations
+- `unit-core` files are exempt from instrumentation thresholds unless they intentionally define telemetry payload shaping as pure data
+
+## Required Integration Surfaces
+
+Boundary validation should be real enough to catch wiring failures and narrow enough to stay stable.
+
+### TUI boundaries
+
+Use PTY-backed integration tests to own:
+
+- live terminal wrappers
+- blocking wizard loops
+- resize/lifecycle behavior that cannot be validated meaningfully in unit tests
+
+### Worktree boundaries
+
+Use a hybrid strategy:
+
+- real temp-repo integration tests for the happy path and the important failure path of `git worktree` behavior
+- fake seams only for rare error injection that real git cannot produce deterministically
+
+The worktree boundary should not be validated only through a fake runner.
+
+## Concrete File Classification
+
+These files are already obvious `unit-core` or should become so after the rewrite:
 
 - `tools/gardener/src/tui/backlog.rs`
-- `tools/gardener/src/tui/state/**`
-- `tools/gardener/src/tui/views/**` where the file is pure render logic
-- future pure runtime logic files extracted from orchestration modules
+- extracted files under `tools/gardener/src/tui/state/**`
+- extracted pure view files under `tools/gardener/src/tui/views/**`
+- extracted pure worktree logic under `tools/gardener/src/worktree_audit/logic.rs`
 
-Rule:
+These files are `boundary-orchestration` after the rewrite:
 
-- changed `unit-core` file must meet `>= 90%` line coverage
-- no test-only bypass branches to hit adapter wrappers
-- failures report uncovered lines by file
+- files under `tools/gardener/src/tui/live/**`
+- `tools/gardener/src/worktree_audit/live.rs`
 
-Implementation options:
-
-- preferred: diff-aware changed-file coverage using `cargo llvm-cov --json` plus a small Rust or shell helper
-- acceptable first step: manifest of `unit-core` files and a per-file parser over `llvm-cov export`
-
-### Gate 3: Boundary Integration Gate on `boundary-orchestration`
-
-For files under `tui/live/**`, `worktree_audit/live.rs`, and similar adapters:
-
-- require dedicated integration or smoke tests that execute the real boundary
-- continue instrumentation expectations where side-effect observability matters
-- optionally require each boundary file to declare at least one owning integration test
-
-Examples:
-
-- `tools/gardener/tests/tui_live_smoke.rs` owns live TUI wrappers and blocking wizards
-- new temp-repo integration tests should own worktree reconciliation behavior
-
-### Gate 4: Role-Aware Instrumentation Gate
-
-Refactor `tools/gardener/tests/instrumentation_lint.rs` so inclusion is based on file role manifests instead of ad hoc exclusions.
-
-Proposed buckets:
-
-- `instrumented-boundaries`: must keep current instrumentation threshold
-- `pure-unit-core`: exempt from instrumentation threshold
-- `legacy-mixed`: temporary bucket with explicit migration deadline
-
-## Phased Migration
-
-### Phase 1: Declare Coverage Roles
-
-Create a small manifest checked into the repo, for example:
-
-- `tools/gardener/testability-boundaries.toml`
-
-It should map files or globs into:
-
-- `unit-core`
-- `boundary-orchestration`
-- `legacy-mixed`
-
-Changes required:
-
-- classify current TUI/runtime/worktree files
-- teach the coverage and instrumentation tooling to read the manifest
-- fail if a file is unclassified
-
-Success criteria:
-
-- every `tools/gardener/src/**/*.rs` file is assigned a role
-- `instrumentation_lint` no longer relies on a growing static exclusion list for these areas
-- CI prints the role for each failing file
-
-Confirmation gate:
-
-- manifest validation test passes
-- existing `run-validate` still passes with no production behavior change
-
-### Phase 2: Extract TUI Pure State from Live Loops
-
-Split `wizard.rs` and `seed_review.rs` first because they already contain obvious seams.
-
-Changes required:
-
-- move pure state/reducer logic out of `tools/gardener/src/tui/wizard.rs:43-129` and `tools/gardener/src/tui/seed_review.rs:268-363`
-- keep blocking TTY loops in dedicated `*_live.rs` files
-- keep frame drawing in `*_view.rs` or `views/` files
-
-Success criteria:
-
-- `run_repo_health_wizard` file contains no state-transition logic beyond loop orchestration
-- `run_seed_review_wizard` file contains no decision logic beyond loop orchestration
-- unit tests move with the state modules and remain green
-- PTY smoke tests remain the only tests that need a real terminal path
-
-Confirmation gate:
-
-- existing wizard and seed-review unit tests still pass
-- `tools/gardener/tests/tui_live_smoke.rs` still passes
-
-### Phase 3: Extract Shared Live Terminal Adapters
-
-Split `terminal.rs` and `quality.rs` into pure view code vs live terminal adapters.
-
-Changes required:
-
-- move `draw_seeding_frame` / `draw_shutdown_frame` out of `tools/gardener/src/tui/terminal.rs:177-321`
-- move `draw_quality_grading_frame`, `draw_quality_intro_frame`, and helpers out of `tools/gardener/src/tui/quality.rs:105-249`
-- keep `with_live_terminal`, resize handling, and live wrapper entrypoints in a boundary module
-
-Success criteria:
-
-- live adapter files are mostly thin wrappers and lifecycle management
-- pure frame-builder files can be line-covered without bypass hooks
-- test-only bypass helpers can be deleted from live adapter files once integration coverage is sufficient
-
-Confirmation gate:
-
-- string-render unit tests cover pure view files
-- PTY smoke tests cover live wrappers
-- no reduction in observable runtime behavior
-
-### Phase 4: Split Worktree Audit into Logic and Live Adapter
-
-Address `tools/gardener/src/worktree_audit.rs:12-94`.
-
-Changes required:
-
-- extract stale-entry classification and summary shaping into pure helpers
-- keep cwd/process/client creation and prune calls in a live adapter file
-- add temp-repo or fake-runner integration coverage for prune/list behavior
-
-Success criteria:
-
-- pure worktree summary logic is unit-tested directly
-- live worktree reconciliation is exercised through integration tests using temp directories or a fake runner seam
-- no need to force line coverage on the adapter wrapper itself
-
-Confirmation gate:
-
-- unit tests cover classification helpers
-- integration tests cover list/prune success and failure paths
-
-### Phase 5: Turn on Role-Aware Gates
-
-Once enough files have been moved out of `legacy-mixed`, enforce the final policy.
-
-Changes required:
-
-- strict changed-file unit coverage on `unit-core`
-- integration ownership requirement on `boundary-orchestration`
-- optional time-boxed warnings for any remaining `legacy-mixed` files
-
-Success criteria:
-
-- a new mixed file cannot land without explicit role classification
-- files with strict unit gates are structurally pure enough that coverage remains meaningful
-- boundary files pass because real runtime paths are validated, not because wrapper lines were artificially touched
-
-Confirmation gate:
-
-- CI produces separate sections for unit-core and boundary-orchestration failures
-- test-only bypass coverage helpers are gone from migrated files
+The current mixed files should not survive unchanged.
 
 ## Success Criteria
 
-### Automated
+This work is complete only if all of the following are true in one merged change:
 
-- `./scripts/run-validate.sh` remains green during each migration phase.
-- Unit-core files report strict per-file or changed-file line coverage.
-- Boundary files are owned by explicit integration/smoke suites.
-- Instrumentation lint reads role classification instead of relying on long exclusion lists for these areas.
+- the mixed TUI and worktree files are physically split into pure and boundary modules
+- every affected file is classified in a checked-in role manifest
+- purity rules are mechanically enforced for `unit-core`
+- boundary ownership is mechanically enforced for `boundary-orchestration`
+- changed `unit-core` files are held to strict per-file coverage
+- boundary files are validated by explicit owning integration tests
+- existing test-only bypass hooks in live adapter files are removed if the new boundary tests cover their intent
+- `./scripts/run-validate.sh` passes
 
-### Manual
+## Developer Experience Guardrails
 
-- Engineers can determine the expected test style from the file path alone.
-- Adding a new boundary wrapper no longer pressures authors to add fake unit tests just to satisfy coverage.
-- Reviewing TUI/runtime changes becomes simpler because state/render code is not mixed with raw-mode/process wiring.
+The new foundation should not quietly make the repo worse.
 
-## Testing Strategy
+Track and enforce:
 
-- Unit:
-  - pure parsers, reducers, ordering, answer normalization, frame-model helpers
-- Integration:
-  - PTY-backed TUI smoke tests for live wrappers and blocking wizards
-  - temp-repo or fake-runner tests for worktree reconciliation
-- Manual:
-  - spot-check real TTY flows after major TUI boundary extractions
+- a CI runtime budget for new boundary tests
+- a flake budget for PTY-backed and temp-repo-backed tests
 
-## References
+If the boundary suite exceeds the agreed runtime or flake threshold, the solution is to improve the owning boundary tests, not to weaken the architectural split.
 
-- `tools/gardener/src/tui/mod.rs:1-77`
-- `tools/gardener/src/tui/backlog.rs:41-214`
-- `tools/gardener/src/tui/terminal.rs:26-321`
-- `tools/gardener/src/tui/quality.rs:72-249`
-- `tools/gardener/src/tui/wizard.rs:43-306`
-- `tools/gardener/src/tui/seed_review.rs:241-412`
-- `tools/gardener/src/worktree_audit.rs:12-94`
-- `tools/gardener/src/runtime/mod.rs:701-752`
-- `tools/gardener/src/startup.rs:357-366`
-- `tools/gardener/src/startup.rs:1195-1203`
-- `tools/gardener/src/triage_interview.rs:93-104`
-- `tools/gardener/tests/tui_live_smoke.rs:3-35`
-- `tools/gardener/tests/instrumentation_lint.rs:5-43`
-- `tools/gardener/tests/instrumentation_lint.rs:81-153`
-- `scripts/test-gardener-coverage.sh:5-105`
+## Execution Order Inside the One-Shot Change
+
+This is one change set, but the internal order should still be deliberate:
+
+1. extract pure state and view logic out of mixed TUI files
+2. extract worktree pure logic out of `worktree_audit.rs`
+3. create stable live adapter files with thin orchestration only
+4. add the role manifest
+5. enforce purity and boundary ownership mechanically
+6. wire coverage and instrumentation gates to the manifest
+7. remove obsolete bypasses and update tests to match the new ownership model
+
+That order exists to keep the implementation coherent inside one branch, not to justify a future phased rollout.
+
+## Foundation Standard
+
+The goal is not just to get the current gate green.
+
+The goal is to leave the repo with a structure that future agents can read, trust, and extend without recreating this mess:
+
+- code paths should tell you what kind of test is expected
+- validation should be derived from explicit repo metadata, not tribal knowledge
+- architectural drift should fail mechanically before it spreads
+
+If this lands correctly, the coverage gate stops being a blunt instrument and becomes part of a durable architecture.

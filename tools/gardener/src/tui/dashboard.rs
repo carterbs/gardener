@@ -83,6 +83,7 @@ pub(super) fn draw_dashboard_frame(
         workers,
         backlog,
         StartupHeadline::from_view(startup_headline),
+        terminal::selected_worker_state(),
     );
     let viewport = frame.area();
     app_state.terminal_width = viewport.width;

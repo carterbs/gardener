@@ -4,6 +4,7 @@ use std::process::Command;
 fn live_tui_wrappers_run_under_a_pseudo_terminal() {
     let bin = env!("CARGO_BIN_EXE_tui_live_smoke");
     for mode in [
+        "dashboard",
         "report",
         "seeding",
         "triage",

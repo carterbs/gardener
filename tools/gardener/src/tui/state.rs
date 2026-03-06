@@ -1,7 +1,10 @@
+pub(crate) mod seed_review;
+pub(crate) mod wizard;
+
 use super::backlog::{ordered_backlog_items, BacklogItem, BacklogPriority, ParsedBacklogPriority};
 use super::formatting::{equipment_name_for_worker, format_breadcrumb, now_hhmmss};
 use super::triage::{triage_stage_progress, triage_stages_with_state};
-use super::{formatting::parse_triage_artifact, terminal};
+use super::formatting::parse_triage_artifact;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerRow {
@@ -143,6 +146,7 @@ impl AppState {
         workers: &[WorkerRow],
         backlog: &BacklogView,
         startup_headline: StartupHeadline,
+        selected_worker: usize,
     ) -> Self {
         let triage_stages = triage_stages_with_state(0);
 
@@ -198,7 +202,7 @@ impl AppState {
             startup_headline,
             workers: mapped_workers,
             backlog: mapped_backlog,
-            selected_worker: terminal::selected_worker_state(),
+            selected_worker,
             terminal_width: 0,
             terminal_height: 0,
         }

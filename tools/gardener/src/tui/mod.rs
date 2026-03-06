@@ -1,6 +1,7 @@
 mod backlog;
 mod dashboard;
 mod formatting;
+mod live;
 mod quality;
 mod report;
 mod seed_review;
@@ -8,6 +9,7 @@ mod startup;
 mod state;
 mod terminal;
 mod triage;
+mod views;
 mod wizard;
 
 pub use quality::{
@@ -44,7 +46,7 @@ pub(crate) use startup::StartupHeadlineView;
 #[cfg(test)]
 pub(crate) use state::WorkerMetrics;
 #[cfg(test)]
-pub(crate) use wizard::{WizardAction, WizardState};
+pub(crate) use wizard::{WizardAction, WizardInput, WizardKey, WizardState};
 
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;

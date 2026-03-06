@@ -525,6 +525,22 @@ fn triage_stage_progress_comes_from_activity_stream() {
 }
 
 #[test]
+fn dashboard_feed_state_keeps_boundary_selected_worker_input() {
+    let state = AppState::from_dashboard_feed(
+        &[worker(4, false)],
+        &BacklogView::default(),
+        super::StartupHeadline {
+            spinner_frame: 0,
+            verb: "Boot".to_string(),
+            startup_active: false,
+            ellipsis_phase: 0,
+        },
+        3,
+    );
+    assert_eq!(state.selected_worker, 3);
+}
+
+#[test]
 fn command_stream_is_rendered_per_worker() {
     let frame = render_dashboard(
         &[
@@ -1006,8 +1022,7 @@ fn seed_review_shows_refine_prompt() {
     assert!(frame.contains("> focus on hooks"));
 }
 
-use super::{WizardAction, WizardState};
-use crossterm::event::{KeyCode, KeyModifiers};
+use super::{WizardAction, WizardInput, WizardKey, WizardState};
 
 fn wizard_at_step(step: usize) -> WizardState {
     WizardState {
@@ -1020,11 +1035,22 @@ fn wizard_at_step(step: usize) -> WizardState {
     }
 }
 
+fn wizard_input(key: WizardKey) -> WizardInput {
+    WizardInput {
+        key,
+        control: false,
+    }
+}
+
+fn wizard_ctrl_input(key: WizardKey) -> WizardInput {
+    WizardInput { key, control: true }
+}
+
 #[test]
 fn wizard_backlog_a_key_selects_auto_seed_and_advances() {
     let mut ws = wizard_at_step(3);
     assert!(ws.backlog_approval);
-    ws.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('a')));
     assert!(!ws.backlog_approval, "'a' should select auto-seed");
     assert_eq!(ws.step, 4, "'a' should advance to Notes");
 }
@@ -1033,7 +1059,7 @@ fn wizard_backlog_a_key_selects_auto_seed_and_advances() {
 fn wizard_backlog_r_key_selects_review_and_advances() {
     let mut ws = wizard_at_step(3);
     ws.backlog_approval = false;
-    ws.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('r')));
     assert!(ws.backlog_approval, "'r' should select review");
     assert_eq!(ws.step, 4, "'r' should advance to Notes");
 }
@@ -1041,7 +1067,7 @@ fn wizard_backlog_r_key_selects_review_and_advances() {
 #[test]
 fn wizard_backlog_uppercase_keys_select_and_advance() {
     let mut ws = wizard_at_step(3);
-    ws.handle_key(KeyCode::Char('A'), KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('A')));
     assert!(!ws.backlog_approval, "'A' should select auto-seed");
     assert_eq!(ws.step, 4, "'A' should advance to Notes");
 }
@@ -1050,9 +1076,9 @@ fn wizard_backlog_uppercase_keys_select_and_advance() {
 fn wizard_backlog_arrow_keys_toggle() {
     let mut ws = wizard_at_step(3);
     assert!(ws.backlog_approval);
-    ws.handle_key(KeyCode::Down, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Down));
     assert!(!ws.backlog_approval, "Down should toggle to auto-seed");
-    ws.handle_key(KeyCode::Up, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Up));
     assert!(ws.backlog_approval, "Up should toggle back to review");
 }
 
@@ -1060,16 +1086,16 @@ fn wizard_backlog_arrow_keys_toggle() {
 fn wizard_backlog_tab_toggles() {
     let mut ws = wizard_at_step(3);
     assert!(ws.backlog_approval);
-    ws.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Tab));
     assert!(!ws.backlog_approval, "Tab should toggle to auto-seed");
-    ws.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Tab));
     assert!(ws.backlog_approval, "Tab should toggle back to review");
 }
 
 #[test]
 fn wizard_backlog_enter_advances_to_notes() {
     let mut ws = wizard_at_step(3);
-    let action = ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let action = ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(action, WizardAction::Continue);
     assert_eq!(ws.step, 4, "Enter should advance to step 4 (Notes)");
 }
@@ -1077,10 +1103,10 @@ fn wizard_backlog_enter_advances_to_notes() {
 #[test]
 fn wizard_backlog_tab_then_enter_preserves_selection() {
     let mut ws = wizard_at_step(3);
-    ws.handle_key(KeyCode::Tab, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Tab));
     assert!(!ws.backlog_approval);
     assert_eq!(ws.step, 3, "Tab should not advance");
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 4);
     assert!(
         !ws.backlog_approval,
@@ -1092,7 +1118,7 @@ fn wizard_backlog_tab_then_enter_preserves_selection() {
 fn wizard_esc_finishes_at_any_step() {
     for step in 0..5 {
         let mut ws = wizard_at_step(step);
-        let action = ws.handle_key(KeyCode::Esc, KeyModifiers::NONE);
+        let action = ws.handle_input(wizard_input(WizardKey::Escape));
         assert_eq!(
             action,
             WizardAction::Finish,
@@ -1105,12 +1131,12 @@ fn wizard_esc_finishes_at_any_step() {
 fn wizard_parallelism_input_handles_digits_backspace_and_ctrl_guard() {
     let mut ws = wizard_at_step(0);
     ws.parallelism_input.clear();
-    ws.handle_key(KeyCode::Char('1'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Char('9'), KeyModifiers::CONTROL);
+    ws.handle_input(wizard_input(WizardKey::Char('1')));
+    ws.handle_input(wizard_input(WizardKey::Char('2')));
+    ws.handle_input(wizard_input(WizardKey::Char('x')));
+    ws.handle_input(wizard_ctrl_input(WizardKey::Char('9')));
     assert_eq!(ws.parallelism_input, "12");
-    ws.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Backspace));
     assert_eq!(ws.parallelism_input, "1");
 }
 
@@ -1118,56 +1144,56 @@ fn wizard_parallelism_input_handles_digits_backspace_and_ctrl_guard() {
 fn wizard_validation_input_handles_editing() {
     let mut ws = wizard_at_step(1);
     ws.validation.clear();
-    ws.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('c')));
+    ws.handle_input(wizard_input(WizardKey::Char('a')));
+    ws.handle_input(wizard_input(WizardKey::Char('r')));
+    ws.handle_input(wizard_input(WizardKey::Backspace));
     assert_eq!(ws.validation, "ca");
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 2);
 }
 
 #[test]
 fn wizard_docs_step_toggles_yes_no_and_advances() {
     let mut ws = wizard_at_step(2);
-    ws.handle_key(KeyCode::Char('n'), KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('n')));
     assert!(!ws.docs_accessible);
-    ws.handle_key(KeyCode::Char('Y'), KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('Y')));
     assert!(ws.docs_accessible);
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 3);
 }
 
 #[test]
 fn wizard_notes_step_edits_and_finishes() {
     let mut ws = wizard_at_step(4);
-    ws.handle_key(KeyCode::Char('h'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Char('i'), KeyModifiers::NONE);
-    ws.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('h')));
+    ws.handle_input(wizard_input(WizardKey::Char('i')));
+    ws.handle_input(wizard_input(WizardKey::Backspace));
     assert_eq!(ws.notes, "h");
-    let action = ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let action = ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(action, WizardAction::Finish);
 }
 
 #[test]
 fn wizard_step_progression_through_all_steps() {
     let mut ws = wizard_at_step(0);
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 1);
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 2);
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 3);
-    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(ws.step, 4);
-    let action = ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    let action = ws.handle_input(wizard_input(WizardKey::Enter));
     assert_eq!(action, WizardAction::Finish, "Enter on Notes should finish");
 }
 
 #[test]
 fn wizard_unrelated_keys_on_backlog_step_ignored() {
     let mut ws = wizard_at_step(3);
-    ws.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
+    ws.handle_input(wizard_input(WizardKey::Char('x')));
     assert!(
         ws.backlog_approval,
         "unrelated key should not change selection"

@@ -1,32 +1,39 @@
 use crate::backlog_store::BacklogStore;
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
-use crate::hotkeys::{
-    action_for_key_with_mode, operator_hotkeys_enabled, HotkeyAction as AppHotkeyAction,
-};
-use crate::logging::{append_run_log, recent_worker_log_lines, structured_fallback_line};
-use crate::priority::Priority;
+use crate::hotkeys::operator_hotkeys_enabled;
+use crate::logging::append_run_log;
 use crate::runtime::Terminal;
-use crate::runtime::{
-    clear_interrupt, request_interrupt, ProductionRuntime, ARROW_DOWN_SENTINEL, ARROW_UP_SENTINEL,
-    INTERRUPT_SENTINEL_KEY,
-};
-use crate::startup::refresh_quality_report;
-use crate::task_identity::TaskKind;
-use crate::tui::{
-    format_state_label, reset_report_scroll, reset_workers_scroll, scroll_report_down,
-    scroll_report_up, scroll_workers_down, scroll_workers_up, BacklogView, QueueStats, WorkerRow,
-};
+use crate::runtime::{clear_interrupt, request_interrupt, ProductionRuntime};
+use crate::tui::{reset_workers_scroll, WorkerRow};
 use crate::types::RuntimeScope;
 use crate::worker::{
-    clear_state_sink, execute_merge_phase, execute_task, install_state_sink, worktree_branch_for,
-    worktree_path_for, MergeRequest, WorkerOutcome, WorkerStreamEvent,
+    clear_state_sink, execute_merge_phase, execute_task, install_state_sink, MergeRequest,
+    WorkerOutcome, WorkerStreamEvent,
 };
-use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde_json::json;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+mod dashboard;
+mod event_handling;
+mod hotkeys;
+mod result_handling;
+mod scheduling;
+mod util;
+
+use dashboard::{dashboard_snapshot, render, worker_failure_prompt};
+use event_handling::drain_pool_events;
+use hotkeys::{handle_hotkeys, wait_for_quit, HotkeyState};
+use result_handling::{
+    handle_doing_complete_transition, handle_doing_non_complete_transition, handle_merge_summary,
+};
+use scheduling::{
+    append_worker_command, claim_tasks_for_available_workers, execution_task_packet,
+    mark_merge_worker_busy, maybe_start_merge, refresh_worker_heartbeats, set_worker_idle,
+};
+use util::{now_unix_millis, ShutdownSummary};
 
 const WORKER_POOL_ID: &str = "worker_pool";
 const MERGE_WORKER_ID: &str = "merge-worker";
@@ -37,7 +44,7 @@ const IDLE_WORKER_POLL_ATTEMPTS: usize = 4;
 
 /// Messages on the result channel. Doing workers send `DoingResult`, the merge
 /// worker sends `MergeResult`.
-enum PoolResultMessage {
+pub(super) enum PoolResultMessage {
     DoingResult {
         slot_idx: usize,
         task_id: String,
@@ -50,7 +57,7 @@ enum PoolResultMessage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PoolStreamEvent {
+pub(super) enum PoolStreamEvent {
     ToolCommand {
         slot_idx: usize,
         task_id: String,
@@ -64,43 +71,13 @@ enum PoolStreamEvent {
     },
 }
 
-struct ShutdownSummary {
-    completed: usize,
-    target: usize,
-    merged: usize,
-    failed: usize,
-    total_runtime_secs: u64,
-}
-
-impl ShutdownSummary {
-    fn format_message(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push(format!(
-            "Tasks completed: {} / {}",
-            self.completed, self.target
-        ));
-        lines.push(format!("Tasks merged (PRs landed): {}", self.merged));
-        if self.failed > 0 {
-            lines.push(format!("Tasks failed / unresolved: {}", self.failed));
-        }
-        let mins = self.total_runtime_secs / 60;
-        let secs = self.total_runtime_secs % 60;
-        if mins > 0 {
-            lines.push(format!("Total runtime: {}m {}s", mins, secs));
-        } else {
-            lines.push(format!("Total runtime: {}s", secs));
-        }
-        lines.join("\n")
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeSummaryHandling {
     ContinueLoop,
     EarlyContinue,
 }
 
-fn available_doing_slots(
+pub(super) fn available_doing_slots(
     parallelism: usize,
     target: usize,
     completed: usize,
@@ -113,213 +90,6 @@ fn available_doing_slots(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DoingSummaryHandling {
     ContinueLoop,
-}
-
-fn handle_doing_complete_transition(
-    store: &BacklogStore,
-    workers: &mut [WorkerRow],
-    worker_idx: usize,
-    last_worker_state_line: usize,
-    worker_id: &str,
-    task_id: &str,
-    completed: &mut usize,
-    failed: &mut usize,
-) -> Result<DoingSummaryHandling, GardenerError> {
-    let marked_complete = store.mark_complete(task_id, worker_id)?;
-    if !marked_complete {
-        append_run_log(
-            "error",
-            "worker.task.completed_rejected",
-            json!({
-                "worker_id": worker_id,
-                "task_id": task_id,
-            }),
-        );
-        let unresolved = store.mark_unresolved(task_id, worker_id)?;
-        *failed = failed.saturating_add(1);
-        workers[worker_idx].state = if unresolved {
-            "unresolved".to_string()
-        } else {
-            "failed".to_string()
-        };
-        workers[worker_idx].task_id = None;
-        workers[worker_idx].last_state_line = last_worker_state_line;
-        let message = if unresolved {
-            format!("unresolved {}", task_id)
-        } else {
-            format!("complete transition rejected {}", task_id)
-        };
-        workers[worker_idx].tool_line = message.clone();
-        append_worker_command(&mut workers[worker_idx], &message);
-        workers[worker_idx].breadcrumb = workers[worker_idx].state.clone();
-        workers[worker_idx].lease_held = false;
-        return Ok(DoingSummaryHandling::ContinueLoop);
-    }
-    *completed = completed.saturating_add(1);
-    workers[worker_idx].state = "complete".to_string();
-    workers[worker_idx].task_id = None;
-    workers[worker_idx].last_state_line = last_worker_state_line;
-    let completed_message = format!("completed {}", task_id);
-    workers[worker_idx].tool_line = completed_message.clone();
-    append_worker_command(&mut workers[worker_idx], &completed_message);
-    workers[worker_idx].breadcrumb = "complete".to_string();
-    workers[worker_idx].lease_held = false;
-    append_run_log(
-        "info",
-        "worker.task.completed",
-        json!({
-            "worker_id": worker_id,
-            "task_id": task_id,
-            "completed": *completed
-        }),
-    );
-    Ok(DoingSummaryHandling::ContinueLoop)
-}
-
-fn handle_doing_non_complete_transition(
-    store: &BacklogStore,
-    workers: &mut [WorkerRow],
-    worker_idx: usize,
-    last_worker_state_line: usize,
-    worker_id: &str,
-    task_id: &str,
-    summary: &crate::worker::WorkerRunSummary,
-    failed: &mut usize,
-) -> Result<DoingSummaryHandling, GardenerError> {
-    workers[worker_idx].state = "failed".to_string();
-    workers[worker_idx].task_id = None;
-    workers[worker_idx].last_state_line = last_worker_state_line;
-    let failed_message = if let Some(reason) = summary.failure_reason.clone() {
-        if reason.is_empty() {
-            format!("failed {}", task_id)
-        } else {
-            let truncated = reason.chars().take(150).collect::<String>();
-            if reason.chars().count() > 150 {
-                format!("failed: {}…", truncated)
-            } else {
-                format!("failed: {}", reason)
-            }
-        }
-    } else {
-        format!("failed {}", task_id)
-    };
-    workers[worker_idx].tool_line = failed_message.clone();
-    append_worker_command(&mut workers[worker_idx], &failed_message);
-    workers[worker_idx].breadcrumb = "failed".to_string();
-    workers[worker_idx].lease_held = false;
-    *failed = failed.saturating_add(1);
-    append_run_log(
-        "error",
-        "worker.task.failed",
-        json!({
-            "worker_id": worker_id,
-            "task_id": task_id,
-            "final_state": summary.final_state.as_str()
-        }),
-    );
-
-    let unresolved = store.mark_unresolved(task_id, worker_id)?;
-    append_run_log(
-        "warn",
-        "worker.task.unresolved",
-        json!({
-            "worker_id": worker_id,
-            "task_id": task_id,
-            "marked_unresolved": unresolved,
-            "failure_reason": summary.failure_reason,
-            "final_state": summary.final_state.as_str(),
-        }),
-    );
-    if unresolved {
-        let unresolved_message = format!("unresolved {}", task_id);
-        workers[worker_idx].state = "unresolved".to_string();
-        workers[worker_idx].last_state_line = last_worker_state_line;
-        workers[worker_idx].tool_line = unresolved_message.clone();
-        workers[worker_idx].breadcrumb = "unresolved".to_string();
-        append_worker_command(&mut workers[worker_idx], &unresolved_message);
-    }
-    Ok(DoingSummaryHandling::ContinueLoop)
-}
-
-fn handle_merge_summary(
-    store: &BacklogStore,
-    workers: &mut [WorkerRow],
-    merge_row_idx: usize,
-    last_worker_state_line: usize,
-    task_id: &str,
-    summary: &crate::worker::WorkerRunSummary,
-    completed: &mut usize,
-    merged: &mut usize,
-    failed: &mut usize,
-) -> Result<MergeSummaryHandling, GardenerError> {
-    if summary.final_state == crate::types::WorkerState::Complete {
-        let marked_complete = store.mark_complete(task_id, MERGE_WORKER_ID)?;
-        if !marked_complete {
-            append_run_log(
-                "error",
-                "merge_worker.task.completed_rejected",
-                json!({
-                    "worker_id": MERGE_WORKER_ID,
-                    "task_id": task_id,
-                }),
-            );
-            let _ = store.mark_unresolved(task_id, MERGE_WORKER_ID);
-            *failed = failed.saturating_add(1);
-            workers[merge_row_idx].state = "failed".to_string();
-            workers[merge_row_idx].task_id = Some(task_id.to_string());
-            workers[merge_row_idx].last_state_line = last_worker_state_line;
-            let fail_msg = format!("merge complete transition rejected {}", task_id);
-            workers[merge_row_idx].tool_line = fail_msg.clone();
-            append_worker_command(&mut workers[merge_row_idx], &fail_msg);
-            workers[merge_row_idx].breadcrumb = "failed".to_string();
-            workers[merge_row_idx].lease_held = false;
-            return Ok(MergeSummaryHandling::EarlyContinue);
-        }
-        *completed = completed.saturating_add(1);
-        *merged = merged.saturating_add(1);
-        workers[merge_row_idx].state = "complete".to_string();
-        workers[merge_row_idx].task_id = Some(task_id.to_string());
-        workers[merge_row_idx].last_state_line = last_worker_state_line;
-        let done_msg = format!("merged {}", task_id);
-        workers[merge_row_idx].tool_line = done_msg.clone();
-        append_worker_command(&mut workers[merge_row_idx], &done_msg);
-        workers[merge_row_idx].breadcrumb = "complete".to_string();
-        workers[merge_row_idx].lease_held = false;
-        append_run_log(
-            "info",
-            "merge_worker.task.completed",
-            json!({
-                "worker_id": MERGE_WORKER_ID,
-                "task_id": task_id,
-                "completed": *completed
-            }),
-        );
-    } else {
-        let _ = store.mark_unresolved(task_id, MERGE_WORKER_ID)?;
-        *failed = failed.saturating_add(1);
-        workers[merge_row_idx].state = "failed".to_string();
-        workers[merge_row_idx].task_id = Some(task_id.to_string());
-        workers[merge_row_idx].last_state_line = last_worker_state_line;
-        let fail_msg = summary.failure_reason.as_deref().unwrap_or("merge failed");
-        let truncated = fail_msg.chars().take(100).collect::<String>();
-        workers[merge_row_idx].tool_line = truncated.clone();
-        append_worker_command(&mut workers[merge_row_idx], &truncated);
-        workers[merge_row_idx].breadcrumb = "failed".to_string();
-        workers[merge_row_idx].lease_held = false;
-    }
-    Ok(MergeSummaryHandling::ContinueLoop)
-}
-
-struct HotkeyState<'a> {
-    runtime: &'a ProductionRuntime,
-    scope: &'a RuntimeScope,
-    cfg: &'a AppConfig,
-    store: &'a BacklogStore,
-    workers: &'a mut [WorkerRow],
-    operator_hotkeys: bool,
-    terminal: &'a dyn Terminal,
-    report_visible: &'a mut bool,
-    report_content: &'a mut Option<String>,
 }
 
 pub fn run_worker_pool_fsm(
@@ -398,90 +168,6 @@ pub fn run_worker_pool_fsm(
     let run_started = Instant::now();
     let run_started_at_ms = now_unix_millis();
 
-    let claim_tasks_for_available_workers =
-        |workers: &mut [WorkerRow],
-         claimed: &mut Vec<(usize, crate::backlog_store::BacklogTask)>,
-         completed: usize,
-         active_merging: usize,
-         last_worker_state_line: usize,
-         last_activity_pulse: &mut Vec<Instant>|
-         -> Result<bool, GardenerError> {
-            let mut claimed_any = false;
-            claimed.clear();
-            let available_slots =
-                available_doing_slots(parallelism, target, completed, active_merging);
-            for idx in 0..available_slots {
-                let worker_id = workers[idx].worker_id.clone();
-                let claimed_task =
-                    store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
-                let Some(task) = claimed_task else {
-                    set_worker_idle(&mut workers[idx], "waiting for claim");
-                    continue;
-                };
-                claimed_any = true;
-                let task_age_ms = run_started_at_ms.saturating_sub(task.created_at);
-                let inserted_after_run_start = task.created_at >= run_started_at_ms;
-                append_run_log(
-                    "info",
-                    "worker.task.claimed",
-                    json!({
-                        "worker_id": worker_id,
-                        "task_id": task.task_id,
-                        "title": task.title,
-                        "task_created_at": task.created_at,
-                        "task_last_updated": task.last_updated,
-                        "run_started_at_ms": run_started_at_ms,
-                        "task_age_ms": task_age_ms,
-                        "inserted_after_run_start": inserted_after_run_start
-                    }),
-                );
-                let moved_to_in_progress = store.mark_in_progress(&task.task_id, &worker_id)?;
-                if !moved_to_in_progress {
-                    append_run_log(
-                        "error",
-                        "worker.task.claim_transition_rejected",
-                        json!({
-                            "worker_id": worker_id,
-                            "task_id": task.task_id,
-                            "transition": "mark_in_progress",
-                        }),
-                    );
-                    continue;
-                }
-                workers[idx].state = "claimed".to_string();
-                workers[idx].task_title = task.title.clone();
-                workers[idx].tool_line = "claimed".to_string();
-                workers[idx].task_id = Some(task.task_id.clone());
-                workers[idx].last_state_line = last_worker_state_line;
-                workers[idx].breadcrumb = "claim>claimed".to_string();
-                workers[idx].lease_held = true;
-                append_worker_command(&mut workers[idx], "claimed");
-                refresh_worker_heartbeats(workers, last_activity_pulse);
-                render(terminal, workers, &dashboard_snapshot(store)?, hb, lt)?;
-                claimed.push((idx, task));
-            }
-            Ok(claimed_any)
-        };
-
-    let mark_merge_worker_busy = |workers: &mut [WorkerRow],
-                                  last_activity_pulse: &mut Vec<Instant>,
-                                  merge_row_idx: usize,
-                                  pr_number: u64,
-                                  task_id: &str,
-                                  last_worker_state_line: usize,
-                                  task_summary: &str| {
-        workers[merge_row_idx].state = "merging".to_string();
-        workers[merge_row_idx].task_id = Some(task_id.to_string());
-        workers[merge_row_idx].last_state_line = last_worker_state_line;
-        workers[merge_row_idx].task_title =
-            format!("PR #{pr_number} {task_title}", task_title = task_summary);
-        let merge_msg = format!("merging PR #{pr_number}");
-        workers[merge_row_idx].tool_line = merge_msg.clone();
-        append_worker_command(&mut workers[merge_row_idx], &merge_msg);
-        workers[merge_row_idx].breadcrumb = "merging".to_string();
-        workers[merge_row_idx].lease_held = true;
-        last_activity_pulse[merge_row_idx] = Instant::now();
-    };
     refresh_worker_heartbeats(&mut workers, &last_activity_pulse);
     render(terminal, &workers, &dashboard_snapshot(store)?, hb, lt)?;
 
@@ -504,137 +190,6 @@ pub fn run_worker_pool_fsm(
         }
         let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
         let worktree_client = WorktreeClient::new(runtime.process_runner.as_ref(), repo_root);
-        let maybe_start_merge = |active_merging: &mut usize,
-                                 merge_tx: &mut Option<mpsc::Sender<MergeRequest>>|
-         -> Result<Option<(u64, String, String)>, GardenerError> {
-            if *active_merging >= 1 {
-                return Ok(None);
-            }
-            loop {
-                let Some(task) = store.claim_merge_pending(MERGE_WORKER_ID)? else {
-                    return Ok(None);
-                };
-                let task_id = task.task_id.clone();
-                let pr_number = match task.related_pr.and_then(|n| u64::try_from(n).ok()) {
-                    Some(pr) => pr,
-                    None => {
-                        append_run_log(
-                            "warn",
-                            "worker_pool.merge_preseed.invalid_pr",
-                            json!({
-                                "task_id": task_id,
-                                "worker_id": MERGE_WORKER_ID,
-                            }),
-                        );
-                        let demoted = store.release_lease(&task.task_id, MERGE_WORKER_ID)?;
-                        if !demoted {
-                            append_run_log(
-                                "error",
-                                "worker_pool.merge_preseed.invalid_pr_requeue_failed",
-                                json!({
-                                    "task_id": task_id,
-                                    "worker_id": MERGE_WORKER_ID,
-                                }),
-                            );
-                            return Ok(None);
-                        }
-                        // Keep scanning merge_pending in this cycle so one poisoned row
-                        // cannot block the remaining merge queue.
-                        continue;
-                    }
-                };
-                let branch = task
-                    .related_branch
-                    .clone()
-                    .unwrap_or_else(|| worktree_branch_for(&task.task_id));
-                let worktree_path = worktree_path_for(repo_root, &task.task_id);
-                if let Err(error) = worktree_client.create_or_resume(&worktree_path, &branch) {
-                    append_run_log(
-                        "warn",
-                        "worker_pool.merge_preseed.worktree_failed",
-                        json!({
-                            "task_id": task_id,
-                            "branch": branch,
-                            "error": error.to_string(),
-                            "worker_id": MERGE_WORKER_ID,
-                        }),
-                    );
-                    let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
-                    if !requeued {
-                        append_run_log(
-                            "error",
-                            "worker_pool.merge_preseed.requeue_failed",
-                            json!({
-                                "task_id": task_id,
-                                "worker_id": MERGE_WORKER_ID,
-                            }),
-                        );
-                    }
-                    return Ok(None);
-                }
-                if let Some(mtx) = merge_tx {
-                    let identity = WorkerIdentity::new(MERGE_WORKER_ID);
-                    let task_summary = task.title;
-                    let merge_request = MergeRequest {
-                        slot_idx: 0,
-                        task_id: task.task_id.clone(),
-                        task_summary: task_summary.clone(),
-                        attempt_count: task.attempt_count,
-                        worker_id: identity.worker_id,
-                        session_id: identity.session.session_id,
-                        worktree_path,
-                        branch,
-                        pr_number,
-                        logs: Vec::new(),
-                        handoff_evidence_bundle: None,
-                    };
-                    if mtx.send(merge_request).is_err() {
-                        append_run_log(
-                            "error",
-                            "worker_pool.merge_preseed.dispatch_failed",
-                            json!({
-                                "task_id": task_id,
-                                "worker_id": MERGE_WORKER_ID,
-                            }),
-                        );
-                        let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
-                        if !requeued {
-                            append_run_log(
-                                "error",
-                                "worker_pool.merge_preseed.dispatch_requeue_failed",
-                                json!({
-                                    "task_id": task_id,
-                                    "worker_id": MERGE_WORKER_ID,
-                                }),
-                            );
-                        }
-                        return Ok(None);
-                    }
-                    *active_merging = active_merging.saturating_add(1);
-                    return Ok(Some((pr_number, task_id, task_summary)));
-                }
-                append_run_log(
-                    "warn",
-                    "worker_pool.merge_preseed.channel_closed",
-                    json!({
-                        "task_id": task_id,
-                        "worker_id": MERGE_WORKER_ID,
-                    }),
-                );
-                let requeued = store.mark_merge_pending(&task.task_id, MERGE_WORKER_ID)?;
-                if !requeued {
-                    append_run_log(
-                        "error",
-                        "worker_pool.merge_preseed.channel_closed_requeue_failed",
-                        json!({
-                            "task_id": task_id,
-                            "worker_id": MERGE_WORKER_ID,
-                        }),
-                    );
-                }
-                return Ok(None);
-            }
-        };
         let mut claimed = Vec::new();
         let mut active_merging = 0usize;
         let (tx, rx): (
@@ -651,9 +206,13 @@ pub fn run_worker_pool_fsm(
         let runtime_scope = scope.clone();
         let mut merge_tx = Some(merge_tx);
         let mut claimed_any = false;
-        if let Some((pr_number, task_id, task_summary)) =
-            maybe_start_merge(&mut active_merging, &mut merge_tx)?
-        {
+        if let Some((pr_number, task_id, task_summary)) = maybe_start_merge(
+            &mut active_merging,
+            &mut merge_tx,
+            store,
+            repo_root,
+            &worktree_client,
+        )? {
             claimed_any = true;
             mark_merge_worker_busy(
                 &mut workers,
@@ -672,6 +231,14 @@ pub fn run_worker_pool_fsm(
             active_merging,
             last_worker_state_line,
             &mut last_activity_pulse,
+            parallelism,
+            target,
+            run_started_at_ms,
+            store,
+            cfg,
+            terminal,
+            hb,
+            lt,
         )? || claimed_any;
 
         if !claimed_any && active_merging == 0 {
@@ -685,6 +252,14 @@ pub fn run_worker_pool_fsm(
                     active_merging,
                     last_worker_state_line,
                     &mut last_activity_pulse,
+                    parallelism,
+                    target,
+                    run_started_at_ms,
+                    store,
+                    cfg,
+                    terminal,
+                    hb,
+                    lt,
                 )?;
                 if claimed_any {
                     claimed_on_idle = true;
@@ -946,7 +521,13 @@ pub fn run_worker_pool_fsm(
                                     workers[idx].lease_held = false;
                                     workers[idx].last_state_line = last_worker_state_line;
                                     if let Some((pr_number, task_id, task_summary)) =
-                                        maybe_start_merge(&mut active_merging, &mut merge_tx)?
+                                        maybe_start_merge(
+                                            &mut active_merging,
+                                            &mut merge_tx,
+                                            store,
+                                            repo_root,
+                                            &worktree_client,
+                                        )?
                                     {
                                         mark_merge_worker_busy(
                                             &mut workers,
@@ -1226,9 +807,13 @@ pub fn run_worker_pool_fsm(
                                 }
                             }
                         }
-                        if let Some((pr_number, task_id, task_summary)) =
-                            maybe_start_merge(&mut active_merging, &mut merge_tx)?
-                        {
+                        if let Some((pr_number, task_id, task_summary)) = maybe_start_merge(
+                            &mut active_merging,
+                            &mut merge_tx,
+                            store,
+                            repo_root,
+                            &worktree_client,
+                        )? {
                             mark_merge_worker_busy(
                                 &mut workers,
                                 &mut last_activity_pulse,
@@ -1391,650 +976,32 @@ pub fn run_worker_pool_fsm(
     Ok(completed)
 }
 
-fn apply_pool_stream_event(
-    workers: &mut [WorkerRow],
-    last_activity_pulse: &mut [Instant],
-    event: PoolStreamEvent,
-) -> bool {
-    match event {
-        PoolStreamEvent::ToolCommand {
-            slot_idx,
-            task_id,
-            command,
-        } => {
-            let Some(worker) = workers.get_mut(slot_idx) else {
-                return false;
-            };
-            if worker.task_id.as_deref() != Some(task_id.as_str()) {
-                return false;
-            }
-            append_worker_command(worker, &command);
-            worker.tool_line = command;
-            if let Some(pulse) = last_activity_pulse.get_mut(slot_idx) {
-                *pulse = Instant::now();
-            }
-            true
-        }
-        PoolStreamEvent::StateChanged {
-            slot_idx,
-            task_id,
-            state,
-            details,
-        } => {
-            let Some(worker) = workers.get_mut(slot_idx) else {
-                return false;
-            };
-            if worker.task_id.as_deref() != Some(task_id.as_str()) {
-                return false;
-            }
-            if !is_non_regressive_state_transition(&worker.state, &state) {
-                return false;
-            }
-            let details = details.trim();
-            let state_msg = if details.is_empty() {
-                format!("state {state}")
-            } else {
-                format!("state {state}: {details}")
-            };
-            let state_label = format_state_label(&state);
-            let tool_line = if details.is_empty() {
-                state_label.as_str().to_string()
-            } else {
-                format!("{state_label} ({details})")
-            };
-            if worker.tool_line != tool_line || worker.state != state {
-                worker.state = state.clone();
-                worker.tool_line = tool_line;
-                append_worker_command(worker, &state_msg);
-                worker.breadcrumb = format!("state>{state}");
-            }
-            if let Some(pulse) = last_activity_pulse.get_mut(slot_idx) {
-                *pulse = Instant::now();
-            }
-            true
-        }
-    }
-}
-
-fn drain_pool_events(
-    workers: &mut [WorkerRow],
-    last_activity_pulse: &mut [Instant],
-    event_sequence: &mut usize,
-    event_rx: &mpsc::Receiver<PoolStreamEvent>,
-) -> bool {
-    let mut updated = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if apply_pool_stream_event(workers, last_activity_pulse, event) {
-            *event_sequence = event_sequence.saturating_add(1);
-            updated = true;
-        }
-    }
-    updated
-}
-
-fn wait_for_quit(terminal: &dyn Terminal, copy_target: Option<&str>) -> Result<(), GardenerError> {
-    append_run_log(
-        "debug",
-        "worker_pool.wait_for_quit.started",
-        json!({
-            "worker_id": WORKER_POOL_ID,
-            "has_tty": terminal.stdin_is_tty(),
-        }),
-    );
-    if !terminal.stdin_is_tty() {
-        return Ok(());
-    }
-    // Poll until the user presses any key. poll_key returns None on timeout,
-    // Some(key) when a key arrives. For fake terminals with an empty queue
-    // the first poll immediately returns None and we exit — this prevents
-    // test hangs while still blocking on a real TTY until input is received.
-    loop {
-        match terminal.poll_key(100)? {
-            Some(INTERRUPT_SENTINEL_KEY) => {
-                if let Some(target) = copy_target {
-                    if let Err(error) = terminal.copy_to_clipboard(target) {
-                        append_run_log(
-                            "warn",
-                            "worker_pool.error_copy.failed",
-                            json!({
-                                "worker_id": WORKER_POOL_ID,
-                                "error": error.to_string()
-                            }),
-                        );
-                    } else {
-                        append_run_log(
-                            "info",
-                            "worker_pool.error_copy.success",
-                            json!({
-                                "worker_id": WORKER_POOL_ID
-                            }),
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            Some(key) if is_copy_shortcut_key(key) && copy_target.is_some() => {
-                if let Some(target) = copy_target {
-                    if let Err(error) = terminal.copy_to_clipboard(target) {
-                        append_run_log(
-                            "warn",
-                            "worker_pool.error_copy.failed",
-                            json!({
-                                "worker_id": WORKER_POOL_ID,
-                                "error": error.to_string()
-                            }),
-                        );
-                    } else {
-                        append_run_log(
-                            "info",
-                            "worker_pool.error_copy.success",
-                            json!({
-                                "worker_id": WORKER_POOL_ID
-                            }),
-                        );
-                    }
-                }
-                return Ok(());
-            }
-            Some(_) => return Ok(()),
-            None => {
-                // On a real terminal the key listener is running; keep waiting.
-                // In test mode (FakeTerminal) None means queue exhausted: exit.
-                if !crate::runtime::KEY_LISTENER_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) {
-                    return Ok(());
-                }
-            }
-        }
-    }
-}
-
-fn load_report_content(
-    runtime: &ProductionRuntime,
-    cfg: &AppConfig,
-    scope: &RuntimeScope,
-) -> String {
-    let report_path = quality_report_path(cfg, scope);
-    if runtime.file_system.exists(&report_path) {
-        runtime
-            .file_system
-            .read_to_string(&report_path)
-            .unwrap_or_else(|_| "report not found".to_string())
-    } else {
-        "report not found".to_string()
-    }
-}
-
-fn handle_hotkeys(state: &mut HotkeyState<'_>) -> Result<bool, GardenerError> {
-    let runtime = state.runtime;
-    let scope = state.scope;
-    let cfg = state.cfg;
-    let store = state.store;
-    let workers = &mut *state.workers;
-    let operator_hotkeys = state.operator_hotkeys;
-    let terminal = state.terminal;
-    let report_visible = &mut *state.report_visible;
-    let report_content = &mut *state.report_content;
-
-    if !terminal.stdin_is_tty() {
-        return Ok(false);
-    }
-    let mut redraw_dashboard = false;
-    let mut redraw_report = false;
-    if let Some(key) = terminal.poll_key(10)? {
-        if key == '\0' {
-            if *report_visible {
-                redraw_report = true;
-            } else {
-                redraw_dashboard = true;
-            }
-        }
-        if key == INTERRUPT_SENTINEL_KEY {
-            append_run_log(
-                "warn",
-                "hotkey.quit",
-                json!({
-                    "worker_id": WORKER_POOL_ID
-                }),
-            );
-            request_interrupt();
-            return Ok(true);
-        }
-
-        if *report_visible {
-            match key {
-                c if c == 'j' || c == ARROW_DOWN_SENTINEL => {
-                    let (_, h) = terminal.draw_dimensions();
-                    let viewport = h.saturating_sub(8) as usize;
-                    if scroll_report_down(viewport) {
-                        redraw_report = true;
-                    }
-                }
-                c if c == 'k' || c == ARROW_UP_SENTINEL => {
-                    if scroll_report_up() {
-                        redraw_report = true;
-                    }
-                }
-                'b' => {
-                    *report_visible = false;
-                    *report_content = None;
-                    reset_report_scroll();
-                    redraw_dashboard = true;
-                }
-                'g' => {
-                    let _ = refresh_quality_report(runtime, cfg, scope, true)?;
-                    *report_content = Some(load_report_content(runtime, cfg, scope));
-                    reset_report_scroll();
-                    redraw_report = true;
-                }
-                'q' => {
-                    append_run_log(
-                        "warn",
-                        "hotkey.quit",
-                        json!({ "worker_id": WORKER_POOL_ID }),
-                    );
-                    request_interrupt();
-                    return Ok(true);
-                }
-                _ => {}
-            }
-        } else {
-            match hotkey_action(key, operator_hotkeys) {
-                Some(AppHotkeyAction::Quit) => {
-                    append_run_log(
-                        "warn",
-                        "hotkey.quit",
-                        json!({
-                            "worker_id": WORKER_POOL_ID
-                        }),
-                    );
-                    request_interrupt();
-                    return Ok(true);
-                }
-                Some(AppHotkeyAction::ScrollDown) => {
-                    redraw_dashboard = scroll_workers_down();
-                }
-                Some(AppHotkeyAction::ScrollUp) => {
-                    redraw_dashboard = scroll_workers_up();
-                }
-                Some(AppHotkeyAction::Retry) => {
-                    let released = store.recover_stale_leases(now_unix_millis())?;
-                    append_run_log(
-                        "info",
-                        "hotkey.retry",
-                        json!({
-                            "worker_id": WORKER_POOL_ID,
-                            "released": released
-                        }),
-                    );
-                    terminal.write_line(&format!(
-                        "retry requested: released {released} stale lease(s)"
-                    ))?;
-                    redraw_dashboard = true;
-                }
-                Some(AppHotkeyAction::ReleaseLease) => {
-                    let release_now = now_unix_millis()
-                        .saturating_add((cfg.scheduler.lease_timeout_seconds as i64 + 1) * 1000);
-                    let released = store.recover_stale_leases(release_now)?;
-                    append_run_log(
-                        "info",
-                        "hotkey.release_lease",
-                        json!({
-                            "worker_id": WORKER_POOL_ID,
-                            "released": released
-                        }),
-                    );
-                    terminal.write_line(&format!(
-                        "release-lease requested: released {released} lease(s)"
-                    ))?;
-                    redraw_dashboard = true;
-                }
-                Some(AppHotkeyAction::ParkEscalate) => {
-                    let active = workers.iter().filter(|row| row.lease_held).count();
-                    let task = store.upsert_task(crate::backlog_store::NewTask {
-                        kind: TaskKind::Maintenance,
-                        title: format!("Escalation requested for {active} active worker(s)"),
-                        details: "Operator requested park/escalate from TUI hotkey".to_string(),
-                        scope_key: "runtime".to_string(),
-                        rationale:
-                            "Operator requested immediate attention on active worker saturation."
-                                .to_string(),
-                        priority: Priority::P0,
-                        source: "tui_hotkey".to_string(),
-                        related_pr: None,
-                        related_branch: None,
-                    })?;
-                    terminal.write_line(&format!(
-                        "park/escalate requested: created P0 escalation task {}",
-                        short_task_id(&task.task_id)
-                    ))?;
-                    append_run_log(
-                        "warn",
-                        "hotkey.park_escalate",
-                        json!({
-                            "worker_id": WORKER_POOL_ID,
-                            "active_workers": active,
-                            "task_id": task.task_id
-                        }),
-                    );
-                    redraw_dashboard = true;
-                }
-                Some(AppHotkeyAction::ViewReport) => {
-                    *report_visible = true;
-                    *report_content = Some(load_report_content(runtime, cfg, scope));
-                    reset_report_scroll();
-                    redraw_report = true;
-                }
-                Some(AppHotkeyAction::RegenerateReport) => {
-                    let _ = refresh_quality_report(runtime, cfg, scope, true)?;
-                    *report_visible = true;
-                    *report_content = Some(load_report_content(runtime, cfg, scope));
-                    reset_report_scroll();
-                    redraw_report = true;
-                }
-                Some(AppHotkeyAction::Back) => {
-                    // Not in report view, ignore
-                }
-                None => {}
-            }
-        }
-    }
-    if *report_visible && redraw_report {
-        let report_path = quality_report_path(cfg, scope);
-        let report = report_content.as_deref().unwrap_or("report not found");
-        terminal.draw_report(&report_path.display().to_string(), report)?;
-    } else if redraw_dashboard {
-        let snapshot = dashboard_snapshot(store)?;
-        render(
-            terminal,
-            workers,
-            &snapshot,
-            cfg.scheduler.heartbeat_interval_seconds,
-            cfg.scheduler.lease_timeout_seconds,
-        )?;
-    }
-    Ok(false)
-}
-
-fn now_unix_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-fn append_worker_command(worker: &mut WorkerRow, command: &str) {
-    worker
-        .command_details
-        .push((now_hhmmss(), command.to_string()));
-    if worker.command_details.len() > WORKER_COMMAND_HISTORY_LIMIT {
-        let overflow = worker.command_details.len() - WORKER_COMMAND_HISTORY_LIMIT;
-        worker.command_details.drain(0..overflow);
-    }
-}
-
-fn execution_task_packet(
-    task: &crate::backlog_store::BacklogTask,
-    task_override: Option<&str>,
-) -> String {
-    if let Some(task_override) = task_override {
-        return task_override.to_string();
-    }
-    let details = task.details.trim();
-    if details.is_empty() {
-        task.title.clone()
-    } else {
-        format!("{}\n\n{}", task.title, details)
-    }
-}
-
-fn set_worker_idle(worker: &mut WorkerRow, tool_line: &str) {
-    let should_log = worker.state != "idle" || worker.tool_line != tool_line;
-    worker.state = "idle".to_string();
-    worker.task_title = "idle".to_string();
-    worker.tool_line = tool_line.to_string();
-    worker.breadcrumb = "idle".to_string();
-    worker.lease_held = false;
-    worker.command_details.clear();
-    if should_log {
-        append_worker_command(worker, tool_line);
-    }
-}
-
-fn refresh_worker_heartbeats(workers: &mut [WorkerRow], last_activity_pulse: &[Instant]) {
-    let now = Instant::now();
-    for (idx, worker) in workers.iter_mut().enumerate() {
-        if let Some(last_pulse) = last_activity_pulse.get(idx) {
-            let age = now.duration_since(*last_pulse).as_secs();
-            worker.last_heartbeat_secs = age;
-            worker.session_age_secs = age;
-        }
-    }
-}
-
-fn now_hhmmss() -> String {
-    let timestamp = now_unix_millis().rem_euclid(86_400_000);
-    let secs = (timestamp / 1000) as u64;
-    let in_day = secs % 86_400;
-    format!(
-        "{:02}:{:02}:{:02}",
-        in_day / 3600,
-        (in_day % 3600) / 60,
-        in_day % 60
-    )
-}
-
-fn is_non_regressive_state_transition(current_state: &str, next_state: &str) -> bool {
-    let current = normalize_worker_state_for_transition(current_state);
-    let next = normalize_worker_state_for_transition(next_state);
-
-    match current {
-        "complete" | "failed" | "unresolved" | "parked" | "idle" => return false,
-        _ => {}
-    }
-    if next == "unknown" {
-        return false;
-    }
-    let current_rank = worker_state_rank(current);
-    let next_rank = worker_state_rank(next);
-    next_rank >= current_rank
-}
-
-fn worker_state_rank(state: &str) -> i32 {
-    match state {
-        "understand" => 0,
-        "planning" => 1,
-        "doing" => 2,
-        "gitting" => 3,
-        "reviewing" => 4,
-        "merging" => 5,
-        "complete" => 6,
-        "failed" => 7,
-        "unresolved" => 8,
-        "parked" => 9,
-        "idle" => 10,
-        _ => 10,
-    }
-}
-
-fn normalize_worker_state_for_transition(state: &str) -> &str {
-    let normalized_state = state.trim().to_ascii_lowercase();
-    let normalized_state = normalized_state
-        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-        .rfind(|part| !part.is_empty())
-        .unwrap_or(normalized_state.as_str());
-
-    match normalized_state {
-        "init" | "boot" | "backlog_sync" | "working" | "seeding" => "understand",
-        "claimed" | "starting" | "worktree_preparing" | "worktree_ready" => "understand",
-        "commit" | "gitting_remediation" | "pr_creating" => "gitting",
-        "merge_lock_waiting"
-        | "merge_from_main"
-        | "merge_lock_held"
-        | "merge_polling"
-        | "handoff"
-        | "merge_remediation"
-        | "post_merge_validation"
-        | "teardown" => "merging",
-        "understand" => "understand",
-        "planning" => "planning",
-        "doing" => "doing",
-        "gitting" => "gitting",
-        "reviewing" => "reviewing",
-        "merging" => "merging",
-        "complete" => "complete",
-        "failed" => "failed",
-        "unresolved" => "unresolved",
-        "idle" => "idle",
-        "parked" => "parked",
-        _ => "unknown",
-    }
-}
-
-fn is_copy_shortcut_key(key: char) -> bool {
-    key.eq_ignore_ascii_case(&COPY_SHORTCUT_KEY)
-}
-
-fn hotkey_action(key: char, operator_hotkeys: bool) -> Option<AppHotkeyAction> {
-    action_for_key_with_mode(key, operator_hotkeys)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DashboardSnapshot {
-    stats: QueueStats,
-    backlog: BacklogView,
-}
-
-fn dashboard_snapshot(store: &BacklogStore) -> Result<DashboardSnapshot, GardenerError> {
-    let tasks = store.list_tasks()?;
-    let mut stats = QueueStats {
-        ready: 0,
-        active: 0,
-        failed: 0,
-        unresolved: 0,
-        merge_pending: 0,
-        p0: 0,
-        p1: 0,
-        p2: 0,
-    };
-    let mut backlog = BacklogView::default();
-    for task in tasks {
-        match task.status {
-            crate::backlog_store::TaskStatus::Ready => stats.ready += 1,
-            crate::backlog_store::TaskStatus::Leased
-            | crate::backlog_store::TaskStatus::InProgress => {
-                stats.active += 1;
-                backlog.in_progress.push(format!(
-                    "INP {} {} {}",
-                    task.priority.as_str(),
-                    short_task_id(&task.task_id),
-                    task.title
-                ));
-            }
-            crate::backlog_store::TaskStatus::MergePending => {
-                stats.merge_pending += 1;
-                let task_title = task.title.clone();
-                let merge_title = match task.related_pr.and_then(|pr| u64::try_from(pr).ok()) {
-                    Some(pr_number) => format!("PR #{pr_number} {task_title}"),
-                    None => task_title,
-                };
-                backlog.in_progress.push(format!(
-                    "MRG {} {} {}",
-                    task.priority.as_str(),
-                    short_task_id(&task.task_id),
-                    merge_title
-                ));
-            }
-            crate::backlog_store::TaskStatus::Failed => stats.failed += 1,
-            crate::backlog_store::TaskStatus::Unresolved => stats.unresolved += 1,
-            crate::backlog_store::TaskStatus::Complete => {}
-        }
-        if matches!(task.status, crate::backlog_store::TaskStatus::Ready) {
-            backlog.queued.push(format!(
-                "Q {} {} {}",
-                task.priority.as_str(),
-                short_task_id(&task.task_id),
-                task.title
-            ));
-        }
-        match task.priority {
-            crate::priority::Priority::P0 => stats.p0 += 1,
-            crate::priority::Priority::P1 => stats.p1 += 1,
-            crate::priority::Priority::P2 => stats.p2 += 1,
-        }
-    }
-    Ok(DashboardSnapshot { stats, backlog })
-}
-
-fn render(
-    terminal: &dyn Terminal,
-    workers: &[WorkerRow],
-    snapshot: &DashboardSnapshot,
-    heartbeat_interval_seconds: u64,
-    lease_timeout_seconds: u64,
-) -> Result<(), GardenerError> {
-    if terminal.stdin_is_tty() {
-        terminal.draw_dashboard_with_config(
-            workers,
-            &snapshot.stats,
-            &snapshot.backlog,
-            heartbeat_interval_seconds,
-            lease_timeout_seconds,
-        )?;
-    } else {
-        for row in workers {
-            terminal.write_line(&structured_fallback_line(
-                &row.worker_id,
-                &row.state,
-                &row.tool_line,
-            ))?;
-        }
-    }
-    Ok(())
-}
-
-fn short_task_id(task_id: &str) -> &str {
-    task_id.get(0..6).unwrap_or(task_id)
-}
-
-fn worker_failure_prompt(worker_id: &str, task_id: &str, reason: &str) -> String {
-    let recent_lines = recent_worker_log_lines(worker_id, 15);
-    let recent_log_summary = if recent_lines.is_empty() {
-        "No recent worker log lines were available.".to_string()
-    } else {
-        recent_lines.join("\n")
-    };
-    format!(
-        "Worker failure on task {task_id}\n\nError:\n{reason}\n\nLast 15 logs for {worker_id}:\n{recent_log_summary}\n\nPrompt to pass to an agent:\nInvestigate this failure, identify the exact root cause, and provide a remediation step-by-step.\nUse the context above, especially the jsonl worker logs, as the primary evidence."
-    )
-}
-
-fn quality_report_path(cfg: &AppConfig, scope: &RuntimeScope) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(&cfg.quality_report.path);
-    if path.is_absolute() {
-        path
-    } else {
-        scope.working_dir.join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_pool_stream_event, available_doing_slots, execution_task_packet,
+    use super::event_handling::{apply_pool_stream_event, is_non_regressive_state_transition};
+    use super::hotkeys::wait_for_quit;
+    use super::result_handling::{
         handle_doing_complete_transition, handle_doing_non_complete_transition,
-        handle_merge_summary, hotkey_action, is_non_regressive_state_transition,
-        run_worker_pool_fsm, wait_for_quit, DoingSummaryHandling, MergeSummaryHandling,
-        PoolStreamEvent, WorkerRow, INTERRUPT_SENTINEL_KEY,
+        handle_merge_summary,
+    };
+    use super::scheduling::execution_task_packet;
+    use super::{
+        available_doing_slots, run_worker_pool_fsm, DoingSummaryHandling, MergeSummaryHandling,
+        PoolStreamEvent,
     };
     use crate::backlog_store::{BacklogStore, BacklogTask, NewTask, TaskStatus};
     use crate::config::AppConfig;
-    use crate::hotkeys::{action_for_key, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS};
+    use crate::hotkeys::{
+        action_for_key, action_for_key_with_mode, HotkeyAction, DASHBOARD_BINDINGS, REPORT_BINDINGS,
+    };
     use crate::logging::{clear_run_logger, init_run_logger};
     use crate::priority::Priority;
     use crate::runtime::{
         FakeClock, FakeProcessRunner, FakeTerminal, ProductionFileSystem, ProductionRuntime,
+        INTERRUPT_SENTINEL_KEY,
     };
     use crate::task_identity::TaskKind;
+    use crate::tui::WorkerRow;
     use crate::types::{RuntimeScope, WorkerState};
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -2139,32 +1106,56 @@ mod tests {
     #[test]
     fn report_hotkey_actions_cover_report_bindings() {
         for binding in REPORT_BINDINGS {
-            let action = hotkey_action(binding.key, false);
+            let action = action_for_key_with_mode(binding.key, false);
             assert!(action.is_some());
         }
     }
 
     #[test]
     fn hotkey_actions_match_default_and_operator_contracts() {
-        assert_eq!(hotkey_action('q', false), Some(HotkeyAction::Quit)); // hotkey:q
-        assert_eq!(hotkey_action('j', false), Some(HotkeyAction::ScrollDown)); // hotkey:j
-        assert_eq!(hotkey_action('k', false), Some(HotkeyAction::ScrollUp)); // hotkey:k
-        assert_eq!(hotkey_action('c', false), None); // hotkey:c removed
-        assert_eq!(hotkey_action('v', false), Some(HotkeyAction::ViewReport)); // hotkey:v
         assert_eq!(
-            hotkey_action('g', false),
+            action_for_key_with_mode('q', false),
+            Some(HotkeyAction::Quit)
+        ); // hotkey:q
+        assert_eq!(
+            action_for_key_with_mode('j', false),
+            Some(HotkeyAction::ScrollDown)
+        ); // hotkey:j
+        assert_eq!(
+            action_for_key_with_mode('k', false),
+            Some(HotkeyAction::ScrollUp)
+        ); // hotkey:k
+        assert_eq!(action_for_key_with_mode('c', false), None); // hotkey:c removed
+        assert_eq!(
+            action_for_key_with_mode('v', false),
+            Some(HotkeyAction::ViewReport)
+        ); // hotkey:v
+        assert_eq!(
+            action_for_key_with_mode('g', false),
             Some(HotkeyAction::RegenerateReport)
         ); // hotkey:g
-        assert_eq!(hotkey_action('b', false), Some(HotkeyAction::Back)); // hotkey:b
-        assert_eq!(hotkey_action('r', false), None);
-        assert_eq!(hotkey_action('l', false), None);
-        assert_eq!(hotkey_action('p', false), None);
-        assert_eq!(hotkey_action('c', true), None); // hotkey:c removed
+        assert_eq!(
+            action_for_key_with_mode('b', false),
+            Some(HotkeyAction::Back)
+        ); // hotkey:b
+        assert_eq!(action_for_key_with_mode('r', false), None);
+        assert_eq!(action_for_key_with_mode('l', false), None);
+        assert_eq!(action_for_key_with_mode('p', false), None);
+        assert_eq!(action_for_key_with_mode('c', true), None); // hotkey:c removed
 
-        assert_eq!(hotkey_action('r', true), Some(HotkeyAction::Retry)); // hotkey:r
-        assert_eq!(hotkey_action('l', true), Some(HotkeyAction::ReleaseLease)); // hotkey:l
-        assert_eq!(hotkey_action('p', true), Some(HotkeyAction::ParkEscalate)); // hotkey:p
-        assert_eq!(hotkey_action('x', true), None);
+        assert_eq!(
+            action_for_key_with_mode('r', true),
+            Some(HotkeyAction::Retry)
+        ); // hotkey:r
+        assert_eq!(
+            action_for_key_with_mode('l', true),
+            Some(HotkeyAction::ReleaseLease)
+        ); // hotkey:l
+        assert_eq!(
+            action_for_key_with_mode('p', true),
+            Some(HotkeyAction::ParkEscalate)
+        ); // hotkey:p
+        assert_eq!(action_for_key_with_mode('x', true), None);
     }
 
     #[test]
@@ -2253,7 +1244,7 @@ mod tests {
 
         write_file(
             &dir.path().join(".gardener/repo-intelligence.toml"),
-            include_str!("../tests/fixtures/triage/expected-profiles/phase03-profile.toml"),
+            include_str!("../../tests/fixtures/triage/expected-profiles/phase03-profile.toml"),
         );
         write_file(&dir.path().join(".gardener/quality.md"), "existing report");
 
@@ -2298,7 +1289,7 @@ mod tests {
 
         write_file(
             &dir.path().join(".gardener/repo-intelligence.toml"),
-            include_str!("../tests/fixtures/triage/expected-profiles/phase03-profile.toml"),
+            include_str!("../../tests/fixtures/triage/expected-profiles/phase03-profile.toml"),
         );
         write_file(&dir.path().join(".gardener/quality.md"), "OLD_MARKER");
 

@@ -10,7 +10,13 @@ const TARGET_FILES: &[&str] = &[
     "worker/worker_doing.rs",
     "worker/merge_phase.rs",
     "worker/simulated.rs",
-    "worker_pool.rs",
+    "worker_pool/mod.rs",
+    "worker_pool/dashboard.rs",
+    "worker_pool/event_handling.rs",
+    "worker_pool/hotkeys.rs",
+    "worker_pool/result_handling.rs",
+    "worker_pool/scheduling.rs",
+    "worker_pool/util.rs",
 ];
 const WORKER_LOG_CALL: &str = "append_run_log(";
 

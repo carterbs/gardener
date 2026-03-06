@@ -69,6 +69,7 @@ fn parse_merge_open_pr_number(task_summary: &str) -> Option<u64> {
 fn should_complete_merged_pr_without_diff(
     process_runner: &dyn ProcessRunner,
     worktree_path: &std::path::Path,
+    worker_id: &str,
     task_summary: &str,
 ) -> Result<bool, GardenerError> {
     let Some(pr_number) = parse_merge_open_pr_number(task_summary) else {
@@ -82,6 +83,7 @@ fn should_complete_merged_pr_without_diff(
                 "warn",
                 "worker.gitting.terminal_pr_check_skipped",
                 json!({
+                    "worker_id": worker_id,
                     "pr_number": pr_number,
                     "worktree_path": worktree_path.display().to_string(),
                     "error": err.to_string()
@@ -100,6 +102,7 @@ fn should_complete_merged_pr_without_diff(
         "info",
         "worker.gitting.terminal_pr_check.completed",
         json!({
+            "worker_id": worker_id,
             "pr_number": pr_number,
             "worktree_path": worktree_path.display().to_string(),
             "pr_state": pr.state,
@@ -752,7 +755,12 @@ fn execute_task_live(
         let body = format!("Automated PR for task: {task_summary}");
         gh.create_pr(&title, &body).map(|_| ())?;
     }
-    if should_complete_merged_pr_without_diff(process_runner, &worktree_path, task_summary)? {
+    if should_complete_merged_pr_without_diff(
+        process_runner,
+        &worktree_path,
+        &identity.worker_id,
+        task_summary,
+    )? {
         append_run_log(
             "info",
             "worker.gitting.terminal_pr_completion",
@@ -1064,6 +1072,7 @@ mod tests {
         let should_complete = should_complete_merged_pr_without_diff(
             &runner,
             std::path::Path::new("/repo"),
+            "worker-1",
             "feat: lint\n\nMerge open PR #140 on branch gardener/manual-runtime-f5f2a381c995e9",
         )
         .expect("check should succeed");
@@ -1105,6 +1114,7 @@ mod tests {
         let should_complete = should_complete_merged_pr_without_diff(
             &runner,
             std::path::Path::new("/repo"),
+            "worker-1",
             "feat: lint\n\nMerge open PR #140 on branch gardener/manual-runtime-f5f2a381c995e9",
         )
         .expect("check should succeed");

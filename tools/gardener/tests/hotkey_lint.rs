@@ -40,7 +40,7 @@ fn linter_hotkeys_advertised_in_ui_must_have_behavior() {
         );
     }
 
-    let contract_source = include_str!("../src/worker_pool.rs");
+    let contract_source = include_str!("../src/worker_pool/mod.rs");
     for binding in DASHBOARD_BINDINGS {
         let key = binding.key;
         assert!(

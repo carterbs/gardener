@@ -39,6 +39,10 @@ There is no `legacy-mixed` class.
 
 If a file cannot be clearly classified, the refactor is incomplete.
 
+Enforcement scope is all Rust source files under `tools/gardener/src/**` except paths explicitly listed in a checked-in allowlist.
+
+CI must fail if any in-scope file is missing a manifest entry.
+
 ## Why This Exists
 
 The current TUI and worktree code mixes logic and side effects in ways that make the coverage gate produce bad incentives:
@@ -104,7 +108,13 @@ Files classified as `unit-core` must not:
 - emit logs or telemetry side effects
 - access runtime singletons
 
-This should be enforced with a structural lint or a dedicated test that checks disallowed imports and dependency edges for `unit-core` paths.
+This is enforced by a manifest-driven structural test that parses Rust source and rejects:
+
+- imports from banned crates or modules for `unit-core`
+- calls to banned APIs, including `std::process`, `std::fs`, env or cwd access, logging sinks, and terminal or PTY APIs
+- dependency edges from `unit-core` modules to `boundary-orchestration` modules
+
+String-matching heuristics are not sufficient.
 
 ### Boundary contract for `boundary-orchestration`
 
@@ -114,7 +124,16 @@ Boundary files are allowed to do side effects, but they must be thin:
 - they delegate deterministic decision making to `unit-core`
 - they are owned by explicit integration tests
 
-If a boundary file accumulates reducer logic, formatting policy, or domain decision rules, the refactor is regressing.
+Boundary files may coordinate IO, lifecycle, and adapter translation only.
+
+They must not define:
+
+- domain reducers
+- ranking or ordering policy
+- answer normalization
+- render-policy branching except for trivial adapter-local mapping
+
+Any helper with deterministic business behavior and no side effects belongs in `unit-core`.
 
 ## Validation Model
 
@@ -126,7 +145,7 @@ Keep the repository-wide `cargo llvm-cov` threshold in `scripts/test-gardener-co
 
 ### Gate 2: Strict unit-core coverage
 
-All files in `unit-core` paths must meet strict per-file line coverage.
+Changed files in `unit-core` paths must meet strict per-file line coverage in CI.
 
 Policy:
 
@@ -135,9 +154,13 @@ Policy:
 - uncovered lines are reported by file
 - no test-only bypass branches are allowed in `unit-core`
 
+Long-term invariant:
+
+- every manifest-classified `unit-core` file should remain coverable to the same threshold
+
 Operational rules:
 
-- diff base is `origin/main`
+- diff base is `git merge-base HEAD origin/main`
 - renames are treated as the new path and must satisfy the gate under the new classification
 - extracted files are treated as new files and must meet the gate immediately
 - moved uncovered code does not get grandfathered
@@ -153,13 +176,33 @@ The repo should add a checked-in manifest, for example `tools/gardener/testabili
 - role: `unit-core` or `boundary-orchestration`
 - owning test target(s)
 - for boundary files, whether the owner is PTY-backed, temp-repo-backed, or both
+- instrumentation requirement for the file
+
+Example shape:
+
+```toml
+[[file]]
+path = "tools/gardener/src/tui/live/example.rs"
+role = "boundary-orchestration"
+owning_tests = ["tui_live_smoke"]
+boundary_mode = ["pty"]
+instrumentation = "required"
+```
 
 CI must fail when:
 
 - a file has no classification
 - a boundary file has no owning test target
 - a changed boundary file’s owning test target did not run
+- a changed boundary file’s owning test target ran but did not produce execution evidence for that file
 - a `unit-core` file violates purity rules
+
+A boundary file is considered owned only if its declared owning test target both runs and produces execution evidence for that file in CI.
+
+Acceptable evidence is either:
+
+- non-zero line execution in coverage output for the owned file
+- a required runtime trace or assertion emitted from the real boundary path
 
 ### Gate 4: Instrumentation role awareness
 
@@ -226,10 +269,10 @@ The new foundation should not quietly make the repo worse.
 
 Track and enforce:
 
-- a CI runtime budget for new boundary tests
-- a flake budget for PTY-backed and temp-repo-backed tests
+- CI fails if the boundary suite runtime increases by more than 10% from the checked-in baseline without updating the baseline in the same change with justification
+- CI fails if the rolling 14-day flaky retry rate for PTY-backed and temp-repo-backed boundary tests exceeds 2%
 
-If the boundary suite exceeds the agreed runtime or flake threshold, the solution is to improve the owning boundary tests, not to weaken the architectural split.
+If the boundary suite exceeds either threshold, the solution is to improve the owning boundary tests, not to weaken the architectural split.
 
 ## Execution Order Inside the One-Shot Change
 

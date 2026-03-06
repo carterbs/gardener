@@ -3,6 +3,7 @@ use gardener::backlog_store::{BacklogStore, NewTask, TaskStatus};
 use gardener::priority::Priority;
 use gardener::task_identity::TaskKind;
 use std::process::Command;
+use std::thread::sleep;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -99,6 +100,12 @@ stale_after_days = 7
         .env("GARDENER_DB_PATH", &db_path)
         .env("GARDENER_LOG_PATH", dir.path().join("otel-logs.jsonl"));
     (report_path, dir, store, cmd)
+}
+
+fn setup_operator_fixture() -> (TempDir, BacklogStore, Command) {
+    let (_report_path, dir, store, mut cmd) = setup_pty_fixture();
+    cmd.env("GARDENER_OPERATOR_HOTKEYS", "1");
+    (dir, store, cmd)
 }
 
 fn setup_live_interrupt_fixture() -> (TempDir, BacklogStore, Command) {
@@ -260,11 +267,15 @@ fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
     session.set_expect_timeout(Some(Duration::from_secs(30)));
 
+    session.expect("GARDENER").expect("dashboard header");
     session.send("v").expect("send v");
     session.send("g").expect("send g");
-    std::thread::sleep(Duration::from_millis(300));
+    sleep(Duration::from_millis(300));
     session.send("b").expect("send b");
-    session.send("q").expect("send q");
+    for _ in 0..5 {
+        session.send("q").expect("send q");
+        sleep(Duration::from_millis(150));
+    }
     session.expect(Eof).expect("session exited");
 
     let report = std::fs::read_to_string(&report_path).expect("read report");
@@ -281,6 +292,37 @@ fn pty_e2e_hotkeys_v_g_b_q_drive_screen_transitions() {
     assert!(
         remaining > 0,
         "expected quit hotkey to stop run before finishing all seeded tasks"
+    );
+}
+
+#[test]
+#[ignore]
+fn pty_e2e_operator_hotkeys_emit_feedback_and_create_escalation_task() {
+    let (_dir, store, cmd) = setup_operator_fixture();
+    let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
+    session.set_expect_timeout(Some(Duration::from_secs(30)));
+
+    session.expect("GARDENER").expect("dashboard header");
+    session.send("r").expect("send r");
+    sleep(Duration::from_millis(200));
+    session.send("l").expect("send l");
+    sleep(Duration::from_millis(200));
+    session.send("p").expect("send p");
+    sleep(Duration::from_millis(300));
+    // The PTY can be sitting in a nested view when quit lands, so send a short burst.
+    for _ in 0..5 {
+        session.send("q").expect("send q");
+        sleep(Duration::from_millis(150));
+    }
+    session.expect(Eof).expect("session exited");
+
+    let tasks = store.list_tasks().expect("list tasks");
+    assert!(
+        tasks.iter().any(|task| task
+            .title
+            .contains("Escalation requested for")
+            && task.priority == Priority::P0),
+        "expected operator hotkey to create a P0 escalation task"
     );
 }
 
@@ -309,10 +351,10 @@ fn pty_e2e_q_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
     session.set_expect_timeout(Some(Duration::from_secs(30)));
-    std::thread::sleep(Duration::from_millis(350));
+    sleep(Duration::from_millis(350));
     for _ in 0..5 {
         session.send("q").expect("send q");
-        std::thread::sleep(Duration::from_millis(150));
+        sleep(Duration::from_millis(150));
     }
     session.expect(Eof).expect("session exited");
 
@@ -333,7 +375,7 @@ fn pty_e2e_ctrl_c_interrupts_live_blocking_turn() {
     let (_dir, store, cmd) = setup_live_interrupt_fixture();
     let mut session = expectrl::Session::spawn(cmd).expect("spawn pty");
     session.set_expect_timeout(Some(Duration::from_secs(8)));
-    std::thread::sleep(Duration::from_millis(350));
+    sleep(Duration::from_millis(350));
     session.send("\u{3}").expect("send ctrl-c");
     session.expect(Eof).expect("session exited");
 

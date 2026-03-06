@@ -6,6 +6,18 @@ Gardener orchestration is Rust-first.
 - Run workers: `cargo run -p gardener --bin gardener -- --quit-after 1 --config <path>`
 - Reconciliation only: `cargo run -p gardener --bin gardener -- --sync-only --config <path>`
 
+## Validation commands
+
+Use this matrix as the default validation path for agent work and human review.
+
+| scenario | command | when to run |
+|---|---|---|
+| Build check | `cargo build -p gardener --all-targets` | Verify the crate compiles after code changes before test execution. |
+| Targeted tests | `cargo test -p gardener --all-targets -- <test_name_or_filter>` | Run focused validation for a crate, module, or test filter. |
+| Full validation | `./scripts/run-validate.sh` | Run the canonical local quality gate sequence before review or handoff. |
+| Migration checks | `./scripts/check-migrations-wired.sh` | Run after adding/removing/renaming migration files or schema-related code. |
+| Commit parity | `./.githooks/pre-commit` | Mirror commit-time checks locally before creating a commit. |
+
 Legacy TypeScript orchestration entrypoints are not part of active runtime execution.
 
 ## Commit policy

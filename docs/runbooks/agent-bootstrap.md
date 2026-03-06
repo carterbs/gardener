@@ -37,11 +37,22 @@ cargo run -p gardener --bin gardener -- --quality-grades-only --config gardener.
 cargo run -p gardener --bin gardener -- --backlog-only --config gardener.toml
 ```
 
+Validation guidance for this bootstrap run:
+
+- Fast (local verification): run the fast tier in `docs/conventions/workflow.md` first for quick signal while iterating.
+  - `scripts/doc-gardening.sh`
+  - `scripts/check-skills-sync.sh`
+  - `scripts/check-no-warnings.sh`
+  - `scripts/check-migrations-wired.sh`
+  - `scripts/check-binary-blobs.sh`
+  - `scripts/run-script-lint-fixture-tests.sh`
+- Full (merge / pre-commit equivalence): run `scripts/run-validate.sh` or `./.githooks/pre-commit` once bootstrap quality/backlog checks are stable.
+
 4. Run a bounded worker warmup to confirm end-to-end startup to completion.
 
 ```bash
 cargo run -p gardener --bin gardener -- --quit-after 1 --config gardener.toml
-```
+``` 
 
 5. Inspect first-run artifacts.
 

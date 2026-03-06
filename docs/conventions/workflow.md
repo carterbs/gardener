@@ -27,6 +27,23 @@ Quality-grade document ownership is in Gardener runtime startup audits. External
 
 ## Validation and pre-commit flow
 
+### Validation tiers: fast loop vs full checks
+
+- Fast loop (minimum local + pre-commit iteration):
+  - Scope: deterministic checks that catch most local regressions quickly without full coverage.
+  - Commands:
+    - `scripts/doc-gardening.sh`
+    - `scripts/check-skills-sync.sh`
+    - `scripts/check-no-warnings.sh`
+    - `scripts/check-migrations-wired.sh`
+    - `scripts/check-binary-blobs.sh`
+    - `scripts/run-script-lint-fixture-tests.sh`
+  - Runtime intent: run during day-to-day edits, and before creating a commit draft when quick feedback is needed.
+- Full tier (pre-merge / CI equivalence):
+  - Scope: fast loop + full test coverage + all required startup checks.
+  - Command: `scripts/run-validate.sh` (or the pre-commit hook path below), which adds coverage via `./scripts/test-gardener-coverage.sh`.
+  - Runtime intent: required before merging, when opening PRs, and for release- or CI-significant changes.
+
 - Gardener validation command entrypoint is configured under `[validation] command` and `[startup] validation_command` in `gardener.toml`.
 - `scripts/run-validate.sh` is the canonical project validation command.
   - It executes each custom linter in order:
@@ -45,6 +62,8 @@ Quality-grade document ownership is in Gardener runtime startup audits. External
   - run `scripts/run-validate.sh`
 - Git hooks path is set by `./scripts/setup-git-hooks.sh` (`core.hooksPath=.githooks`).
 
+Quick local loop tip: use the fast tier commands above for rapid confirmation after edits; keep `./.githooks/pre-commit` for the full tier.
+
 Pre-commit remediation playbook:
 
 1. Reproduce the exact pre-commit path:
@@ -52,6 +71,8 @@ Pre-commit remediation playbook:
 ```bash
 ./.githooks/pre-commit
 ```
+
+2. For fast confirmation during iterative editing, run only the fast tier list above and only escalate to full pre-commit when the fast loop is clean.
 
 2. Capture the first failing step from the hook output (for example:
    `scripts/check-skills-sync.sh`, `scripts/check-no-warnings.sh`, `scripts/test-gardener-coverage.sh`).

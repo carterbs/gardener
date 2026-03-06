@@ -89,6 +89,37 @@ pub struct NewTask {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualTaskInput {
+    pub task_id: String,
+    pub kind: TaskKind,
+    pub title: String,
+    pub details: String,
+    pub rationale: String,
+    pub scope_key: String,
+    pub priority: Priority,
+    pub status: TaskStatus,
+    pub source: String,
+    pub related_pr: Option<i64>,
+    pub related_branch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TaskUpdatePatch {
+    pub status: Option<TaskStatus>,
+    pub rationale: Option<String>,
+    pub related_pr: Option<i64>,
+    pub related_branch: Option<String>,
+    pub clear_lease: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskMutation {
+    pub before: BacklogTask,
+    pub after: BacklogTask,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedSeed {
     pub title: String,
     pub details: String,
@@ -100,6 +131,11 @@ pub struct RejectedSeed {
 enum WriteCmd {
     Upsert {
         task: NewTask,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<BacklogTask>>,
+    },
+    InsertManualTask {
+        task: ManualTaskInput,
         now: i64,
         reply: oneshot::Sender<StoreResult<BacklogTask>>,
     },
@@ -182,6 +218,12 @@ enum WriteCmd {
         task_id: String,
         now: i64,
         reply: oneshot::Sender<StoreResult<bool>>,
+    },
+    UpdateTaskMetadata {
+        task_id: String,
+        patch: TaskUpdatePatch,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<TaskMutation>>,
     },
     InsertRejectedSeed {
         title: String,
@@ -312,6 +354,29 @@ impl BacklogStore {
                                 .ok_or_else(|| {
                                     GardenerError::Database("row missing after upsert".to_string())
                                 })
+                        });
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|task| {
+                                json!({
+                                    "task_id": task.task_id,
+                                    "status": task.status.as_str(),
+                                    "priority": task.priority.as_str(),
+                                    "attempt_count": task.attempt_count,
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
+                    WriteCmd::InsertManualTask { task, now, reply } => {
+                        let result = insert_manual_task(&write_conn, &task, now).and_then(|_| {
+                            fetch_task(&write_conn, &task.task_id)?.ok_or_else(|| {
+                                GardenerError::Database(
+                                    "row missing after manual insert".to_string(),
+                                )
+                            })
                         });
                         log_write_result(
                             &writer_path,
@@ -631,6 +696,28 @@ impl BacklogStore {
                         );
                         let _ = reply.send(result);
                     }
+                    WriteCmd::UpdateTaskMetadata {
+                        task_id,
+                        patch,
+                        now,
+                        reply,
+                    } => {
+                        let result = update_task_metadata(&write_conn, &task_id, &patch, now);
+                        log_write_result(
+                            &writer_path,
+                            operation,
+                            &result.as_ref().map(|mutation| {
+                                json!({
+                                    "task_id": mutation.after.task_id,
+                                    "changed": mutation.changed,
+                                    "before_status": mutation.before.status.as_str(),
+                                    "after_status": mutation.after.status.as_str(),
+                                })
+                            }),
+                            result.as_ref().err(),
+                        );
+                        let _ = reply.send(result);
+                    }
                     WriteCmd::InsertRejectedSeed {
                         title,
                         details,
@@ -745,6 +832,21 @@ impl BacklogStore {
             );
         }
         result
+    }
+
+    pub fn insert_manual_task(&self, task: ManualTaskInput) -> StoreResult<BacklogTask> {
+        let now = system_time_unix();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::InsertManualTask {
+                task,
+                now,
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?
     }
 
     pub fn claim_next(
@@ -1341,6 +1443,26 @@ impl BacklogStore {
         result
     }
 
+    pub fn list_recent_tasks(&self, limit: usize) -> StoreResult<Vec<BacklogTask>> {
+        self.read_pool.with_conn(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT task_id, kind, title, details, scope_key, priority, status, last_updated, \
+                            lease_owner, lease_expires_at, source, related_pr, related_branch, rationale, attempt_count, created_at \
+                     FROM backlog_tasks \
+                     ORDER BY created_at DESC \
+                     LIMIT ?1",
+                )
+                .map_err(db_err)?;
+            let rows = statement
+                .query_map([limit as i64], row_to_task)
+                .map_err(db_err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db_err)?;
+            Ok(rows)
+        })
+    }
+
     pub fn list_tasks(&self) -> StoreResult<Vec<BacklogTask>> {
         self.read_pool.with_conn(|conn| {
             let mut statement = conn
@@ -1439,6 +1561,47 @@ impl BacklogStore {
         self.read_pool.with_conn(|conn| fetch_task(conn, task_id))
     }
 
+    pub fn update_task_metadata(
+        &self,
+        task_id: &str,
+        patch: TaskUpdatePatch,
+    ) -> StoreResult<TaskMutation> {
+        let now = system_time_unix();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.sender()?
+            .blocking_send(WriteCmd::UpdateTaskMetadata {
+                task_id: task_id.to_string(),
+                patch,
+                now,
+                reply: reply_tx,
+            })
+            .map_err(|e| GardenerError::Database(e.to_string()))?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|e| GardenerError::Database(e.to_string()))?
+    }
+
+    pub fn retire_task(
+        &self,
+        task_id: &str,
+        status: TaskStatus,
+        rationale: String,
+        related_pr: Option<i64>,
+        related_branch: Option<String>,
+        clear_lease: bool,
+    ) -> StoreResult<TaskMutation> {
+        self.update_task_metadata(
+            task_id,
+            TaskUpdatePatch {
+                status: Some(status),
+                rationale: Some(rationale),
+                related_pr,
+                related_branch,
+                clear_lease,
+            },
+        )
+    }
+
     pub fn insert_rejected_seed(
         &self,
         task: &crate::seed_runner::SeedTask,
@@ -1500,6 +1663,17 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
                 "task_id": compute_task_id_from_new_task(task),
                 "scope_key": task.scope_key,
                 "priority": task.priority.as_str(),
+                "source": task.source,
+                "now": now,
+            }),
+        ),
+        WriteCmd::InsertManualTask { task, now, .. } => (
+            "insert_manual_task",
+            json!({
+                "task_id": task.task_id,
+                "scope_key": task.scope_key,
+                "priority": task.priority.as_str(),
+                "status": task.status.as_str(),
                 "source": task.source,
                 "now": now,
             }),
@@ -1651,6 +1825,23 @@ fn write_cmd_details(cmd: &WriteCmd) -> (&'static str, serde_json::Value) {
             "reopen_complete_to_merge_pending",
             json!({
                 "task_id": task_id,
+                "now": now,
+            }),
+        ),
+        WriteCmd::UpdateTaskMetadata {
+            task_id,
+            patch,
+            now,
+            ..
+        } => (
+            "update_task_metadata",
+            json!({
+                "task_id": task_id,
+                "status": patch.status.map(TaskStatus::as_str),
+                "rationale": patch.rationale,
+                "related_pr": patch.related_pr,
+                "related_branch": patch.related_branch,
+                "clear_lease": patch.clear_lease,
                 "now": now,
             }),
         ),
@@ -1892,6 +2083,43 @@ fn upsert_task(conn: &Connection, task: &NewTask, now: i64) -> StoreResult<()> {
             task.details,
             task.scope_key,
             task.priority.as_str(),
+            now,
+            task.source,
+            task.related_pr,
+            task.related_branch,
+            task.rationale,
+            now,
+        ],
+    )
+    .map_err(db_err)?;
+    Ok(())
+}
+
+fn insert_manual_task(conn: &Connection, task: &ManualTaskInput, now: i64) -> StoreResult<()> {
+    append_run_log(
+        "debug",
+        "backlog_store.insert_manual_task.started",
+        json!({
+            "task_id": task.task_id,
+            "scope_key": task.scope_key,
+            "status": task.status.as_str(),
+        }),
+    );
+    conn.execute(
+        "INSERT INTO backlog_tasks (
+            task_id, kind, title, details, scope_key, priority, status, last_updated, lease_owner,
+            lease_expires_at, source, related_pr, related_branch, rationale, attempt_count, created_at
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10, ?11, ?12, 0, ?13
+        )",
+        params![
+            task.task_id,
+            task.kind.as_str(),
+            task.title,
+            task.details,
+            task.scope_key,
+            task.priority.as_str(),
+            task.status.as_str(),
             now,
             task.source,
             task.related_pr,
@@ -2319,6 +2547,89 @@ fn fetch_task(conn: &Connection, task_id: &str) -> StoreResult<Option<BacklogTas
     )
     .optional()
     .map_err(db_err)
+}
+
+fn update_task_metadata(
+    conn: &Connection,
+    task_id: &str,
+    patch: &TaskUpdatePatch,
+    now: i64,
+) -> StoreResult<TaskMutation> {
+    let before = fetch_task(conn, task_id)?
+        .ok_or_else(|| GardenerError::Database(format!("backlog task not found: {task_id}")))?;
+
+    if patch.status.is_none()
+        && patch.rationale.is_none()
+        && patch.related_pr.is_none()
+        && patch.related_branch.is_none()
+        && !patch.clear_lease
+    {
+        return Err(GardenerError::Cli(
+            "update requires at least one change".to_string(),
+        ));
+    }
+
+    let clear_lease = patch.clear_lease
+        || matches!(
+            patch.status,
+            Some(status) if !matches!(status, TaskStatus::Leased | TaskStatus::InProgress)
+        );
+
+    let changed = patch
+        .status
+        .map(|status| status != before.status)
+        .unwrap_or(false)
+        || patch
+            .rationale
+            .as_ref()
+            .map(|rationale| rationale != &before.rationale)
+            .unwrap_or(false)
+        || patch
+            .related_pr
+            .map(|related_pr| Some(related_pr) != before.related_pr)
+            .unwrap_or(false)
+        || patch
+            .related_branch
+            .as_ref()
+            .map(|branch| Some(branch.as_str()) != before.related_branch.as_deref())
+            .unwrap_or(false)
+        || (clear_lease && (before.lease_owner.is_some() || before.lease_expires_at.is_some()));
+
+    if changed {
+        conn.execute(
+            "UPDATE backlog_tasks
+             SET status = COALESCE(?1, status),
+                 rationale = COALESCE(?2, rationale),
+                related_pr = CASE WHEN ?3 THEN ?4 ELSE related_pr END,
+                related_branch = CASE WHEN ?5 THEN ?6 ELSE related_branch END,
+                lease_owner = CASE WHEN ?7 THEN NULL ELSE lease_owner END,
+                lease_expires_at = CASE WHEN ?7 THEN NULL ELSE lease_expires_at END,
+                last_updated = ?8
+             WHERE task_id = ?9",
+            params![
+                patch.status.map(TaskStatus::as_str),
+                patch.rationale.as_deref(),
+                patch.related_pr.is_some(),
+                patch.related_pr,
+                patch.related_branch.is_some(),
+                patch.related_branch.as_deref(),
+                clear_lease,
+                now,
+                task_id,
+            ],
+        )
+        .map_err(db_err)?;
+    }
+
+    let after = fetch_task(conn, task_id)?.ok_or_else(|| {
+        GardenerError::Database(format!("backlog task not found after update: {task_id}"))
+    })?;
+
+    Ok(TaskMutation {
+        before,
+        after,
+        changed,
+    })
 }
 
 fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<BacklogTask> {

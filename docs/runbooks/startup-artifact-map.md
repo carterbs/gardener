@@ -16,7 +16,7 @@ Use this runbook when startup indicates:
 
 The backlog lives at different paths depending on context:
 
-- **Manual / CLI**: `~/.gardener/backlog.sqlite` — used by `scripts/backlog-db.sh` and manual operations. Override with `GARDENER_DB_PATH`.
+- **Manual / CLI**: `~/.gardener/backlog.sqlite` — used by `cargo run -p gardener --bin backlog-db -- ...` and manual operations. Override with `GARDENER_DB_PATH`.
 - **Runtime artifact**: `.cache/gardener/backlog.sqlite` — written by startup seeding and worker handoff. Override with `GARDENER_RUNTIME_DB_PATH` (legacy fallback: `GARDENER_DB_PATH`).
 
 | Artifact | Location | Why it exists | Typical steering questions |

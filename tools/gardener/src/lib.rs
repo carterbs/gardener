@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod agent_turn;
+pub mod backlog_cli;
 pub mod backlog_snapshot;
 pub mod backlog_store;
 pub mod config;

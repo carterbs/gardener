@@ -47,6 +47,10 @@ name = "otel-logs"
 path = "src/bin/otel_logs.rs"
 
 [[bin]]
+name = "backlog-db"
+path = "src/bin/backlog_db.rs"
+
+[[bin]]
 name = "seed-backlog"
 path = "src/bin/seed_backlog.rs"
 [dependencies]

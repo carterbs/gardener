@@ -6,7 +6,7 @@ This runbook documents manual backlog actions for agents.
 
 The backlog lives at different paths depending on context:
 
-- **Manual / CLI**: `~/.gardener/backlog.sqlite` — used by `scripts/backlog-db.sh` and manual operations. Override with `GARDENER_DB_PATH` or `--db`.
+- **Manual / CLI**: `~/.gardener/backlog.sqlite` — used by `cargo run -p gardener --bin backlog-db -- ...` and manual operations. Override with `GARDENER_DB_PATH` or `--db`.
 - **Runtime artifact**: `.cache/gardener/backlog.sqlite` — written by the gardener runtime during startup. Override with `GARDENER_RUNTIME_DB_PATH` (legacy fallback: `GARDENER_DB_PATH`).
 
 ## Prerequisites
@@ -16,25 +16,40 @@ The backlog lives at different paths depending on context:
   `~/.gardener/backlog.sqlite` by default.
 - Confirm `GARDENER_DB_PATH` if you need to target a different database.
 
-## Core entrypoint: `scripts/backlog-db.sh`
+## Core entrypoint: `backlog-db`
 
-The backlog helper script supports two supported operations:
+Canonical interface:
+
+```bash
+cargo run -q -p gardener --bin backlog-db -- <command> ...
+```
+
+Compatibility shim:
+
+```bash
+./scripts/backlog-db.sh <command> ...
+```
+
+The Rust CLI supports these manual operations:
 
 - `list`: show latest active rows with `task_id`, `title`, `priority`, `status`, `source`, `scope_key`.
 - `add`: create a manual task.
+- `show`: inspect a single row before editing.
+- `update`: safely edit status and metadata.
+- `retire`: close out stale/manual rows with a final status.
 - `runbook`: print this operations guide in full.
 
 ## List backlog entries
 
 - List most recent tasks:
-  - `./scripts/backlog-db.sh list`
+  - `cargo run -q -p gardener --bin backlog-db -- list`
 - List a different database:
-  - `./scripts/backlog-db.sh list --db /path/to/backlog.sqlite`
+  - `cargo run -q -p gardener --bin backlog-db -- list --db /path/to/backlog.sqlite`
 
 Example:
 
 ```bash
-GARDENER_DB_PATH=~/.gardener/backlog.sqlite ./scripts/backlog-db.sh list
+GARDENER_DB_PATH=~/.gardener/backlog.sqlite cargo run -q -p gardener --bin backlog-db -- list
 ```
 
 ## Create tasks
@@ -42,7 +57,7 @@ GARDENER_DB_PATH=~/.gardener/backlog.sqlite ./scripts/backlog-db.sh list
 Use `add` for immediate manual task creation.
 
 ```bash
-./scripts/backlog-db.sh add \
+cargo run -q -p gardener --bin backlog-db -- add \
   --title "GARD-xx: task title" \
   --details "Detailed action in this repo" \
   --priority P1 \
@@ -65,6 +80,42 @@ Optional fields:
 - `--source` (default `manual`)
 - `--id` (default `manual:<scope>:auto-<unix_ms>`)
 - `--db` (defaults to `~/.gardener/backlog.sqlite`)
+- `--json` (machine-readable created row)
+
+## Inspect and edit tasks
+
+Show one exact task:
+
+```bash
+cargo run -q -p gardener --bin backlog-db -- show --id manual:runtime:auto-123
+```
+
+Update one task safely:
+
+```bash
+cargo run -q -p gardener --bin backlog-db -- update \
+  --id manual:runtime:auto-123 \
+  --status complete \
+  --rationale "manual recovery after merge" \
+  --clear-lease
+```
+
+Retire a stale or duplicate task:
+
+```bash
+cargo run -q -p gardener --bin backlog-db -- retire \
+  --id manual:runtime:auto-123 \
+  --status failed \
+  --rationale "duplicate of manual:runtime:auto-99" \
+  --clear-lease
+```
+
+Notes:
+
+- `update` refuses empty edits.
+- `update` and `retire` print before/after state, or JSON with `--json`.
+- `retire` only accepts final statuses `complete` or `failed`.
+- `./scripts/backlog-db.sh` remains available as a compatibility shim for the same commands.
 
 ## State glossary
 

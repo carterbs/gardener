@@ -28,8 +28,8 @@ pub const SEEDING_ACTION_CONTRACT_DRY_RUN: &str = r#"Output contract
 pub const SEEDING_ACTION_CONTRACT_WRITE: &str = r#"Action contract
 - Use the backlog-db skill to insert each task directly into the backlog.
 - For each task run:
-  ./scripts/backlog-db.sh add --title "..." --details "..." --priority P0|P1|P2 --scope <domain> --kind maintenance
-- Do NOT emit JSON. Do NOT print a task list. Insert using the script only.
+  cargo run -q -p gardener --bin backlog-db -- add --title "..." --details "..." --priority P0|P1|P2 --scope <domain> --kind maintenance
+- Do NOT emit JSON. Do NOT print a task list. Insert using the CLI only.
 - priority must be one of P0, P1, P2.
 - details must be concrete and actionable in this repository.
 - details must include at least one concrete evidence anchor (file path, docs section, quality-grade row, or existing backlog reference)."#;

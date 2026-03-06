@@ -46,7 +46,7 @@ cargo run -p gardener --bin gardener -- --quit-after 1 --config gardener.toml
 
 - `docs/quality-grades.md` reflects startup quality state.
 - `.gardener/otel-logs.jsonl` contains startup and first-task lifecycle events.
-- `~/.gardener/backlog.sqlite` has seeded tasks from startup (`scripts/backlog-db.sh list` to confirm).
+- `~/.gardener/backlog.sqlite` has seeded tasks from startup (`cargo run -p gardener --bin backlog-db -- list` to confirm).
 - `docs/runbooks/backlog-operations.md` for manual interventions when required.
 
 6. Optional startup reconciliation pass (no long-running workers).

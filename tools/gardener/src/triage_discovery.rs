@@ -105,8 +105,6 @@ pub fn run_discovery(
                 "--json".to_string(),
                 "--model".to_string(),
                 model.to_string(),
-                "--max-turns".to_string(),
-                max_turns.to_string(),
                 prompt,
             ],
         ),
@@ -282,8 +280,6 @@ mod tests {
                 "--json".to_string(),
                 "--model".to_string(),
                 "gpt-4o".to_string(),
-                "--max-turns".to_string(),
-                "3".to_string(),
                 expected_prompt
             ]
         );

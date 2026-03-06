@@ -1,4 +1,6 @@
+use expectrl::{Eof, Expect};
 use std::process::Command;
+use std::time::Duration;
 
 #[test]
 fn live_tui_wrappers_run_under_a_pseudo_terminal() {
@@ -24,13 +26,25 @@ fn live_tui_wrappers_run_under_a_pseudo_terminal() {
 #[test]
 fn live_tui_wizards_run_under_a_pseudo_terminal() {
     let bin = env!("CARGO_BIN_EXE_tui_live_smoke");
-    let seed_review = Command::new("sh")
+    let mut wizard_cmd = Command::new(bin);
+    wizard_cmd
+        .arg("wizard")
         .env("TERM", "xterm")
-        .args([
-            "-c",
-            &format!("printf 'kq' | script -qec '{bin} seed-review' /dev/null"),
-        ])
-        .status()
-        .expect("spawn seed-review script");
-    assert!(seed_review.success(), "seed-review mode failed");
+        .env("GARDENER_FORCE_TTY", "1");
+    let mut wizard = expectrl::Session::spawn(wizard_cmd).expect("spawn wizard pty");
+    wizard.set_expect_timeout(Some(Duration::from_secs(10)));
+    wizard.send("\u{1b}").expect("send wizard escape");
+    wizard.expect(Eof).expect("wizard exited");
+
+    let mut seed_review_cmd = Command::new(bin);
+    seed_review_cmd
+        .arg("seed-review")
+        .env("TERM", "xterm")
+        .env("GARDENER_FORCE_TTY", "1");
+    let mut seed_review =
+        expectrl::Session::spawn(seed_review_cmd).expect("spawn seed-review pty");
+    seed_review.set_expect_timeout(Some(Duration::from_secs(10)));
+    seed_review.send("k").expect("send keep");
+    seed_review.send("q").expect("send quit");
+    seed_review.expect(Eof).expect("seed-review exited");
 }

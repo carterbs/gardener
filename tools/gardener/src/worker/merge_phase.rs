@@ -703,7 +703,7 @@ pub(crate) fn execute_merge_phase(
         {
             Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed {
                 findings,
-                smooth_run,
+                smooth_run: _,
             }) if !findings.is_empty() => {
                 let db_path = crate::startup::backlog_db_path(cfg, scope);
                 if let Ok(store) = crate::backlog_store::BacklogStore::open(db_path) {

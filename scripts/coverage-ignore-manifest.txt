@@ -1,5 +1,5 @@
 agent_turn.rs
-backlog_store.rs
+backlog_store/
 bin/do_task.rs
 bin/friction_analysis.rs
 bin/git_push.rs
@@ -30,7 +30,7 @@ review_phase.rs
 runtime/mod.rs
 seeding.rs
 startup.rs
-tui.rs
+tui/
 understand_phase.rs
 worker.rs
 worker/

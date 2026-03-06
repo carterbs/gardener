@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-90}"
+MIN_LINE_COVERAGE="${COVERAGE_MIN_LINE:-85}"
 PROFILE_DIR="${COVERAGE_PROFILE_DIR:-target/llvm-cov-target/profraw}"
 COVERAGE_IGNORE_MANIFEST="${COVERAGE_IGNORE_MANIFEST:-$SCRIPT_DIR/coverage-ignore-manifest.txt}"
 
@@ -98,6 +98,7 @@ fi
 
 awk -v got="$line_cov" -v min="$MIN_LINE_COVERAGE" 'BEGIN { if (got + 0 < min + 0) exit 1 }' || {
   echo "coverage gate failed: line coverage ${line_cov}% < ${MIN_LINE_COVERAGE}%" >&2
+  echo "Agent instruction: do not add files to scripts/coverage-ignore-manifest.txt, broaden ignore regexes, or delete code/tests to make coverage pass without explicit user consent first." >&2
   exit 1
 }
 

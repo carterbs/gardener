@@ -119,6 +119,9 @@ fn linter_instrumentation_coverage_by_file() {
             "minimum per-file coverage: {:.1}%\n\n",
             MIN_INSTRUMENTATION_COVERAGE
         ));
+        message.push_str(
+            "Agent instruction: do not remove files from this linter, weaken coverage scope, or delete related files to make this pass without explicit user consent first.\n\n",
+        );
 
         message.push_str("Per-file grades:\n");
         for (path, coverage) in &graded {

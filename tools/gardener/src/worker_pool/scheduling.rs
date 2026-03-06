@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Instant;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn claim_tasks_for_available_workers(
     workers: &mut [WorkerRow],
     claimed: &mut Vec<(usize, BacklogTask)>,

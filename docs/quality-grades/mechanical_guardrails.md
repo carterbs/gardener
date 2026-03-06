@@ -11,7 +11,7 @@ Guardrails are strong: CI runs `./scripts/run-validate.sh`, pre-commit runs the 
 ### Key Findings
 - CI has two active workflows (`.github/workflows/ci.yml`, `.github/workflows/gardener-coverage.yml`) that fail builds on validation/coverage regressions.
 - Pre-commit is wired (`.githooks/pre-commit`) and runs repository-wide validation, not just formatting.
-- Coverage is quantitatively enforced (`scripts/test-gardener-coverage.sh`) with a default 90% line threshold.
+- Coverage is quantitatively enforced (`scripts/test-gardener-coverage.sh`) with a default 85% line threshold.
 
 ### Deficiencies
 

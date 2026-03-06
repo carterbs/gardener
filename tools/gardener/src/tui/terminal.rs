@@ -11,8 +11,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, Paragraph};
 use ratatui::Terminal;
+use serde_json::json;
 
 use crate::errors::GardenerError;
+use crate::logging::append_run_log;
 
 use super::dashboard::draw_dashboard_frame;
 use super::formatting::style_activity_line;
@@ -28,12 +30,26 @@ thread_local! {
     static WORKERS_VIEWPORT_SELECTED: RefCell<usize> = const { RefCell::new(0) };
     static WORKERS_VIEWPORT_CAPACITY: RefCell<usize> = const { RefCell::new(1) };
     static WORKERS_TOTAL_COUNT: RefCell<usize> = const { RefCell::new(0) };
+    #[cfg(test)]
+    static TEST_LIVE_TUI_BYPASS: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(test)]
+fn with_live_tui_bypass<T>(f: impl FnOnce() -> T) -> T {
+    TEST_LIVE_TUI_BYPASS.with(|cell| {
+        let previous = *cell.borrow();
+        *cell.borrow_mut() = true;
+        let result = f();
+        *cell.borrow_mut() = previous;
+        result
+    })
 }
 
 pub(super) fn with_live_terminal<F>(f: F) -> Result<(), GardenerError>
 where
     F: FnOnce(&mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), GardenerError>,
 {
+    append_run_log("debug", "tui.live_terminal.ensure", json!({}));
     LIVE_TUI.with(|cell| -> Result<(), GardenerError> {
         let mut slot = cell.borrow_mut();
         if slot.is_none() {
@@ -70,6 +86,24 @@ where
     })
 }
 
+fn draw_live_frame<F>(draw: F) -> Result<(), GardenerError>
+where
+    F: FnOnce(&mut ratatui::Frame<'_>),
+{
+    append_run_log("debug", "tui.live_terminal.draw_frame", json!({}));
+    #[cfg(test)]
+    if TEST_LIVE_TUI_BYPASS.with(|cell| *cell.borrow()) {
+        let _ = super::render_to_string(80, 18, draw);
+        return Ok(());
+    }
+    with_live_terminal(|terminal| {
+        terminal
+            .draw(draw)
+            .map(|_| ())
+            .map_err(|e| GardenerError::Io(e.to_string()))
+    })
+}
+
 pub fn draw_dashboard_live(
     workers: &[WorkerRow],
     stats: &QueueStats,
@@ -78,62 +112,66 @@ pub fn draw_dashboard_live(
     lease_timeout_seconds: u64,
 ) -> Result<(), GardenerError> {
     let startup_headline = live_startup_headline();
-    with_live_terminal(|terminal| {
-        terminal
-            .draw(|frame| {
-                draw_dashboard_frame(
-                    frame,
-                    workers,
-                    stats,
-                    backlog,
-                    heartbeat_interval_seconds,
-                    lease_timeout_seconds,
-                    startup_headline,
-                )
-            })
-            .map(|_| ())
-            .map_err(|e| GardenerError::Io(e.to_string()))
+    append_run_log("debug", "tui.dashboard.draw_live", json!({ "workers": workers.len() }));
+    draw_live_frame(|frame| {
+        draw_dashboard_frame(
+            frame,
+            workers,
+            stats,
+            backlog,
+            heartbeat_interval_seconds,
+            lease_timeout_seconds,
+            startup_headline,
+        )
     })
 }
 
 pub fn draw_report_live(path: &str, report: &str) -> Result<(), GardenerError> {
-    with_live_terminal(|terminal| {
-        terminal
-            .draw(|frame| draw_report_frame(frame, path, report))
-            .map(|_| ())
-            .map_err(|e| GardenerError::Io(e.to_string()))
-    })
+    append_run_log(
+        "debug",
+        "tui.report.draw_live",
+        json!({ "path": path, "chars": report.chars().count() }),
+    );
+    draw_live_frame(|frame| draw_report_frame(frame, path, report))
 }
 
 pub fn draw_seeding_live(activity: &[String]) -> Result<(), GardenerError> {
-    with_live_terminal(|terminal| {
-        terminal
-            .draw(|frame| draw_seeding_frame(frame, activity))
-            .map(|_| ())
-            .map_err(|e| GardenerError::Io(e.to_string()))
-    })
+    append_run_log(
+        "debug",
+        "tui.seeding.draw_live",
+        json!({ "activity_lines": activity.len() }),
+    );
+    draw_live_frame(|frame| draw_seeding_frame(frame, activity))
 }
 
 pub fn draw_triage_live(activity: &[String], artifacts: &[String]) -> Result<(), GardenerError> {
-    with_live_terminal(|terminal| {
-        terminal
-            .draw(|frame| draw_triage_frame(frame, activity, artifacts))
-            .map(|_| ())
-            .map_err(|e| GardenerError::Io(e.to_string()))
-    })
+    append_run_log(
+        "debug",
+        "tui.triage.draw_live",
+        json!({
+            "activity_lines": activity.len(),
+            "artifacts": artifacts.len()
+        }),
+    );
+    draw_live_frame(|frame| draw_triage_frame(frame, activity, artifacts))
 }
 
 pub fn draw_shutdown_screen_live(title: &str, message: &str) -> Result<(), GardenerError> {
-    with_live_terminal(|terminal| {
-        terminal
-            .draw(|frame| draw_shutdown_frame(frame, title, message))
-            .map(|_| ())
-            .map_err(|e| GardenerError::Io(e.to_string()))
-    })
+    append_run_log(
+        "debug",
+        "tui.shutdown.draw_live",
+        json!({ "title": title, "chars": message.chars().count() }),
+    );
+    draw_live_frame(|frame| draw_shutdown_frame(frame, title, message))
 }
 
 pub fn render_seeding(activity: &[String], width: u16, height: u16) -> String {
     super::render_to_string(width, height, |frame| draw_seeding_frame(frame, activity))
+}
+
+#[cfg(test)]
+pub(crate) fn render_shutdown_screen(title: &str, message: &str, width: u16, height: u16) -> String {
+    super::render_to_string(width, height, |frame| draw_shutdown_frame(frame, title, message))
 }
 
 fn draw_seeding_frame(frame: &mut ratatui::Frame<'_>, activity: &[String]) {
@@ -283,6 +321,7 @@ fn draw_shutdown_frame(frame: &mut ratatui::Frame<'_>, title: &str, message: &st
 }
 
 pub fn close_live_terminal() -> Result<(), GardenerError> {
+    append_run_log("debug", "tui.live_terminal.close", json!({}));
     LIVE_TUI.with(|cell| -> Result<(), GardenerError> {
         let mut slot = cell.borrow_mut();
         if let Some(mut terminal) = slot.take() {
@@ -418,4 +457,141 @@ pub(super) fn worker_offset_for_selection(
         }
         *offset
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render_shutdown(title: &str, message: &str) -> String {
+        super::super::render_to_string(90, 18, |frame| draw_shutdown_frame(frame, title, message))
+    }
+
+    fn render_seeding_screen(activity: &[String]) -> String {
+        super::super::render_to_string(90, 18, |frame| draw_seeding_frame(frame, activity))
+    }
+
+    #[test]
+    fn seeding_frame_renders_empty_and_populated_activity_states() {
+        let empty = render_seeding_screen(&[]);
+        assert!(empty.contains("seeding your backlog"));
+        assert!(empty.contains("waiting for seeding updates"));
+        assert!(empty.contains("Seeding in progress"));
+
+        let populated = render_seeding_screen(&[
+            "scanning repo".to_string(),
+            "indexing docs".to_string(),
+        ]);
+        assert!(populated.contains("scanning repo"));
+        assert!(populated.contains("indexing docs"));
+        assert!(!populated.contains("waiting for seeding updates"));
+    }
+
+    #[test]
+    fn shutdown_frame_renders_success_and_error_copy_variants() {
+        let success = render_shutdown(
+            "Complete",
+            "Tasks completed: 4\nTasks merged: 3\nTotal runtime: 2m\n",
+        );
+        assert!(success.contains("Complete"));
+        assert!(success.contains("Tasks completed: 4"));
+        assert!(success.contains("Tasks merged: 3"));
+        assert!(success.contains("Total runtime: 2m"));
+        assert!(success.contains("Press any key to exit"));
+
+        let error = render_shutdown("Failed", "Tasks failed: 1\nboom");
+        assert!(error.contains("Failed"));
+        assert!(error.contains("Tasks failed: 1"));
+        assert!(error.contains("boom"));
+        assert!(error.contains("Press Ctrl+C or c to copy the error message"));
+    }
+
+    #[test]
+    fn shutdown_frame_treats_blank_lines_as_empty_rows() {
+        let frame = render_shutdown("Error", "Tasks failed: 1\n\nsecond line");
+        assert!(frame.contains("Tasks failed: 1"));
+        assert!(frame.contains("second line"));
+    }
+
+    #[test]
+    fn close_live_terminal_resets_live_size_without_touching_worker_scroll_state() {
+        set_worker_viewport(4, 9);
+        assert!(scroll_workers_down());
+        assert!(scroll_workers_down());
+        LIVE_TUI_SIZE.with(|cell| {
+            *cell.borrow_mut() = Some((120, 40));
+        });
+
+        close_live_terminal().expect("close should succeed when no terminal is initialized");
+
+        LIVE_TUI_SIZE.with(|cell| {
+            assert_eq!(*cell.borrow(), None);
+        });
+        assert_eq!(selected_worker_state(), 2);
+    }
+
+    #[test]
+    fn scroll_workers_down_and_up_respect_capacity_and_bounds() {
+        reset_workers_scroll();
+        set_worker_viewport(3, 6);
+
+        assert!(scroll_workers_down());
+        assert!(scroll_workers_down());
+        assert!(scroll_workers_down());
+        assert_eq!(selected_worker_state(), 3);
+        assert_eq!(worker_offset_for_selection(3, 3, 6), 1);
+
+        assert!(scroll_workers_down());
+        assert_eq!(selected_worker_state(), 4);
+        assert_eq!(worker_offset_for_selection(4, 3, 6), 2);
+
+        assert!(scroll_workers_down());
+        assert_eq!(selected_worker_state(), 5);
+        assert_eq!(worker_offset_for_selection(5, 3, 6), 3);
+        assert!(!scroll_workers_down());
+
+        assert!(scroll_workers_up());
+        assert_eq!(selected_worker_state(), 4);
+        assert_eq!(worker_offset_for_selection(4, 3, 6), 3);
+        assert!(scroll_workers_up());
+        assert_eq!(selected_worker_state(), 3);
+        assert_eq!(worker_offset_for_selection(3, 3, 6), 3);
+    }
+
+    #[test]
+    fn scroll_workers_is_noop_without_workers() {
+        reset_workers_scroll();
+        assert!(!scroll_workers_down());
+        assert!(!scroll_workers_up());
+        assert_eq!(selected_worker_state(), 0);
+    }
+
+    #[test]
+    fn clamped_selection_and_offset_adjust_to_visible_bounds() {
+        reset_workers_scroll();
+        set_worker_viewport(2, 5);
+        assert!(scroll_workers_down());
+        assert!(scroll_workers_down());
+        assert!(scroll_workers_down());
+        assert_eq!(selected_worker_state(), 3);
+        assert_eq!(worker_offset_for_selection(3, 2, 5), 2);
+
+        assert_eq!(clamped_selected_worker(2), 1);
+        assert_eq!(selected_worker_state(), 1);
+        assert_eq!(worker_offset_for_selection(1, 2, 2), 0);
+
+        assert_eq!(clamped_selected_worker(0), 0);
+        assert_eq!(selected_worker_state(), 0);
+    }
+
+    #[test]
+    fn live_draw_wrappers_execute_under_test_bypass() {
+        with_live_tui_bypass(|| {
+            draw_report_live("/tmp/report.md", "grade: A").expect("report draw");
+            draw_seeding_live(&["scan repo".to_string()]).expect("seeding draw");
+            draw_triage_live(&["investigate".to_string()], &["artifact.txt".to_string()])
+                .expect("triage draw");
+            draw_shutdown_screen_live("Complete", "Tasks completed: 1").expect("shutdown draw");
+        });
+    }
 }

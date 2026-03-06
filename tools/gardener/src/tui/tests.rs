@@ -1,9 +1,10 @@
 use super::{
     command_stream_window, format_breadcrumb, format_state_label, render_dashboard,
-    render_dashboard_at_tick, render_triage, reset_workers_scroll, scroll_workers_down,
-    scroll_workers_up, worker_command_stream, worker_flow_chain_spans, AppState, BacklogView,
-    CommandEntry, QueueStats, StageState, StartupHeadlineView, WorkerCard, WorkerMetrics,
-    WorkerRow, WorkerState,
+    render_dashboard_at_tick, render_triage, reset_report_scroll, reset_workers_scroll,
+    scroll_report_down, scroll_report_up, scroll_workers_down, scroll_workers_up,
+    worker_command_stream, worker_flow_chain_spans, AppState, BacklogView, CommandEntry,
+    QueueStats, StageState, StartupHeadlineView, WorkerCard, WorkerMetrics, WorkerRow,
+    WorkerState,
 };
 
 fn worker(heartbeat: u64, missing: bool) -> WorkerRow {
@@ -635,6 +636,46 @@ fn startup_headline_stops_after_30_ticks() {
 }
 
 #[test]
+fn startup_headline_elapsed_time_updates_ellipsis_and_wraps_verbs() {
+    let one = StartupHeadlineView::from_elapsed_ms(0, 99);
+    let two = StartupHeadlineView::from_elapsed_ms(400, 99);
+    let three = StartupHeadlineView::from_elapsed_ms(800, 99);
+    assert_eq!(one.ellipsis(), ".");
+    assert_eq!(two.ellipsis(), "..");
+    assert_eq!(three.ellipsis(), "...");
+    assert_eq!(one.verb(), "Cultivating");
+}
+
+#[test]
+fn report_view_scrolls_when_content_exceeds_viewport() {
+    reset_report_scroll();
+    let report = (1..=12)
+        .map(|idx| format!("line {idx}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let initial = super::render_report_view("report.md", &report, 60, 8);
+    assert!(initial.contains("Quality report view"));
+    assert!(initial.contains("line 1"));
+    assert!(scroll_report_down(1), "should scroll with tall content");
+    let scrolled = super::render_report_view("report.md", &report, 60, 8);
+    assert!(!scrolled.contains("line 1"));
+    assert!(scrolled.contains("line 2"));
+    assert!(scroll_report_up(), "should scroll back up");
+    let reset = super::render_report_view("report.md", &report, 60, 8);
+    assert!(reset.contains("line 1"));
+}
+
+#[test]
+fn report_scroll_is_noop_when_content_fits() {
+    reset_report_scroll();
+    let report = "only one line";
+    let frame = super::render_report_view("small.md", report, 80, 12);
+    assert!(frame.contains("small.md"));
+    assert!(!scroll_report_down(10));
+    assert!(!scroll_report_up());
+}
+
+#[test]
 fn workers_panel_uses_scrollable_viewport() {
     reset_workers_scroll();
     let workers = (1..=9)
@@ -754,6 +795,29 @@ fn seeding_screen_renders_empty_activity() {
 }
 
 #[test]
+fn shutdown_screen_renders_success_and_error_variants() {
+    let success = super::terminal::render_shutdown_screen(
+        "Complete",
+        "Tasks completed: 4\nTasks merged: 3\nTotal runtime: 2m",
+        90,
+        18,
+    );
+    assert!(success.contains("Complete"));
+    assert!(success.contains("Tasks completed: 4"));
+    assert!(success.contains("Press any key to exit"));
+
+    let error = super::terminal::render_shutdown_screen(
+        "Error",
+        "Tasks failed: 1\nboom",
+        90,
+        18,
+    );
+    assert!(error.contains("Error"));
+    assert!(error.contains("Tasks failed: 1"));
+    assert!(error.contains("Press Ctrl+C or c to copy the error message"));
+}
+
+#[test]
 fn quality_intro_screen_renders_header_and_dimensions() {
     let frame = super::render_quality_intro(120, 20);
     assert!(
@@ -780,6 +844,38 @@ fn quality_intro_screen_renders_header_and_dimensions() {
         frame.contains("assessing 9 quality dimensions"),
         "should show footer message"
     );
+}
+
+#[test]
+fn quality_grading_screen_renders_header_and_activity() {
+    let activity = vec![
+        "Scanning source coverage".to_string(),
+        "Comparing docs and prompts".to_string(),
+    ];
+    let frame = super::render_quality_grading(&activity, 100, 20);
+    assert!(
+        frame.contains("grading your repository"),
+        "should show grading header"
+    );
+    assert!(
+        frame.contains("Quality Grading Activity"),
+        "should show activity block title"
+    );
+    assert!(
+        frame.contains("Scanning source coverage"),
+        "should show first activity line"
+    );
+    assert!(
+        frame.contains("Comparing docs and prompts"),
+        "should show second activity line"
+    );
+}
+
+#[test]
+fn quality_grading_screen_renders_empty_activity() {
+    let frame = super::render_quality_grading(&[], 100, 20);
+    assert!(frame.contains("grading your repository"));
+    assert!(frame.contains("waiting for quality grading updates"));
 }
 
 #[test]
@@ -868,6 +964,46 @@ fn seed_review_renders_different_priorities() {
         assert!(frame.contains("(3/10)"), "counter should be 1-indexed");
         assert!(frame.contains(priority), "should show {priority}");
     }
+}
+
+#[test]
+fn seed_review_shows_round_and_discard_prompt() {
+    use crate::seed_runner::SeedTask;
+    let task = SeedTask {
+        title: "Refactor startup flow".to_string(),
+        details: "Tighten startup validation branch handling".to_string(),
+        rationale: "Improves first-turn reliability for agents".to_string(),
+        domain: "runtime".to_string(),
+        priority: "P1".to_string(),
+    };
+    let frame =
+        super::seed_review::render_seed_review_discard_prompt(&task, 1, 4, 1, "duplicate", 100, 22);
+    assert!(frame.contains("round 2"));
+    assert!(frame.contains("Why discard?"));
+    assert!(frame.contains("> duplicate"));
+}
+
+#[test]
+fn seed_review_shows_refine_prompt() {
+    use crate::seed_runner::SeedTask;
+    let task = SeedTask {
+        title: "Improve docs".to_string(),
+        details: "Clarify validation workflow".to_string(),
+        rationale: "Reduces agent confusion".to_string(),
+        domain: "docs".to_string(),
+        priority: "P2".to_string(),
+    };
+    let frame = super::seed_review::render_seed_review_refine_prompt(
+        &task,
+        0,
+        1,
+        0,
+        "focus on hooks",
+        100,
+        22,
+    );
+    assert!(frame.contains("How should this task change?"));
+    assert!(frame.contains("> focus on hooks"));
 }
 
 use super::{WizardAction, WizardState};
@@ -966,6 +1102,54 @@ fn wizard_esc_finishes_at_any_step() {
 }
 
 #[test]
+fn wizard_parallelism_input_handles_digits_backspace_and_ctrl_guard() {
+    let mut ws = wizard_at_step(0);
+    ws.parallelism_input.clear();
+    ws.handle_key(KeyCode::Char('1'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Char('x'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Char('9'), KeyModifiers::CONTROL);
+    assert_eq!(ws.parallelism_input, "12");
+    ws.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+    assert_eq!(ws.parallelism_input, "1");
+}
+
+#[test]
+fn wizard_validation_input_handles_editing() {
+    let mut ws = wizard_at_step(1);
+    ws.validation.clear();
+    ws.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Char('a'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Char('r'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+    assert_eq!(ws.validation, "ca");
+    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(ws.step, 2);
+}
+
+#[test]
+fn wizard_docs_step_toggles_yes_no_and_advances() {
+    let mut ws = wizard_at_step(2);
+    ws.handle_key(KeyCode::Char('n'), KeyModifiers::NONE);
+    assert!(!ws.docs_accessible);
+    ws.handle_key(KeyCode::Char('Y'), KeyModifiers::NONE);
+    assert!(ws.docs_accessible);
+    ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(ws.step, 3);
+}
+
+#[test]
+fn wizard_notes_step_edits_and_finishes() {
+    let mut ws = wizard_at_step(4);
+    ws.handle_key(KeyCode::Char('h'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Char('i'), KeyModifiers::NONE);
+    ws.handle_key(KeyCode::Backspace, KeyModifiers::NONE);
+    assert_eq!(ws.notes, "h");
+    let action = ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(action, WizardAction::Finish);
+}
+
+#[test]
 fn wizard_step_progression_through_all_steps() {
     let mut ws = wizard_at_step(0);
     ws.handle_key(KeyCode::Enter, KeyModifiers::NONE);
@@ -989,4 +1173,56 @@ fn wizard_unrelated_keys_on_backlog_step_ignored() {
         "unrelated key should not change selection"
     );
     assert_eq!(ws.step, 3, "unrelated key should not change step");
+}
+
+#[test]
+fn wizard_rendering_covers_all_steps() {
+    let mut step0 = wizard_at_step(0);
+    step0.parallelism_input = "7".to_string();
+    let frame0 = super::wizard::render_wizard_state(&step0, 100, 20);
+    assert!(frame0.contains("Worker parallelism"));
+    assert!(frame0.contains("> 7"));
+
+    let mut step1 = wizard_at_step(1);
+    step1.validation = "cargo test --workspace".to_string();
+    let frame1 = super::wizard::render_wizard_state(&step1, 100, 20);
+    assert!(frame1.contains("Validation command"));
+    assert!(frame1.contains("cargo test --workspace"));
+
+    let mut step2 = wizard_at_step(2);
+    step2.docs_accessible = false;
+    let frame2 = super::wizard::render_wizard_state(&step2, 100, 20);
+    assert!(frame2.contains("Architecture docs available?"));
+    assert!(frame2.contains("> no"));
+
+    let mut step3 = wizard_at_step(3);
+    step3.backlog_approval = false;
+    let frame3 = super::wizard::render_wizard_state(&step3, 100, 20);
+    assert!(frame3.contains("Backlog seeding"));
+    assert!(frame3.contains("auto-seed"));
+    assert!(frame3.contains("review tasks"));
+
+    let mut step4 = wizard_at_step(4);
+    step4.notes = "prefer small patches".to_string();
+    let frame4 = super::wizard::render_wizard_state(&step4, 100, 20);
+    assert!(frame4.contains("Additional constraints"));
+    assert!(frame4.contains("prefer small patches"));
+    assert!(frame4.contains("Enter to finish"));
+}
+
+#[test]
+fn worker_viewport_helpers_clamp_and_offset_selection() {
+    reset_workers_scroll();
+    assert_eq!(super::terminal::selected_worker_state(), 0);
+    super::terminal::set_worker_viewport(3, 8);
+    assert_eq!(super::terminal::clamped_selected_worker(8), 0);
+    assert_eq!(super::terminal::worker_offset_for_selection(0, 3, 8), 0);
+    assert!(scroll_workers_down());
+    assert!(scroll_workers_down());
+    assert!(scroll_workers_down());
+    assert_eq!(super::terminal::selected_worker_state(), 3);
+    assert_eq!(super::terminal::worker_offset_for_selection(3, 3, 8), 1);
+    assert_eq!(super::terminal::clamped_selected_worker(2), 1);
+    reset_workers_scroll();
+    assert_eq!(super::terminal::selected_worker_state(), 0);
 }

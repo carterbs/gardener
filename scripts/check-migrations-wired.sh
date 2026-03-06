@@ -7,12 +7,19 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 fi
 
 migrations_dir="${GARDENER_MIGRATIONS_DIR:-tools/gardener/migrations}"
-store_file="${GARDENER_MIGRATIONS_STORE_FILE:-tools/gardener/src/backlog_store.rs}"
+store_file="${GARDENER_MIGRATIONS_STORE_FILE:-}"
+if [ -z "$store_file" ]; then
+  if [ -f "tools/gardener/src/backlog_store/migrations.rs" ]; then
+    store_file="tools/gardener/src/backlog_store/migrations.rs"
+  else
+    store_file="tools/gardener/src/backlog_store.rs"
+  fi
+fi
 exit_code=0
 
 for sql_file in "$migrations_dir"/*.sql; do
   basename=$(basename "$sql_file")
-  if ! grep -q "include_str!(\"../migrations/$basename\")" "$store_file"; then
+  if ! grep -Eq "include_str!\(\"(\.\./)+migrations/$basename\"\)" "$store_file"; then
     echo "error: migration $basename exists but is not referenced in run_migrations ($store_file)" >&2
     exit_code=1
   fi

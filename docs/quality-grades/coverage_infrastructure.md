@@ -1,7 +1,7 @@
 ## Coverage Infrastructure Assessment
 
 ### Repo-Wide Score: 74
-Coverage is actively enforced with `cargo llvm-cov` in CI and local validation (`.github/workflows/ci.yml`, `.github/workflows/gardener-coverage.yml`, `scripts/test-gardener-coverage.sh`) with a numeric line gate (`COVERAGE_MIN_LINE`, default 90). It is not top-tier because reporting is summary-only (no artifact publishing, PR annotations, or badge integration) and coverage scope is reduced by explicit path exclusions (`scripts/coverage-ignore-manifest.txt`).
+Coverage is actively enforced with `cargo llvm-cov` in CI and local validation (`.github/workflows/ci.yml`, `.github/workflows/gardener-coverage.yml`, `scripts/test-gardener-coverage.sh`) with a numeric line gate (`COVERAGE_MIN_LINE`, default 85). It is not top-tier because reporting is summary-only (no artifact publishing, PR annotations, or badge integration) and coverage scope is reduced by explicit path exclusions (`scripts/coverage-ignore-manifest.txt`).
 
 ### Per-Domain Scores
 - runtime-orchestration: 81 - `tools/gardener/src/` is covered by a real, failing CI gate via `cargo llvm-cov`, but confidence is reduced by ignore-manifest exclusions and lack of per-change visibility.

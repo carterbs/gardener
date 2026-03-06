@@ -7,6 +7,7 @@ use crate::tui::WorkerRow;
 use crate::worker::WorkerRunSummary;
 use serde_json::json;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_doing_complete_transition(
     store: &BacklogStore,
     workers: &mut [WorkerRow],
@@ -68,6 +69,7 @@ pub(super) fn handle_doing_complete_transition(
     Ok(DoingSummaryHandling::ContinueLoop)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_doing_non_complete_transition(
     store: &BacklogStore,
     workers: &mut [WorkerRow],
@@ -133,6 +135,7 @@ pub(super) fn handle_doing_non_complete_transition(
     Ok(DoingSummaryHandling::ContinueLoop)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_merge_summary(
     store: &BacklogStore,
     workers: &mut [WorkerRow],

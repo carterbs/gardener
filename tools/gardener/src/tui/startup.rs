@@ -105,3 +105,57 @@ impl StartupHeadline {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_tick_clamps_after_startup_window_and_wraps_verb_index() {
+        let view = StartupHeadlineView::from_tick(999, STARTUP_VERBS.len() + 2);
+        let expected_frame = (STARTUP_SPINNER_TICKS.saturating_sub(1) as usize)
+            % STARTUP_SPINNER_FRAMES.len();
+        assert_eq!(view.spinner_frame, expected_frame);
+        assert!(!view.startup_active);
+        assert_eq!(view.ellipsis_phase, ((999 / 3) % 3) as u8);
+        assert_eq!(view.verb(), STARTUP_VERBS[2]);
+    }
+
+    #[test]
+    fn from_elapsed_ms_advances_spinner_and_ellipsis_independently() {
+        let view = StartupHeadlineView::from_elapsed_ms(
+            STARTUP_SPINNER_TICK_MS * 4 + STARTUP_ELLIPSIS_TICK_MS,
+            1,
+        );
+        let expected_frame =
+            ((STARTUP_SPINNER_TICK_MS * 4 + STARTUP_ELLIPSIS_TICK_MS) / STARTUP_SPINNER_TICK_MS)
+                as usize
+                % STARTUP_SPINNER_FRAMES.len();
+        assert_eq!(view.spinner(), STARTUP_SPINNER_FRAMES[expected_frame]);
+        assert_eq!(view.ellipsis(), "...");
+        assert_eq!(view.verb(), "Seeding");
+        assert!(view.startup_active);
+    }
+
+    #[test]
+    fn from_view_copies_render_fields() {
+        let view = StartupHeadlineView::from_tick(5, 3);
+        let headline = StartupHeadline::from_view(view);
+        assert_eq!(headline.spinner_frame, view.spinner_frame);
+        assert_eq!(headline.ellipsis_phase, view.ellipsis_phase);
+        assert_eq!(headline.startup_active, view.startup_active);
+        assert_eq!(headline.verb, "Cultivating");
+    }
+
+    #[test]
+    fn live_startup_headline_initializes_and_resets() {
+        reset_live_startup_headline();
+        let first = live_startup_headline();
+        let second = live_startup_headline();
+        assert_eq!(first.verb(), second.verb());
+        assert!(first.startup_active);
+        reset_live_startup_headline();
+        let after_reset = live_startup_headline();
+        assert!(STARTUP_VERBS.contains(&after_reset.verb()));
+    }
+}

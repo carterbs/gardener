@@ -1,4 +1,4 @@
-//! Linter: ensures QUALITY_DIMENSIONS in tui.rs stays in sync with the
+//! Linter: ensures QUALITY_DIMENSIONS in the TUI module stays in sync with the
 //! dimension keys actually used in quality_assessment_runner.rs.
 
 use std::collections::{HashMap, HashSet};
@@ -74,7 +74,7 @@ fn extract_runner_dimensions() -> HashSet<String> {
     dims
 }
 
-/// Extract dimension keys and descriptions from QUALITY_DIMENSIONS in tui.rs.
+/// Extract dimension keys and descriptions from QUALITY_DIMENSIONS in the TUI module.
 ///
 /// The source format is:
 /// ```ignore
@@ -87,7 +87,7 @@ fn extract_runner_dimensions() -> HashSet<String> {
 /// ];
 /// ```
 fn extract_tui_dimensions() -> HashMap<String, String> {
-    let path = repo_root().join("tools/gardener/src/tui.rs");
+    let path = resolve_tui_dimensions_path();
     let src = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
 
@@ -141,6 +141,14 @@ fn extract_tui_dimensions() -> HashMap<String, String> {
     dims
 }
 
+fn resolve_tui_dimensions_path() -> PathBuf {
+    let module_path = repo_root().join("tools/gardener/src/tui/quality.rs");
+    if module_path.exists() {
+        return module_path;
+    }
+    repo_root().join("tools/gardener/src/tui.rs")
+}
+
 #[test]
 fn quality_dimensions_match_runner_and_tui() {
     let runner_dims = extract_runner_dimensions();
@@ -152,7 +160,7 @@ fn quality_dimensions_match_runner_and_tui() {
     );
     assert!(
         !tui_dims.is_empty(),
-        "failed to extract any dimensions from QUALITY_DIMENSIONS in tui.rs"
+        "failed to extract any dimensions from QUALITY_DIMENSIONS in the TUI module"
     );
 
     let mut violations = Vec::new();
@@ -160,7 +168,7 @@ fn quality_dimensions_match_runner_and_tui() {
     for dim in &runner_dims {
         if !tui_dims.contains_key(dim) {
             violations.push(format!(
-                "dimension '{dim}' exists in quality_assessment_runner.rs but missing from QUALITY_DIMENSIONS in tui.rs"
+                "dimension '{dim}' exists in quality_assessment_runner.rs but missing from QUALITY_DIMENSIONS in the TUI module"
             ));
         }
     }
@@ -168,7 +176,7 @@ fn quality_dimensions_match_runner_and_tui() {
     for dim in tui_dims.keys() {
         if !runner_dims.contains(dim) {
             violations.push(format!(
-                "dimension '{dim}' exists in QUALITY_DIMENSIONS in tui.rs but missing from quality_assessment_runner.rs"
+                "dimension '{dim}' exists in QUALITY_DIMENSIONS in the TUI module but missing from quality_assessment_runner.rs"
             ));
         }
     }

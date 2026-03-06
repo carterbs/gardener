@@ -1,4 +1,6 @@
-use crate::agent::{validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter};
+use crate::agent::{
+    validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter,
+};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::protocol::{

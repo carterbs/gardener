@@ -39,13 +39,8 @@ const DEFAULT_EXCLUDED_FILE_PATTERNS: &[&str] = &[
 ];
 
 /// Generated file patterns (suffix match).
-const DEFAULT_GENERATED_PATTERNS: &[&str] = &[
-    ".pb.go",
-    ".generated.",
-    "_generated.",
-    ".gen.",
-    "_gen.",
-];
+const DEFAULT_GENERATED_PATTERNS: &[&str] =
+    &[".pb.go", ".generated.", "_generated.", ".gen.", "_gen."];
 
 /// Source file extensions we care about.
 const SOURCE_EXTENSIONS: &[&str] = &[
@@ -138,10 +133,7 @@ fn walk_directory(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let dir_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
             if is_excluded_dir(dir_name, &path, root, custom_ignores) {
                 if let Ok(rel) = path.strip_prefix(root) {
@@ -171,10 +163,7 @@ fn walk_directory(
             continue;
         }
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !SOURCE_EXTENSIONS.contains(&ext) {
             continue;
         }
@@ -208,7 +197,9 @@ fn walk_directory(
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let entry = directories.entry(dir_key).or_insert_with(|| (Vec::new(), Vec::new()));
+        let entry = directories
+            .entry(dir_key)
+            .or_insert_with(|| (Vec::new(), Vec::new()));
         if is_test {
             entry.1.push(file_entry);
             *total_test += 1;
@@ -221,7 +212,12 @@ fn walk_directory(
     }
 }
 
-fn is_excluded_dir(dir_name: &str, full_path: &Path, root: &Path, custom_ignores: &[String]) -> bool {
+fn is_excluded_dir(
+    dir_name: &str,
+    full_path: &Path,
+    root: &Path,
+    custom_ignores: &[String],
+) -> bool {
     if DEFAULT_EXCLUDED_DIRS.contains(&dir_name) {
         return true;
     }
@@ -239,10 +235,7 @@ fn is_excluded_dir(dir_name: &str, full_path: &Path, root: &Path, custom_ignores
 }
 
 fn is_excluded_file(path: &Path) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let path_str = path.to_string_lossy();
 
     for pattern in DEFAULT_EXCLUDED_FILE_PATTERNS {
@@ -261,10 +254,7 @@ fn is_excluded_file(path: &Path) -> bool {
 }
 
 fn is_test_file(path: &Path, rel_path: &str) -> bool {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let lower = file_name.to_ascii_lowercase();
     let rel_lower = rel_path.to_ascii_lowercase();
 
@@ -420,10 +410,7 @@ pub fn generate_tree_diagram(tree: &TreeWalkerOutput, max_chars: usize) -> Strin
             Some((p, _)) => p.to_string(),
             None => ".".to_string(),
         };
-        children_map
-            .entry(parent)
-            .or_default()
-            .insert(dir.clone());
+        children_map.entry(parent).or_default().insert(dir.clone());
     }
 
     // Render with progressive collapse.
@@ -431,13 +418,7 @@ pub fn generate_tree_diagram(tree: &TreeWalkerOutput, max_chars: usize) -> Strin
 
     // If over budget, try collapsing deeper levels.
     if result.len() > max_chars {
-        return render_tree_collapsed(
-            ".",
-            &children_map,
-            &dir_files,
-            &dir_file_counts,
-            max_chars,
-        );
+        return render_tree_collapsed(".", &children_map, &dir_files, &dir_file_counts, max_chars);
     }
 
     result
@@ -738,7 +719,10 @@ mod tests {
         fs::write(nm.join("index.js"), "module.exports = {}").expect("write");
         let output = walk_repo(dir.path());
         assert_eq!(output.total_source_files, 0);
-        assert!(output.excluded_directories.iter().any(|d| d.contains("node_modules")));
+        assert!(output
+            .excluded_directories
+            .iter()
+            .any(|d| d.contains("node_modules")));
     }
 
     #[test]

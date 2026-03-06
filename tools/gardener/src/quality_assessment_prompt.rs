@@ -4,9 +4,8 @@ use std::collections::HashSet;
 
 /// Build the full assessment prompt from an evidence bundle.
 pub fn build_assessment_prompt(bundle: &EvidenceBundle) -> String {
-    let bundle_json = serde_json::to_string_pretty(bundle).unwrap_or_else(|e| {
-        format!("{{\"error\": \"failed to serialize evidence bundle: {e}\"}}")
-    });
+    let bundle_json = serde_json::to_string_pretty(bundle)
+        .unwrap_or_else(|e| format!("{{\"error\": \"failed to serialize evidence bundle: {e}\"}}"));
 
     format!(
         r#"You are a code quality assessor. Your job is to evaluate how well this repository supports autonomous agent work.
@@ -128,10 +127,7 @@ All score values must be integers between 0 and 100. The `domains` array must no
 /// Always includes summary-tier data (language_summary, aggregated metrics, docs,
 /// CI/lint, coverage summary). Includes per-file details up to the token budget,
 /// prioritizing untested files first, then files with debt markers, then the rest.
-pub fn truncate_bundle_for_agent(
-    bundle: &EvidenceBundle,
-    token_budget: usize,
-) -> EvidenceBundle {
+pub fn truncate_bundle_for_agent(bundle: &EvidenceBundle, token_budget: usize) -> EvidenceBundle {
     // Rough estimate: 4 chars per token
     let char_budget = token_budget * 4;
 
@@ -151,7 +147,12 @@ pub fn truncate_bundle_for_agent(
         .collect();
 
     // Build a set of files with debt markers
-    let debt_paths: HashSet<&str> = bundle.debt.per_file_counts.keys().map(|k| k.as_str()).collect();
+    let debt_paths: HashSet<&str> = bundle
+        .debt
+        .per_file_counts
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
 
     // Start with a clone and strip per-file detail arrays
     let mut truncated = bundle.clone();
@@ -212,13 +213,13 @@ pub fn truncate_bundle_for_agent(
 
     truncated.tree.directories = included_dirs
         .into_iter()
-        .map(|(path, (source_files, test_files))| {
-            crate::quality_tree_walker::DirectoryEntry {
+        .map(
+            |(path, (source_files, test_files))| crate::quality_tree_walker::DirectoryEntry {
                 path,
                 source_files,
                 test_files,
-            }
-        })
+            },
+        )
         .collect();
 
     truncated.files_included = files_included;

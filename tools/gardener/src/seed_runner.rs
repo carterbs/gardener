@@ -149,7 +149,7 @@ fn run_legacy_seed_runner_v1_with_events_internal(
 
     append_run_log(
         "debug",
-            "seed_runner.adapter.executing",
+        "seed_runner.adapter.executing",
         json!({
             "backend": format!("{:?}", backend),
             "model": model,
@@ -364,8 +364,7 @@ fn validate_seed_payload(
         if is_placeholder_domain(&task.domain) {
             return Err(DeError::custom(format!(
                 "invalid placeholder domain in task {}: {}",
-                task.title,
-                task.domain
+                task.title, task.domain
             )));
         }
     }
@@ -381,7 +380,17 @@ fn is_placeholder_domain(domain: &str) -> bool {
 
     matches!(
         normalized.as_str(),
-        "placeholder" | "todo" | "tbd" | "n/a" | "na" | "none" | "unknown" | "to be decided" | "to be determined" | "not set" | "unassigned"
+        "placeholder"
+            | "todo"
+            | "tbd"
+            | "n/a"
+            | "na"
+            | "none"
+            | "unknown"
+            | "to be decided"
+            | "to be determined"
+            | "not set"
+            | "unassigned"
     ) || normalized.contains("placeholder")
 }
 
@@ -457,9 +466,10 @@ fn seed_output_schema() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_seed_payload, run_legacy_seed_runner_v1,
-        run_legacy_seed_runner_v1_with_events, run_legacy_seed_runner_v1_with_events_and_task_count,
-        parse_seed_payload_with_task_count, run_seed_agent_direct_v2_with_events, SeedTask,
+        parse_seed_payload, parse_seed_payload_with_task_count, run_legacy_seed_runner_v1,
+        run_legacy_seed_runner_v1_with_events,
+        run_legacy_seed_runner_v1_with_events_and_task_count, run_seed_agent_direct_v2_with_events,
+        SeedTask,
     };
     use crate::errors::GardenerError;
     use crate::runtime::{FakeProcessRunner, ProcessOutput};
@@ -628,7 +638,8 @@ mod tests {
         assert!(result.is_err(), "expected Err on unwrapped payload");
         let msg = result.expect_err("expected parse error");
         assert!(
-            msg.to_string().contains("seed output must match seeding envelope schema"),
+            msg.to_string()
+                .contains("seed output must match seeding envelope schema"),
             "unexpected message: {msg}"
         );
     }
@@ -831,7 +842,7 @@ mod tests {
     fn parse_seed_payload_with_task_count_rejects_duplicate_titles() {
         let tasks: Vec<serde_json::Value> = (0..10)
             .map(|index| {
-        serde_json::json!({
+                serde_json::json!({
                     "title": if index % 2 == 0 {
                         "same title".to_string()
                     } else {

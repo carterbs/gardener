@@ -1,6 +1,6 @@
-use crate::types::WorkerActivityState;
 use crate::gh::{MergeStateStatus, Mergeable};
 use crate::logging::append_run_log;
+use crate::types::WorkerActivityState;
 use crate::worker::types::WorkerStreamEvent;
 use std::cell::RefCell;
 

@@ -191,10 +191,7 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    fn make_tree(
-        source_files: Vec<FileEntry>,
-        test_files: Vec<FileEntry>,
-    ) -> TreeWalkerOutput {
+    fn make_tree(source_files: Vec<FileEntry>, test_files: Vec<FileEntry>) -> TreeWalkerOutput {
         TreeWalkerOutput {
             directories: vec![DirectoryEntry {
                 path: "src".to_string(),
@@ -281,8 +278,14 @@ mod tests {
 
     #[test]
     fn extract_test_stem_strips_suffixes() {
-        assert_eq!(extract_test_stem("tests/backlog_test.rs"), Some("backlog".to_string()));
-        assert_eq!(extract_test_stem("test_backlog.py"), Some("backlog".to_string()));
+        assert_eq!(
+            extract_test_stem("tests/backlog_test.rs"),
+            Some("backlog".to_string())
+        );
+        assert_eq!(
+            extract_test_stem("test_backlog.py"),
+            Some("backlog".to_string())
+        );
         assert_eq!(extract_test_stem("foo.test.ts"), Some("foo".to_string()));
         assert_eq!(extract_test_stem("bar.spec.js"), Some("bar".to_string()));
     }

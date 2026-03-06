@@ -469,15 +469,10 @@ Check for: README quality and completeness, API docs, architectural docs, inline
 }
 
 /// Synthesizer prompt — compiles all dimension reports into the final AssessmentPayload.
-pub fn build_synthesizer_prompt(
-    dimension_reports: &[(&str, &str)],
-    domain_list: &str,
-) -> String {
+pub fn build_synthesizer_prompt(dimension_reports: &[(&str, &str)], domain_list: &str) -> String {
     let mut reports_section = String::new();
     for (dimension, report) in dimension_reports {
-        reports_section.push_str(&format!(
-            "### {dimension}\n\n{report}\n\n---\n\n"
-        ));
+        reports_section.push_str(&format!("### {dimension}\n\n{report}\n\n---\n\n"));
     }
 
     format!(
@@ -628,9 +623,10 @@ mod tests {
         let mut langs = BTreeMap::new();
         langs.insert("Rust".to_string(), 95);
         langs.insert("Shell".to_string(), 12);
-        let manifests = vec![
-            ("gardener".to_string(), "tools/gardener/Cargo.toml".to_string()),
-        ];
+        let manifests = vec![(
+            "gardener".to_string(),
+            "tools/gardener/Cargo.toml".to_string(),
+        )];
         build_shared_context(".\n├── src/\n└── tests/\n", &langs, &manifests)
     }
 
@@ -682,7 +678,14 @@ mod tests {
             ),
             (
                 "risk exposure",
-                build_risk_exposure_prompt(&ctx, domains, "complexity", "debt", "untested", "files"),
+                build_risk_exposure_prompt(
+                    &ctx,
+                    domains,
+                    "complexity",
+                    "debt",
+                    "untested",
+                    "files",
+                ),
             ),
             (
                 "convention adherence",

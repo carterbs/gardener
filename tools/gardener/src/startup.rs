@@ -221,12 +221,7 @@ pub(crate) fn ensure_quality_report_fresh_for_validation_with_context(
     }
 
     if !file_system.exists(&stamp_path)
-        || report_stamp_is_stale_with_context(
-            file_system,
-            clock,
-            cfg,
-            &stamp_path,
-        )?
+        || report_stamp_is_stale_with_context(file_system, clock, cfg, &stamp_path)?
     {
         return Err(GardenerError::Cli(
             "quality-grade report is stale; regenerate the quality report before validation"
@@ -1566,12 +1561,9 @@ mod tests {
             process_runner: Arc::new(FakeProcessRunner::default()),
             terminal: Arc::new(FakeTerminal::default()),
         };
-        let stale = report_stamp_is_stale(
-            &runtime,
-            &cfg,
-            &scope.working_dir.join("report.md.stamp"),
-        )
-        .expect("stale");
+        let stale =
+            report_stamp_is_stale(&runtime, &cfg, &scope.working_dir.join("report.md.stamp"))
+                .expect("stale");
         assert!(stale);
     }
 

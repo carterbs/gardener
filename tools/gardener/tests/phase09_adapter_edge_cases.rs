@@ -254,7 +254,10 @@ fn codex_error_event_is_treated_as_protocol_violation() {
     assert_eq!(result.payload["type"], json!("turn.failed"));
     assert_eq!(result.payload["reason"], json!("protocol_violation"));
     assert_eq!(result.payload["unsupported_event_types"], json!(["error"]));
-    assert!(result.diagnostics.iter().any(|line| line.contains("unsupported codex event `error`")));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|line| line.contains("unsupported codex event `error`")));
 }
 
 #[test]
@@ -310,7 +313,10 @@ fn codex_unknown_event_type_in_output_is_protocol_violation() {
         .expect("result must parse");
     assert_eq!(result.terminal, AgentTerminal::Failure);
     assert_eq!(result.payload["reason"], json!("protocol_violation"));
-    assert_eq!(result.payload["unsupported_event_types"], json!(["future.variant"]));
+    assert_eq!(
+        result.payload["unsupported_event_types"],
+        json!(["future.variant"])
+    );
     assert!(result
         .diagnostics
         .iter()
@@ -334,7 +340,10 @@ fn claude_unknown_event_type_in_output_is_protocol_violation() {
     assert_eq!(result.terminal, AgentTerminal::Failure);
     assert_eq!(result.payload["type"], json!("turn.failed"));
     assert_eq!(result.payload["reason"], json!("protocol_violation"));
-    assert_eq!(result.payload["unsupported_event_types"], json!(["legacy.event"]));
+    assert_eq!(
+        result.payload["unsupported_event_types"],
+        json!(["legacy.event"])
+    );
     assert!(result
         .diagnostics
         .iter()

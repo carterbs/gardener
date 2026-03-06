@@ -58,7 +58,9 @@ pub fn render_grade_document(report: &GradeReport, assessed_by: &str) -> String 
 
     // --- Domain coverage table ---
     out.push_str("## Domain Coverage\n\n");
-    out.push_str("| Domain | Languages | Coverage | Quality | Risk | Convention | Composite | Grade |\n");
+    out.push_str(
+        "| Domain | Languages | Coverage | Quality | Risk | Convention | Composite | Grade |\n",
+    );
     out.push_str("|---|---|---|---|---|---|---|---|\n");
     for (domain, composite, grade) in &report.domain_grades {
         out.push_str(&format!(
@@ -273,7 +275,10 @@ fn render_grade_document_full(
                 let grade = Grade::from_score(*score as f64);
                 out.push_str(&format!(
                     "**{}** ({} / {}): {}\n\n",
-                    name, score, grade.as_str(), rationale
+                    name,
+                    score,
+                    grade.as_str(),
+                    rationale
                 ));
             }
         }
@@ -281,7 +286,9 @@ fn render_grade_document_full(
 
     // --- Domain coverage table ---
     out.push_str("## Domain Coverage\n\n");
-    out.push_str("| Domain | Languages | Coverage | Quality | Risk | Convention | Composite | Grade |\n");
+    out.push_str(
+        "| Domain | Languages | Coverage | Quality | Risk | Convention | Composite | Grade |\n",
+    );
     out.push_str("|---|---|---|---|---|---|---|---|\n");
     for (domain, composite, grade) in &report.domain_grades {
         out.push_str(&format!(
@@ -317,7 +324,9 @@ fn render_grade_document_full(
             }
             out.push_str(&format!(
                 "**{}** ({:.1} / {})\n\n",
-                domain.name, composite, grade.as_str()
+                domain.name,
+                composite,
+                grade.as_str()
             ));
             for (key, label) in &domain_dim_keys {
                 if let Some(rationale) = domain.dimension_rationale.get(*key) {
@@ -413,8 +422,10 @@ mod tests {
                         risk_exposure: 80,
                         convention_adherence: 60,
                     },
-                    notes: vec!["Authentication module handles JWT validation with no test coverage"
-                        .to_string()],
+                    notes: vec![
+                        "Authentication module handles JWT validation with no test coverage"
+                            .to_string(),
+                    ],
                     dimension_rationale: BTreeMap::new(),
                 },
                 DomainAssessment {
@@ -426,8 +437,9 @@ mod tests {
                         risk_exposure: 20,
                         convention_adherence: 95,
                     },
-                    notes: vec!["API layer is well tested with comprehensive integration tests"
-                        .to_string()],
+                    notes: vec![
+                        "API layer is well tested with comprehensive integration tests".to_string(),
+                    ],
                     dimension_rationale: BTreeMap::new(),
                 },
             ],
@@ -516,7 +528,8 @@ mod tests {
     #[test]
     fn render_contains_footer_with_assessed_by() {
         let (report, repo_wide) = sample_report();
-        let doc = render_grade_document_with_repo_wide(&report, &repo_wide, "deterministic-fallback");
+        let doc =
+            render_grade_document_with_repo_wide(&report, &repo_wide, "deterministic-fallback");
         assert!(doc.contains("Assessed by: deterministic-fallback"));
         assert!(doc.contains("TTL: 7 days"));
     }

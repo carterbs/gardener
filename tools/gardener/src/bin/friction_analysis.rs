@@ -5,6 +5,7 @@
     clippy::redundant_clone
 )]
 
+use gardener::backlog_store::system_time_unix;
 use gardener::config::load_config;
 use gardener::config::CliOverrides;
 use gardener::friction_analysis::{
@@ -12,7 +13,6 @@ use gardener::friction_analysis::{
     FrictionAnalysisOutcome,
 };
 use gardener::logging::append_run_log;
-use gardener::backlog_store::system_time_unix;
 use gardener::runtime::ProductionRuntime;
 use gardener::startup::backlog_db_path;
 use std::path::PathBuf;
@@ -153,7 +153,10 @@ fn run() -> Result<i32, gardener::errors::GardenerError> {
     };
 
     match run_friction_analysis(&input, &cfg, runtime.process_runner.as_ref(), &scope)? {
-        FrictionAnalysisOutcome::Completed { findings, smooth_run } => {
+        FrictionAnalysisOutcome::Completed {
+            findings,
+            smooth_run,
+        } => {
             if findings.is_empty() {
                 eprintln!("No friction findings.");
                 println!(

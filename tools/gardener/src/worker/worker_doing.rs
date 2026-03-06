@@ -21,7 +21,9 @@ use crate::worker::simulated::execute_task_simulated;
 use crate::worker::stream_events::{
     emit_adapter_tool_event, emit_worker_activity_state, extract_failure_reason,
 };
-use crate::worker::types::{MergeRequest, WorkerLogEvent, WorkerOutcome, WorkerRunSummary, WorkerStreamEvent};
+use crate::worker::types::{
+    MergeRequest, WorkerLogEvent, WorkerOutcome, WorkerRunSummary, WorkerStreamEvent,
+};
 use crate::worker::worktree_naming::{worktree_branch_for, worktree_path_for};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
@@ -509,8 +511,13 @@ fn execute_task_live(
                     "error": agent_err.to_string()
                 }),
             );
-            match salvage_doing_work_from_git(&git, &pre_doing_sha, task_summary, worker_id, task_id)?
-            {
+            match salvage_doing_work_from_git(
+                &git,
+                &pre_doing_sha,
+                task_summary,
+                worker_id,
+                task_id,
+            )? {
                 Some(output) => {
                     append_run_log(
                         "warn",
@@ -524,7 +531,12 @@ fn execute_task_live(
                     output
                 }
                 None => {
-                    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Failed, on_event);
+                    emit_worker_activity_state(
+                        worker_id,
+                        task_id,
+                        WorkerActivityState::Failed,
+                        on_event,
+                    );
                     return Ok(WorkerOutcome::Completed(failed_summary(
                         &identity,
                         logs,
@@ -954,8 +966,8 @@ fn execute_task_live(
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_review_action, execute_task, parse_merge_open_pr_number, salvage_doing_work_from_git,
-        should_complete_merged_pr_without_diff, ReviewAction,
+        decide_review_action, execute_task, parse_merge_open_pr_number,
+        salvage_doing_work_from_git, should_complete_merged_pr_without_diff, ReviewAction,
     };
     use crate::config::AppConfig;
     use crate::fsm::{ReviewVerdict, MAX_REVIEW_LOOPS};

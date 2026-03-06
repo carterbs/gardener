@@ -6,9 +6,10 @@ pub(crate) fn worktree_branch_for(task_id: &str) -> String {
 }
 
 pub(crate) fn worktree_path_for(repo_root: &Path, task_id: &str) -> PathBuf {
-    let base = env::var("HOME").map_or_else(|_| repo_root.to_path_buf(), |_home| {
-        PathBuf::from("/tmp/gardener-worktrees")
-    });
+    let base = env::var("HOME").map_or_else(
+        |_| repo_root.to_path_buf(),
+        |_home| PathBuf::from("/tmp/gardener-worktrees"),
+    );
     base.join(worktree_slug_for_task(task_id))
 }
 
@@ -82,7 +83,10 @@ mod tests {
     #[test]
     fn worktree_names_are_git_safe_for_namespaced_task_ids() {
         let branch = worktree_branch_for("manual:tui:GARD-03");
-        assert!(!branch.contains(':'), "branch name must not contain colon: {branch}");
+        assert!(
+            !branch.contains(':'),
+            "branch name must not contain colon: {branch}"
+        );
         assert_eq!(
             branch,
             format!("gardener/{}", worktree_slug_for_task("manual:tui:GARD-03"))
@@ -94,7 +98,10 @@ mod tests {
             .expect("worktree path should have file name")
             .to_str()
             .expect("worktree path should be valid UTF-8");
-        assert!( !dir_name.contains(':'), "path component must not contain colon: {dir_name}" );
+        assert!(
+            !dir_name.contains(':'),
+            "path component must not contain colon: {dir_name}"
+        );
     }
 
     #[test]

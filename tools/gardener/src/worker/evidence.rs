@@ -1,6 +1,8 @@
 use crate::agent_turn::AgentTurnOutput;
 use crate::fsm::ReviewingOutput;
-use crate::logging::{append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines};
+use crate::logging::{
+    append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines,
+};
 use crate::types::{RuntimeScope, WorkerState};
 use crate::worker::types::WorkerLogEvent;
 use crate::worker::worktree_naming::worktree_slug_for_task;
@@ -39,7 +41,11 @@ fn handoff_evidence_bundle_path(
     scope
         .working_dir
         .join(".cache/gardener/run-evidence-bundles")
-        .join(format!("{}-{}.json", worktree_slug_for_task(task_id), run_id))
+        .join(format!(
+            "{}-{}.json",
+            worktree_slug_for_task(task_id),
+            run_id
+        ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -286,7 +292,10 @@ mod tests {
             }],
         )
         .expect("bundle persisted");
-        assert_eq!(bundle_path, super::handoff_evidence_bundle_path(&scope, task_id, &run_id));
+        assert_eq!(
+            bundle_path,
+            super::handoff_evidence_bundle_path(&scope, task_id, &run_id)
+        );
         let payload = std::fs::read_to_string(&bundle_path).expect("artifact read");
         let parsed = serde_json::from_str::<serde_json::Value>(&payload).expect("bundle json");
         assert_eq!(parsed["task_id"], task_id);

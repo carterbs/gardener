@@ -31,10 +31,7 @@ pub fn detect_instrumentation(
     let mut total = 0usize;
     let mut frameworks: BTreeSet<String> = BTreeSet::new();
 
-    let all_source = tree
-        .directories
-        .iter()
-        .flat_map(|d| d.source_files.iter());
+    let all_source = tree.directories.iter().flat_map(|d| d.source_files.iter());
 
     for file_entry in all_source {
         total += 1;
@@ -104,7 +101,12 @@ fn pattern_to_framework(pattern: &str) -> &str {
         p if p.contains("log::") && !p.contains("console.log") => "log (Rust)",
         p if p.contains("env_logger") => "env_logger (Rust)",
         p if p.contains("append_run_log") => "gardener logging",
-        p if p.contains("console.log") || p.contains("console.error") || p.contains("console.warn") => "console (JS)",
+        p if p.contains("console.log")
+            || p.contains("console.error")
+            || p.contains("console.warn") =>
+        {
+            "console (JS)"
+        }
         p if p.contains("winston") => "winston (JS)",
         p if p.contains("pino") => "pino (JS)",
         p if p.contains("bunyan") => "bunyan (JS)",
@@ -112,7 +114,9 @@ fn pattern_to_framework(pattern: &str) -> &str {
         p if p.contains("os_log") || p.contains("OSLog") => "os_log (Swift)",
         p if p.contains("Logger(") && !p.contains("getLogger") => "Logger (Swift)",
         p if p.contains("NSLog") => "NSLog (Swift)",
-        p if p.contains("logging.") || p.contains("logger.") || p.contains("getLogger") => "logging (Python)",
+        p if p.contains("logging.") || p.contains("logger.") || p.contains("getLogger") => {
+            "logging (Python)"
+        }
         p if p.contains("structlog") => "structlog (Python)",
         p if p.contains("loguru") => "loguru (Python)",
         p if p.contains("zap.") => "zap (Go)",
@@ -175,7 +179,10 @@ mod tests {
 
         let output = detect_instrumentation(dir.path(), &tree);
         assert_eq!(output.files_with_instrumentation, 1);
-        assert!(output.frameworks_detected.iter().any(|f| f.contains("tracing")));
+        assert!(output
+            .frameworks_detected
+            .iter()
+            .any(|f| f.contains("tracing")));
     }
 
     #[test]

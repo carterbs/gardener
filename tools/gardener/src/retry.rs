@@ -52,7 +52,8 @@ where
         }
     }
 
-    Err(last_err.unwrap_or_else(|| GardenerError::Process("retry failed without attempts".to_string())))
+    Err(last_err
+        .unwrap_or_else(|| GardenerError::Process("retry failed without attempts".to_string())))
 }
 
 #[cfg(test)]

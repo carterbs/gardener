@@ -1,4 +1,6 @@
-use crate::agent::{validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter};
+use crate::agent::{
+    validate_model, write_prompt_file, AdapterCapabilities, AdapterContext, AgentAdapter,
+};
 use crate::errors::GardenerError;
 use crate::logging::append_run_log;
 use crate::protocol::{
@@ -268,9 +270,10 @@ impl AgentAdapter for CodexAdapter {
             });
         }
 
-        if let Some(failed) = raw_events.iter().find(|ev| {
-            ev.get("type") == Some(&json!("turn.failed"))
-        }) {
+        if let Some(failed) = raw_events
+            .iter()
+            .find(|ev| ev.get("type") == Some(&json!("turn.failed")))
+        {
             let failure_type = failed
                 .get("type")
                 .and_then(Value::as_str)

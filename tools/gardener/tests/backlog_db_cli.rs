@@ -191,7 +191,13 @@ fn add_requires_title_and_details() {
     let (_store, _dir, db) = temp_store();
 
     let output = cargo_bin_cmd!("backlog-db")
-        .args(["add", "--db", db.to_str().expect("path"), "--details", "details"])
+        .args([
+            "add",
+            "--db",
+            db.to_str().expect("path"),
+            "--details",
+            "details",
+        ])
         .assert()
         .failure()
         .get_output()

@@ -28,12 +28,7 @@ const CONVENTION_DOC_PATHS: &[&str] = &[
 ];
 
 /// Directory patterns for additional docs.
-const DOC_DIRECTORY_PATTERNS: &[&str] = &[
-    "docs",
-    "documentation",
-    "doc",
-    "docs/conventions",
-];
+const DOC_DIRECTORY_PATTERNS: &[&str] = &["docs", "documentation", "doc", "docs/conventions"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocScannerOutput {
@@ -142,10 +137,7 @@ fn scan_doc_directory(
             continue;
         }
 
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ext != "md" && ext != "txt" && ext != "rst" {
             continue;
         }
@@ -217,6 +209,9 @@ mod tests {
         fs::create_dir_all(&docs_dir).expect("create dir");
         fs::write(docs_dir.join("architecture.md"), "# Arch\n").expect("write");
         let output = scan_docs(dir.path());
-        assert!(output.docs.iter().any(|d| d.path.contains("architecture.md")));
+        assert!(output
+            .docs
+            .iter()
+            .any(|d| d.path.contains("architecture.md")));
     }
 }

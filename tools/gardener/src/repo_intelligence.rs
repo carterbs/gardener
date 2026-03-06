@@ -358,9 +358,9 @@ fn readiness_grade(score: i64) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{derive_agent_readiness, BuildProfileInput, DiscoveryAssessment};
+    use crate::runtime::FakeClock;
     use crate::triage_discovery::DimensionAssessment;
     use crate::types::AgentKind;
-    use crate::runtime::FakeClock;
     use std::path::PathBuf;
 
     fn scored_discovery(

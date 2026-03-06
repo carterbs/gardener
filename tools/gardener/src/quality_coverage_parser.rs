@@ -102,7 +102,10 @@ pub fn parse_coverage(repo_path: &Path) -> CoverageParserOutput {
                     }
                 }
                 // Precedence: Istanbul JSON (0) > lcov (1) > Cobertura (2) > Tarpaulin (3) > Go (4)
-                if best_summary.as_ref().is_none_or(|(p, _)| parsed.precedence < *p) {
+                if best_summary
+                    .as_ref()
+                    .is_none_or(|(p, _)| parsed.precedence < *p)
+                {
                     best_summary = Some((parsed.precedence, parsed.summary));
                 }
             }
@@ -189,7 +192,9 @@ fn parse_lcov(content: &str, artifact_path: &str) -> Result<ParsedCoverage, Stri
     }
 
     if per_file.is_empty() {
-        return Err(format!("{artifact_path}: no coverage records found in lcov"));
+        return Err(format!(
+            "{artifact_path}: no coverage records found in lcov"
+        ));
     }
 
     let pct = if total_found > 0 {
@@ -340,8 +345,8 @@ fn parse_cobertura_xml(content: &str, artifact_path: &str) -> Result<ParsedCover
         // Parse <class> elements for per-file coverage
         if trimmed.starts_with("<class ") || trimmed.starts_with("<class\t") {
             let filename = extract_xml_attr(trimmed, "filename");
-            let line_rate = extract_xml_attr(trimmed, "line-rate")
-                .and_then(|r| r.parse::<f64>().ok());
+            let line_rate =
+                extract_xml_attr(trimmed, "line-rate").and_then(|r| r.parse::<f64>().ok());
 
             if let (Some(filename), Some(rate)) = (filename, line_rate) {
                 // Estimate lines from complexity or just record the rate
@@ -504,7 +509,10 @@ fn parse_go_cover(content: &str, artifact_path: &str) -> Result<ParsedCoverage, 
         if tokens.len() < 2 {
             continue;
         }
-        let num_stmts: usize = tokens.get(tokens.len() - 2).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let num_stmts: usize = tokens
+            .get(tokens.len() - 2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
         let count: usize = tokens.last().and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let entry = per_file_map.entry(file_path).or_insert((0, 0));

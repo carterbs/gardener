@@ -1,14 +1,16 @@
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
-use crate::fsm::{DoingOutput, FsmSnapshot, MAX_REVIEW_LOOPS, MergingOutput, ReviewVerdict, ReviewingOutput};
+use crate::fsm::{
+    DoingOutput, FsmSnapshot, MergingOutput, ReviewVerdict, ReviewingOutput, MAX_REVIEW_LOOPS,
+};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::output_envelope::{parse_typed_payload, END_MARKER, START_MARKER};
 use crate::prompt_registry::PromptRegistry;
 use crate::types::WorkerState;
-use crate::worker::types::{WorkerLogEvent, TeardownReport, WorkerRunSummary};
-use crate::worker_identity::WorkerIdentity;
 use crate::understand_phase::classify_task;
+use crate::worker::types::{TeardownReport, WorkerLogEvent, WorkerRunSummary};
+use crate::worker_identity::WorkerIdentity;
 
 pub(crate) fn execute_task_simulated(
     cfg: &AppConfig,

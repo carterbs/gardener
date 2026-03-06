@@ -372,9 +372,7 @@ fn detect_coverage_thresholds(repo_path: &Path) -> ToolPresence {
                                 .file_name()
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("unknown");
-                            details.push(format!(
-                                "Coverage enforcement in workflow: {name}"
-                            ));
+                            details.push(format!("Coverage enforcement in workflow: {name}"));
                         }
                     }
                 }
@@ -472,18 +470,19 @@ mod tests {
         // Set up .git/config with core.hooksPath
         let git_dir = dir.path().join(".git");
         fs::create_dir_all(&git_dir).expect("create .git");
-        fs::write(
-            git_dir.join("config"),
-            "[core]\n\thooksPath = .githooks\n",
-        )
-        .expect("write git config");
+        fs::write(git_dir.join("config"), "[core]\n\thooksPath = .githooks\n")
+            .expect("write git config");
         // Create the hooks directory with an active pre-commit
         let hooks = dir.path().join(".githooks");
         fs::create_dir_all(&hooks).expect("create .githooks");
         fs::write(hooks.join("pre-commit"), "#!/bin/sh\necho test\n").expect("write hook");
         let output = detect_ci_lint(dir.path());
         assert!(output.pre_commit.detected);
-        assert!(output.pre_commit.files.iter().any(|f| f.contains(".githooks/pre-commit")));
+        assert!(output
+            .pre_commit
+            .files
+            .iter()
+            .any(|f| f.contains(".githooks/pre-commit")));
     }
 
     #[test]

@@ -4,9 +4,12 @@ use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::fsm::MergingOutput;
 use crate::gh::{FailedCheck, GhClient, MergeStateStatus, Mergeable};
+use crate::git::{GitClient, RebaseResult};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry};
+use crate::prompt_registry::{
+    ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry,
+};
 use crate::protocol::AgentTerminal;
 use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::runtime::{Clock, FileSystem, ProcessRunner};
@@ -14,13 +17,11 @@ use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::worker::evidence::log_event_from;
 use crate::worker::stream_events::{
     emit_adapter_tool_event, emit_worker_activity_state, emit_worker_activity_state_with,
-    emit_worker_tool_command,
-    extract_failure_reason, merge_polling_block_reason,
+    emit_worker_tool_command, extract_failure_reason, merge_polling_block_reason,
 };
 use crate::worker::types::{MergeRequest, TeardownReport, WorkerRunSummary, WorkerStreamEvent};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
-use crate::git::{GitClient, RebaseResult};
 use std::time::Duration;
 
 pub const MAX_MERGE_REMEDIATION: u32 = 3;
@@ -450,7 +451,9 @@ pub(crate) fn execute_merge_phase(
                     on_event: Some(&on_adapter_event),
                 })?;
                 logs.push(log_event_from(&ci_result, WorkerState::Merging));
-                if ci_result.terminal == AgentTerminal::Failure && attempt + 1 >= MAX_MERGE_REMEDIATION {
+                if ci_result.terminal == AgentTerminal::Failure
+                    && attempt + 1 >= MAX_MERGE_REMEDIATION
+                {
                     emit_worker_activity_state(
                         worker_id,
                         task_id,
@@ -484,19 +487,24 @@ pub(crate) fn execute_merge_phase(
                 let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
                 if !has_explicit_failed_checks(&failed_checks) {
                     if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                            emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
-                            return Ok(WorkerRunSummary {
-                                worker_id: req.worker_id.clone(),
-                                session_id: req.session_id.clone(),
-                                final_state: WorkerState::Parked,
-                                logs,
-                                teardown: None,
-                                failure_reason: Some(
-                                    "PR blocked by branch protection rules, parked for retry"
-                                        .to_string(),
-                                ),
-                            });
-                        }
+                        emit_worker_activity_state(
+                            worker_id,
+                            task_id,
+                            WorkerActivityState::Parked,
+                            on_event,
+                        );
+                        return Ok(WorkerRunSummary {
+                            worker_id: req.worker_id.clone(),
+                            session_id: req.session_id.clone(),
+                            final_state: WorkerState::Parked,
+                            logs,
+                            teardown: None,
+                            failure_reason: Some(
+                                "PR blocked by branch protection rules, parked for retry"
+                                    .to_string(),
+                            ),
+                        });
+                    }
                     continue;
                 }
                 emit_worker_activity_state_with(
@@ -537,7 +545,9 @@ pub(crate) fn execute_merge_phase(
                     on_event: Some(&on_adapter_event),
                 })?;
                 logs.push(log_event_from(&ci_result, WorkerState::Merging));
-                if ci_result.terminal == AgentTerminal::Failure && attempt + 1 >= MAX_MERGE_REMEDIATION {
+                if ci_result.terminal == AgentTerminal::Failure
+                    && attempt + 1 >= MAX_MERGE_REMEDIATION
+                {
                     emit_worker_activity_state(
                         worker_id,
                         task_id,
@@ -647,7 +657,12 @@ pub(crate) fn execute_merge_phase(
         }
     }
 
-    emit_worker_activity_state(worker_id, task_id, WorkerActivityState::PostMergeValidation, on_event);
+    emit_worker_activity_state(
+        worker_id,
+        task_id,
+        WorkerActivityState::PostMergeValidation,
+        on_event,
+    );
     emit_worker_tool_command(
         task_id,
         on_event,
@@ -684,12 +699,12 @@ pub(crate) fn execute_merge_phase(
             run_id: &fa_run_id,
             log_path: &fa_log_path,
         };
-        match crate::friction_analysis::run_friction_analysis(&fa_input, cfg, process_runner, scope) {
+        match crate::friction_analysis::run_friction_analysis(&fa_input, cfg, process_runner, scope)
+        {
             Ok(crate::friction_analysis::FrictionAnalysisOutcome::Completed {
                 findings,
                 smooth_run,
-            }) if !findings.is_empty() =>
-            {
+            }) if !findings.is_empty() => {
                 let db_path = crate::startup::backlog_db_path(cfg, scope);
                 if let Ok(store) = crate::backlog_store::BacklogStore::open(db_path) {
                     for task in crate::friction_analysis::findings_to_tasks(&findings) {
@@ -947,11 +962,11 @@ fn teardown_after_completion(
 #[cfg(test)]
 mod tests {
     use super::{execute_merge_phase, has_explicit_failed_checks, teardown_after_completion};
+    use crate::config::AppConfig;
     use crate::fsm::MergingOutput;
     use crate::gh::FailedCheck;
     use crate::git::GitClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
-    use crate::config::AppConfig;
     use crate::types::{RuntimeScope, WorkerState};
     use crate::worker::types::MergeRequest;
     use crate::worktree::WorktreeClient;
@@ -1164,7 +1179,10 @@ mod tests {
 
         assert_eq!(summary.final_state, WorkerState::Complete);
         assert!(summary.failure_reason.is_none());
-        assert!(summary.teardown.as_ref().is_some_and(|t| t.worktree_cleaned));
+        assert!(summary
+            .teardown
+            .as_ref()
+            .is_some_and(|t| t.worktree_cleaned));
     }
 
     #[test]
@@ -1242,9 +1260,8 @@ mod tests {
             vec!["worktree", "remove", "--force", "/repo/.worktrees/task-1"]
         );
         assert_eq!(spawned[1].args, vec!["status", "--porcelain"]);
-        assert!(spawned
-            .iter()
-            .any(|request| request.args == vec![
+        assert!(spawned.iter().any(|request| request.args
+            == vec![
                 "stash",
                 "push",
                 "-u",

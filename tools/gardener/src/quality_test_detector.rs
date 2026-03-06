@@ -58,7 +58,9 @@ pub fn detect_tests(repo_path: &Path, tree: &TreeWalkerOutput) -> TestDetectorOu
             };
 
             let full_path = resolve_path(repo_path, &sf.path);
-            if let Some(detected_by) = check_content_indicators(&full_path, &lang_def.test_file_indicators) {
+            if let Some(detected_by) =
+                check_content_indicators(&full_path, &lang_def.test_file_indicators)
+            {
                 test_files.push(TestFileEntry {
                     path: sf.path.clone(),
                     language: sf.language.clone(),
@@ -196,6 +198,8 @@ mod tests {
 
         let output = detect_tests(dir.path(), &tree);
         assert_eq!(output.test_files.len(), 1);
-        assert!(output.test_files[0].detected_by.starts_with("content_match"));
+        assert!(output.test_files[0]
+            .detected_by
+            .starts_with("content_match"));
     }
 }

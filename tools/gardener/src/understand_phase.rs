@@ -141,8 +141,8 @@ pub fn classify_task(task_summary: &str) -> TaskCategory {
 
 #[cfg(test)]
 mod tests {
-    use crate::fsm::TaskCategory;
     use super::{classify_task, parse_understand_output};
+    use crate::fsm::TaskCategory;
 
     #[test]
     fn parse_understand_output_falls_back_to_classifier_when_payload_invalid() {
@@ -161,15 +161,11 @@ mod tests {
     #[test]
     fn classify_build_and_implement_as_feature_for_planning() {
         assert_eq!(
-            classify_task(
-                "GARD-04: Build Triage mode — Live activity and Triage artifacts cards"
-            ),
+            classify_task("GARD-04: Build Triage mode — Live activity and Triage artifacts cards"),
             crate::fsm::TaskCategory::Feature
         );
         assert_eq!(
-            classify_task(
-                "GARD-02: Implement global frame — header, footer, and mode switching"
-            ),
+            classify_task("GARD-02: Implement global frame — header, footer, and mode switching"),
             crate::fsm::TaskCategory::Feature
         );
     }

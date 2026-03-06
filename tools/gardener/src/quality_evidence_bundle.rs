@@ -4,7 +4,9 @@ use crate::quality_ci_lint_detector::{detect_ci_lint, CiLintDetectorOutput};
 use crate::quality_coverage_parser::{parse_coverage, CoverageParserOutput};
 use crate::quality_debt_scanner::{scan_debt, DebtScannerOutput};
 use crate::quality_doc_scanner::{scan_docs, DocScannerOutput};
-use crate::quality_instrumentation_detector::{detect_instrumentation, InstrumentationDetectorOutput};
+use crate::quality_instrumentation_detector::{
+    detect_instrumentation, InstrumentationDetectorOutput,
+};
 use crate::quality_test_detector::{detect_tests, TestDetectorOutput};
 use crate::quality_tree_walker::{walk_repo, TreeWalkerOutput};
 use crate::quality_untested_finder::{find_untested, UntestedFinderOutput};
@@ -305,7 +307,8 @@ fn scan_nested_manifests(repo_path: &Path, manifests: &mut Vec<PackageManifest>)
                             }
                             // For glob patterns, try to expand
                             if member_path.contains('*') {
-                                let base = member_path.trim_end_matches("/*").trim_end_matches("/*");
+                                let base =
+                                    member_path.trim_end_matches("/*").trim_end_matches("/*");
                                 let base_dir = repo_path.join(base);
                                 if base_dir.is_dir() {
                                     if let Ok(entries) = std::fs::read_dir(&base_dir) {
@@ -321,7 +324,8 @@ fn scan_nested_manifests(repo_path: &Path, manifests: &mut Vec<PackageManifest>)
                                                         .unwrap_or("")
                                                         .to_string();
                                                     if !manifests.iter().any(|m| m.path == rel) {
-                                                        let name = extract_manifest_name(&nested, "cargo");
+                                                        let name =
+                                                            extract_manifest_name(&nested, "cargo");
                                                         manifests.push(PackageManifest {
                                                             path: rel,
                                                             manifest_type: "cargo".to_string(),
@@ -415,7 +419,9 @@ mod tests {
 
         let bundle = collect_evidence_bundle(dir.path()).expect("should succeed");
         assert!(bundle.files_total > 0);
-        assert!(!bundle.tests.test_files.is_empty() || !bundle.tests.untested_source_files.is_empty());
+        assert!(
+            !bundle.tests.test_files.is_empty() || !bundle.tests.untested_source_files.is_empty()
+        );
     }
 
     #[test]

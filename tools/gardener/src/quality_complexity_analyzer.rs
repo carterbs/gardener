@@ -49,8 +49,9 @@ pub fn analyze_complexity(repo_path: &Path, tree: &TreeWalkerOutput) -> Complexi
             } else {
                 0.0
             };
-            let complexity_score =
-                branch_count as f64 * 2.0 + max_nesting_depth as f64 * 3.0 + line_count as f64 / 50.0;
+            let complexity_score = branch_count as f64 * 2.0
+                + max_nesting_depth as f64 * 3.0
+                + line_count as f64 / 50.0;
 
             files.push(FileComplexity {
                 path: file_entry.path.clone(),
@@ -66,7 +67,11 @@ pub fn analyze_complexity(repo_path: &Path, tree: &TreeWalkerOutput) -> Complexi
     }
 
     // Sort by complexity_score descending
-    files.sort_by(|a, b| b.complexity_score.partial_cmp(&a.complexity_score).unwrap_or(std::cmp::Ordering::Equal));
+    files.sort_by(|a, b| {
+        b.complexity_score
+            .partial_cmp(&a.complexity_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let total_files = files.len();
     let avg_complexity = if total_files > 0 {
@@ -135,10 +140,21 @@ fn compute_max_nesting_python(content: &str) -> usize {
 /// Count language-specific branch keywords with word-boundary awareness.
 fn count_branches(content: &str, language: &str) -> usize {
     let patterns: &[&str] = match language {
-        "Rust" => &["if ", "match ", "else ", "for ", "while ", ".unwrap()", "?", "loop "],
+        "Rust" => &[
+            "if ",
+            "match ",
+            "else ",
+            "for ",
+            "while ",
+            ".unwrap()",
+            "?",
+            "loop ",
+        ],
         "Go" => &["if ", "else ", "for ", "switch ", "select "],
         "Python" => &["if ", "elif ", "else:", "for ", "while ", "try:", "except "],
-        "TypeScript/JavaScript" => &["if ", "else ", "for ", "while ", "switch ", "catch ", "try "],
+        "TypeScript/JavaScript" => &[
+            "if ", "else ", "for ", "while ", "switch ", "catch ", "try ",
+        ],
         _ => &[],
     };
 
@@ -343,7 +359,10 @@ fn c() {
         assert_eq!(output.files[0].path, "complex.rs");
         assert_eq!(output.files[1].path, "simple.rs");
         assert!(output.files[0].complexity_score > output.files[1].complexity_score);
-        assert_eq!(output.summary.max_complexity_file, Some("complex.rs".to_string()));
+        assert_eq!(
+            output.summary.max_complexity_file,
+            Some("complex.rs".to_string())
+        );
     }
 
     #[test]
@@ -379,7 +398,8 @@ fn c() {
 
     #[test]
     fn rust_pub_fn_counted() {
-        let content = "pub fn public_func() {}\npub(crate) fn crate_func() {}\nasync fn async_func() {}\n";
+        let content =
+            "pub fn public_func() {}\npub(crate) fn crate_func() {}\nasync fn async_func() {}\n";
         let (dir, tree) = make_tree(vec![("lib.rs", "Rust", content)]);
         let output = analyze_complexity(dir.path(), &tree);
 

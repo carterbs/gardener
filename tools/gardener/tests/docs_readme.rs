@@ -160,6 +160,52 @@ fn docs_readme_links_agent_bootstrap_runbook() {
 }
 
 #[test]
+fn docs_readme_documents_test_domain_start_point() {
+    let readme_path = repo_root_path("../../docs/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("unable to read docs/README.md: {err}"));
+
+    let start_here = "cargo test -p gardener --test docs_readme";
+    assert!(
+        readme.contains("### `tools/gardener/tests` (verification-harness)"),
+        "docs/README.md should include a verification-harness start-point section"
+    );
+    assert!(
+        readme.contains("`tools/gardener/tests/docs_readme.rs`"),
+        "docs/README.md should include a verification-harness entry file"
+    );
+    assert!(
+        readme.contains(start_here),
+        "docs/README.md should include a test-domain start-here command"
+    );
+}
+
+#[test]
+fn docs_readme_documents_scripts_fixture_start_point() {
+    let readme_path = repo_root_path("../../docs/README.md");
+    let readme = std::fs::read_to_string(&readme_path)
+        .unwrap_or_else(|err| panic!("unable to read docs/README.md: {err}"));
+
+    let start_here = "bash scripts/run-script-lint-fixture-tests.sh";
+    assert!(
+        readme.contains("### `scripts/fixtures` (repository-automation)"),
+        "docs/README.md should include a repository-automation start-point section"
+    );
+    assert!(
+        readme.contains("`scripts/run-script-lint-fixture-tests.sh`"),
+        "docs/README.md should include a fixture-domain entry file"
+    );
+    assert!(
+        readme.contains(start_here),
+        "docs/README.md should include a scripts-domain start-here command"
+    );
+    assert!(
+        readme.contains("[quality steering evidence](./quality-grades/agent_steering.md)"),
+        "docs/README.md should cite steering evidence for repository-automation coverage gaps"
+    );
+}
+
+#[test]
 fn agent_bootstrap_runbook_has_required_sections() {
     let runbook_path = repo_root_path("../../docs/runbooks/agent-bootstrap.md");
     let runbook = std::fs::read_to_string(&runbook_path)

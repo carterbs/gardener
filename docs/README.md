@@ -28,9 +28,29 @@ This directory is the canonical index for agent-oriented repository navigation. 
 - [Startup artifact map runbook](./runbooks/startup-artifact-map.md)
 - [Lima isolated runtime runbook](./runbooks/lima-isolated-runtime.md)
 
+## Domain start points
+
+### `tools/gardener/tests` (verification-harness)
+
+- Entry files
+  - [`tools/gardener/tests/docs_readme.rs`](../tools/gardener/tests/docs_readme.rs)
+  - [`tools/gardener/tests/cli_smoke.rs`](../tools/gardener/tests/cli_smoke.rs)
+- Start here command
+  - `cargo test -p gardener --test docs_readme`
+
+### `scripts/fixtures` (repository-automation)
+
+- Entry files
+  - [`scripts/fixtures/check-migrations-wired/passing/migrations/001_init.sql`](../scripts/fixtures/check-migrations-wired/passing/migrations/001_init.sql)
+  - [`scripts/run-script-lint-fixture-tests.sh`](../scripts/run-script-lint-fixture-tests.sh)
+- Start here command
+  - `bash scripts/run-script-lint-fixture-tests.sh`
+
 ## Fifth: repository map
 
 - [Repository map](./repository-map.md)
+
+These sections close the verification-harness and repository-automation start-point gaps noted in [quality steering evidence](./quality-grades/agent_steering.md).
 
 ## Before editing
 

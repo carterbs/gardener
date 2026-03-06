@@ -219,7 +219,12 @@ fn matches_domain_file(domain: &str, file: &str, path: &str) -> bool {
         }
         "tui" => file == "tui.rs" || file == "hotkeys.rs",
         "quality-grades" => file.starts_with("quality"),
-        "startup" => file == "startup.rs" || file == "worktree_audit.rs" || file == "pr_audit.rs",
+        "startup" => {
+            file == "startup.rs"
+                || file == "worktree_audit.rs"
+                || path.contains("/worktree_audit/")
+                || file == "pr_audit.rs"
+        }
         "git-integration" => file == "git.rs" || file == "gh.rs" || file == "worktree.rs",
         "prompts" => file.starts_with("prompt"),
         "learning" => {

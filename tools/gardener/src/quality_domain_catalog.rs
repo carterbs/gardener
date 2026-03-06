@@ -78,6 +78,7 @@ fn collect_source_domains(path: &Path, names: &mut BTreeSet<String>) {
             p if p.contains("/quality") => Some("quality-grades"),
             p if p.ends_with("/startup.rs")
                 || p.ends_with("/worktree_audit.rs")
+                || p.contains("/worktree_audit/")
                 || p.ends_with("/pr_audit.rs") =>
             {
                 Some("startup")

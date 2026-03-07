@@ -30,7 +30,6 @@ review_phase.rs
 runtime/mod.rs
 seeding.rs
 startup.rs
-tui/
 understand_phase.rs
 worker.rs
 worker/

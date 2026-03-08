@@ -13,7 +13,7 @@ use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::review_phase::parse_reviewing_output;
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
-use crate::understand_phase::parse_understand_output;
+use crate::understand_phase::{run_understand, UnderstandContext};
 use crate::worker::evidence::{
     collect_handoff_evidence_bundle, log_and_persist_review_output, log_event_from,
 };
@@ -314,7 +314,7 @@ fn execute_task_live(
         WorkerActivityState::Understand,
         on_event,
     );
-    let understand_result = run_agent_turn(AgentTurnInput {
+    let understand_ctx = UnderstandContext {
         cfg,
         process_runner,
         scope,
@@ -323,25 +323,31 @@ fn execute_task_live(
         registry: &registry,
         learning_loop: &learning_loop,
         identity: &identity,
-        state: WorkerState::Understand,
         task_summary,
         attempt_count,
-        prompt_override: None,
-        on_event: Some(&on_adapter_event),
-    })?;
-    logs.push(log_event_from(&understand_result, WorkerState::Understand));
-    if understand_result.terminal == AgentTerminal::Failure {
-        append_run_log(
-            "warn",
-            "worker.recovery.understand_terminal_fallback",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "reason": extract_failure_reason(&understand_result.payload)
-            }),
-        );
-    }
-    let understand = parse_understand_output(&understand_result.payload, worker_id, task_summary);
+        on_step: None,
+        on_agent_event: Some(&on_adapter_event),
+    };
+    let understand_outcome = match run_understand(&understand_ctx) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            emit_worker_activity_state(
+                worker_id,
+                task_id,
+                WorkerActivityState::Failed,
+                on_event,
+            );
+            return Ok(WorkerOutcome::Completed(failed_summary(
+                &identity,
+                logs,
+                Some(e.to_string()),
+            )));
+        }
+    };
+    let understand = crate::fsm::UnderstandOutput {
+        task_type: understand_outcome.category,
+        reasoning: understand_outcome.reasoning,
+    };
     append_run_log(
         "debug",
         "worker.task.classified",

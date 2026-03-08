@@ -1,4 +1,3 @@
-use crate::gh::{MergeStateStatus, Mergeable};
 use crate::logging::append_run_log;
 use crate::types::WorkerActivityState;
 use crate::worker::types::WorkerStreamEvent;
@@ -257,23 +256,6 @@ pub(crate) fn emit_worker_activity_state_with(
     append_run_log("info", "worker.activity.state_changed", payload);
 }
 
-pub(crate) fn merge_polling_block_reason(
-    mergeable: &Mergeable,
-    merge_state_status: &MergeStateStatus,
-) -> Option<&'static str> {
-    match (mergeable, merge_state_status) {
-        (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => None,
-        (Mergeable::Conflicting, _) => Some("merge conflicts detected"),
-        (_, MergeStateStatus::Blocked) => {
-            Some("blocked by branch protection rules or required checks")
-        }
-        (_, MergeStateStatus::Dirty) => Some("checks are still running"),
-        (_, MergeStateStatus::Unstable) => Some("checks are failing or unstable"),
-        (_, MergeStateStatus::Behind) => Some("branch is behind main"),
-        (Mergeable::Unknown, _) => Some("mergeability is currently unknown"),
-        _ => None,
-    }
-}
 
 #[cfg(test)]
 mod tests {

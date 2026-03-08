@@ -43,6 +43,7 @@ pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
         branch: &branch,
         pr_number,
         validation_command: &rt.validation_command,
+        pre_merge_validation: None,
         on_step: Some(&|label, detail| step("merge-pr", label, detail)),
         on_agent_event: Some(&|event| print_agent_event("merge-pr", event)),
     })?;
@@ -51,7 +52,8 @@ pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
         gardener::merge_loop::MergeLoopOutcome::Merged { sha } => {
             step("merge-pr", "DONE", &format!("merged (sha={sha})"));
         }
-        gardener::merge_loop::MergeLoopOutcome::Failed { reason } => {
+        gardener::merge_loop::MergeLoopOutcome::Failed { reason }
+        | gardener::merge_loop::MergeLoopOutcome::Parked { reason } => {
             step("merge-pr", "FAILED", reason);
             return Err(GardenerError::Cli(reason.to_string()));
         }

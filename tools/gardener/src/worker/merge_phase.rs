@@ -1,32 +1,22 @@
 use crate::agent::factory::AdapterFactory;
-use crate::agent_turn::{run_agent_turn, AgentTurnInput};
 use crate::config::AppConfig;
 use crate::errors::GardenerError;
 use crate::fsm::MergingOutput;
-use crate::gh::{FailedCheck, GhClient, MergeStateStatus, Mergeable};
-use crate::git::{GitClient, RebaseResult};
+use crate::gh::GhClient;
+use crate::git::GitClient;
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
-use crate::prompt_registry::{
-    ci_failure_remediation_template, merge_main_conflict_resolution_template, PromptRegistry,
-};
-use crate::protocol::AgentTerminal;
-use crate::retry::{retry_with_backoff, RetryConfig};
+use crate::merge_loop::{run_merge_loop, MergeLoopContext, MergeLoopOutcome};
+use crate::prompt_registry::PromptRegistry;
 use crate::runtime::{Clock, FileSystem, ProcessRunner};
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
-use crate::worker::evidence::log_event_from;
 use crate::worker::stream_events::{
     emit_adapter_tool_event, emit_worker_activity_state, emit_worker_activity_state_with,
-    emit_worker_tool_command, extract_failure_reason, merge_polling_block_reason,
+    emit_worker_tool_command,
 };
 use crate::worker::types::{MergeRequest, TeardownReport, WorkerRunSummary, WorkerStreamEvent};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
-use std::time::Duration;
-
-pub const MAX_MERGE_REMEDIATION: u32 = 3;
-pub const MERGEABILITY_POLL_MAX: u32 = 12;
-pub const MERGEABILITY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Execute the merge-and-teardown phase for a task that passed review.
 /// Called by the merge worker thread — no mutex needed since the merge worker
@@ -42,9 +32,6 @@ pub(crate) fn execute_merge_phase(
 ) -> Result<WorkerRunSummary, GardenerError> {
     let worker_id = &req.worker_id;
     let task_id = &req.task_id;
-    let on_adapter_event = |agent_event: &crate::protocol::AgentEvent| {
-        emit_adapter_tool_event(task_id, on_event, agent_event);
-    };
 
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging, on_event);
 
@@ -58,605 +45,177 @@ pub(crate) fn execute_merge_phase(
     let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
     let worktree_client = WorktreeClient::new(process_runner, repo_root);
 
-    let pr = req.pr_number;
-    let branch = &req.branch;
-    let mut logs = req.logs.clone();
-    let mut merge_output = MergingOutput {
-        merged: false,
-        merge_sha: None,
-    };
+    let logs = req.logs.clone();
 
-    for attempt in 0..MAX_MERGE_REMEDIATION {
-        let status = retry_with_backoff(
-            &RetryConfig {
-                operation_name: "poll_mergeability",
-                max_attempts: 2,
-                ..Default::default()
-            },
-            || gh.poll_mergeability(pr, MERGEABILITY_POLL_MAX, MERGEABILITY_POLL_INTERVAL),
-        )?;
-        if let Ok(pr_view) = gh.view_pr(pr) {
-            if pr_view.state.eq_ignore_ascii_case("MERGED") || pr_view.merged_at.is_some() {
+    // Build the pre-merge validation closure.
+    // In the Clean|HasHooks arm the merge loop checks required_checks_green
+    // to decide whether to skip validation; for the worker path we always
+    // supply the closure and let the merge loop's own skip-logic in the
+    // `on_step` callback handle the gating.
+    let pre_merge_validation = || -> Result<(), GardenerError> {
+        // Check if we can skip validation because required checks are green.
+        let skip = match gh.required_checks_green(req.pr_number) {
+            Ok(true) => {
                 append_run_log(
                     "info",
-                    "worker.merging.already_merged",
+                    "worker.merging.pre_validation.skipped",
                     serde_json::json!({
                         "worker_id": worker_id,
-                        "pr_number": pr,
-                        "attempt": attempt + 1,
-                        "merge_sha": pr_view.merge_commit.as_ref().map(|c| c.oid.clone())
+                        "pr_number": req.pr_number,
+                        "reason": "mergeable_clean_and_required_checks_green"
                     }),
                 );
-                if let Some(sha) = pr_view.merge_commit.as_ref() {
-                    merge_output = MergingOutput {
-                        merged: true,
-                        merge_sha: Some(sha.oid.clone()),
-                    };
-                } else {
-                    merge_output = MergingOutput {
-                        merged: true,
-                        merge_sha: None,
-                    };
-                }
-                break;
+                true
             }
+            Ok(false) => {
+                append_run_log(
+                    "debug",
+                    "worker.merging.pre_validation.required_checks_not_green",
+                    serde_json::json!({
+                        "worker_id": worker_id,
+                        "pr_number": req.pr_number
+                    }),
+                );
+                false
+            }
+            Err(err) => {
+                append_run_log(
+                    "warn",
+                    "worker.merging.pre_validation.gate_check_failed",
+                    serde_json::json!({
+                        "worker_id": worker_id,
+                        "pr_number": req.pr_number,
+                        "error": err.to_string()
+                    }),
+                );
+                false
+            }
+        };
+        if skip {
+            return Ok(());
         }
-
-        let block_reason =
-            merge_polling_block_reason(&status.mergeable, &status.merge_state_status);
-        let mut poll_details = serde_json::json!({
-            "pr_number": pr,
-            "attempt": attempt + 1,
-            "mergeable": format!("{:?}", status.mergeable),
-            "merge_state_status": format!("{:?}", status.merge_state_status),
-            "next_check_in_secs": MERGEABILITY_POLL_INTERVAL.as_secs()
-        });
-        if let Some(reason) = block_reason {
-            poll_details["block_reason"] = serde_json::json!(reason);
-        }
-        emit_worker_activity_state_with(
-            worker_id,
+        emit_worker_tool_command(
             task_id,
-            WorkerActivityState::MergePolling,
-            poll_details,
             on_event,
+            &format!("{} (pre-merge validation)", cfg.validation.command),
         );
+        run_repo_validation_with_quality_guard(
+            &repo_root_git,
+            runtime_file_system,
+            runtime_clock,
+            cfg,
+            scope,
+        )
+    };
 
-        append_run_log(
-            "info",
-            "worker.merging.poll_result",
-            serde_json::json!({
-                "worker_id": worker_id,
-                "pr_number": pr,
-                "attempt": attempt + 1,
-                "mergeable": format!("{:?}", status.mergeable),
-                "merge_state_status": format!("{:?}", status.merge_state_status)
-            }),
-        );
-
-        match (&status.mergeable, &status.merge_state_status) {
-            (Mergeable::Mergeable, MergeStateStatus::Clean | MergeStateStatus::HasHooks) => {
-                let skip_pre_validation = match gh.required_checks_green(pr) {
-                    Ok(true) => {
-                        append_run_log(
-                            "info",
-                            "worker.merging.pre_validation.skipped",
-                            serde_json::json!({
-                                "worker_id": worker_id,
-                                "pr_number": pr,
-                                "reason": "mergeable_clean_and_required_checks_green"
-                            }),
-                        );
-                        true
-                    }
-                    Ok(false) => {
-                        append_run_log(
-                            "debug",
-                            "worker.merging.pre_validation.required_checks_not_green",
-                            serde_json::json!({
-                                "worker_id": worker_id,
-                                "pr_number": pr
-                            }),
-                        );
-                        false
-                    }
-                    Err(err) => {
-                        append_run_log(
-                            "warn",
-                            "worker.merging.pre_validation.gate_check_failed",
-                            serde_json::json!({
-                                "worker_id": worker_id,
-                                "pr_number": pr,
-                                "error": err.to_string()
-                            }),
-                        );
-                        false
-                    }
+    // Map step labels to WorkerActivityState events.
+    let on_step = |label: &str, detail: &str| {
+        match label {
+            "POLL" => {
+                // Parse out attempt and status info from detail for the payload.
+                emit_worker_activity_state_with(
+                    worker_id,
+                    task_id,
+                    WorkerActivityState::MergePolling,
+                    serde_json::json!({ "detail": detail }),
+                    on_event,
+                );
+            }
+            "VALIDATE" => {
+                emit_worker_tool_command(task_id, on_event, detail);
+            }
+            "MERGE" => {
+                emit_worker_tool_command(task_id, on_event, detail);
+            }
+            "REMEDIATE" => {
+                // Determine the right activity state from the detail string.
+                let state = if detail.contains("CI") || detail.contains("blocked with failed") {
+                    WorkerActivityState::CiFailureRemediation
+                } else if detail.contains("behind main") || detail.contains("merge from main") {
+                    WorkerActivityState::MergeFromMain
+                } else {
+                    WorkerActivityState::MergeRemediation
                 };
-                if !skip_pre_validation {
-                    emit_worker_tool_command(
-                        task_id,
-                        on_event,
-                        &format!("{} (pre-merge validation)", cfg.validation.command),
-                    );
-                    if let Err(err) = run_repo_validation_with_quality_guard(
-                        &repo_root_git,
-                        runtime_file_system,
-                        runtime_clock,
-                        cfg,
-                        scope,
-                    ) {
-                        emit_worker_activity_state(
-                            worker_id,
-                            task_id,
-                            WorkerActivityState::Failed,
-                            on_event,
-                        );
-                        append_run_log(
-                            "error",
-                            "worker.merging.pre_validation_failed",
-                            serde_json::json!({
-                                "worker_id": worker_id,
-                                "task_id": task_id,
-                                "error": err.to_string()
-                            }),
-                        );
-                        return Ok(WorkerRunSummary {
-                            worker_id: req.worker_id.clone(),
-                            session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed,
-                            logs,
-                            teardown: None,
-                            failure_reason: Some(format!("pre-merge validation failed: {err}")),
-                        });
-                    }
-                }
-                emit_worker_tool_command(task_id, on_event, &format!("gh pr merge {pr}"));
-                match gh.merge_pr(pr) {
-                    Ok(()) => {
-                        let view = retry_with_backoff(
-                            &RetryConfig {
-                                operation_name: "view_pr_after_merge",
-                                ..Default::default()
-                            },
-                            || gh.view_pr(pr),
-                        )?;
-                        let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
-                        merge_output = MergingOutput {
-                            merged: true,
-                            merge_sha: Some(sha.clone()),
-                        };
-                        append_run_log(
-                            "info",
-                            "worker.merging.deterministic.succeeded",
-                            serde_json::json!({
-                                "worker_id": worker_id,
-                                "pr_number": pr,
-                                "attempt": attempt + 1,
-                                "merge_sha": sha
-                            }),
-                        );
-                        break;
-                    }
-                    Err(merge_err) => {
-                        if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                            emit_worker_activity_state(
-                                worker_id,
-                                task_id,
-                                WorkerActivityState::Failed,
-                                on_event,
-                            );
-                            return Ok(WorkerRunSummary {
-                                worker_id: req.worker_id.clone(),
-                                session_id: req.session_id.clone(),
-                                final_state: WorkerState::Failed,
-                                logs,
-                                teardown: None,
-                                failure_reason: Some(format!(
-                                    "merge failed after {} attempts: {}",
-                                    MAX_MERGE_REMEDIATION, merge_err
-                                )),
-                            });
-                        }
-                    }
-                }
-            }
-            (_, MergeStateStatus::Behind) => {
                 emit_worker_activity_state_with(
                     worker_id,
                     task_id,
-                    WorkerActivityState::MergeFromMain,
-                    serde_json::json!({ "pr_number": pr, "attempt": attempt + 1 }),
+                    state,
+                    serde_json::json!({ "detail": detail }),
                     on_event,
                 );
-                if let Err(e) = worker_merge_main_and_push(
-                    &gh,
-                    &git,
-                    &mut learning_loop,
-                    &mut logs,
-                    cfg,
-                    process_runner,
-                    scope,
-                    req,
-                    &factory,
-                    &registry,
-                    &identity,
-                    pr,
-                    branch,
-                    worker_id,
-                    task_id,
-                    attempt,
-                    on_event,
-                ) {
-                    emit_worker_activity_state_with(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::MergeRemediation,
-                        serde_json::json!({ "pr_number": pr, "attempt": attempt + 1 }),
-                        on_event,
-                    );
-                    learning_loop.ingest_failure(
-                        WorkerState::Merging,
-                        "merge from main failed, agent remediation needed",
-                        vec![format!("error={e}")],
-                    );
-                    let remediation_result = run_agent_turn(AgentTurnInput {
-                        cfg,
-                        process_runner,
-                        scope,
-                        worktree_path: &req.worktree_path,
-                        factory: &factory,
-                        registry: &registry,
-                        learning_loop: &learning_loop,
-                        identity: &identity,
-                        state: WorkerState::Merging,
-                        task_summary: &req.task_summary,
-                        attempt_count: req.attempt_count,
-                        prompt_override: None,
-                        on_event: Some(&on_adapter_event),
-                    })?;
-                    logs.push(log_event_from(&remediation_result, WorkerState::Merging));
-                    if remediation_result.terminal == AgentTerminal::Failure
-                        && attempt + 1 >= MAX_MERGE_REMEDIATION
-                    {
-                        emit_worker_activity_state(
-                            worker_id,
-                            task_id,
-                            WorkerActivityState::Failed,
-                            on_event,
-                        );
-                        let failure_reason = extract_failure_reason(&remediation_result.payload);
-                        return Ok(WorkerRunSummary {
-                            worker_id: req.worker_id.clone(),
-                            session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed,
-                            logs,
-                            teardown: None,
-                            failure_reason,
-                        });
-                    }
-                }
-                continue;
             }
-            (Mergeable::Conflicting, _) | (_, MergeStateStatus::Dirty) => {
-                emit_worker_activity_state_with(
-                    worker_id,
-                    task_id,
-                    WorkerActivityState::MergeFromMain,
-                    serde_json::json!({ "pr_number": pr, "attempt": attempt + 1 }),
-                    on_event,
-                );
-                if let Err(e) = worker_merge_main_and_push(
-                    &gh,
-                    &git,
-                    &mut learning_loop,
-                    &mut logs,
-                    cfg,
-                    process_runner,
-                    scope,
-                    req,
-                    &factory,
-                    &registry,
-                    &identity,
-                    pr,
-                    branch,
-                    worker_id,
-                    task_id,
-                    attempt,
-                    on_event,
-                ) {
-                    emit_worker_activity_state_with(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::MergeRemediation,
-                        serde_json::json!({ "pr_number": pr, "attempt": attempt + 1 }),
-                        on_event,
-                    );
-                    learning_loop.ingest_failure(
-                        WorkerState::Merging,
-                        "conflict resolution failed, agent remediation needed",
-                        vec![format!("error={e}")],
-                    );
-                    let remediation_result = run_agent_turn(AgentTurnInput {
-                        cfg,
-                        process_runner,
-                        scope,
-                        worktree_path: &req.worktree_path,
-                        factory: &factory,
-                        registry: &registry,
-                        learning_loop: &learning_loop,
-                        identity: &identity,
-                        state: WorkerState::Merging,
-                        task_summary: &req.task_summary,
-                        attempt_count: req.attempt_count,
-                        prompt_override: None,
-                        on_event: Some(&on_adapter_event),
-                    })?;
-                    logs.push(log_event_from(&remediation_result, WorkerState::Merging));
-                    if remediation_result.terminal == AgentTerminal::Failure
-                        && attempt + 1 >= MAX_MERGE_REMEDIATION
-                    {
-                        emit_worker_activity_state(
-                            worker_id,
-                            task_id,
-                            WorkerActivityState::Failed,
-                            on_event,
-                        );
-                        let failure_reason = extract_failure_reason(&remediation_result.payload);
-                        return Ok(WorkerRunSummary {
-                            worker_id: req.worker_id.clone(),
-                            session_id: req.session_id.clone(),
-                            final_state: WorkerState::Failed,
-                            logs,
-                            teardown: None,
-                            failure_reason,
-                        });
-                    }
-                }
-                continue;
-            }
-            (_, MergeStateStatus::Unstable) => {
-                emit_worker_activity_state_with(
-                    worker_id,
-                    task_id,
-                    WorkerActivityState::CiFailureRemediation,
-                    serde_json::json!({ "pr_number": pr, "attempt": attempt + 1 }),
-                    on_event,
-                );
-                let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
-                let evidence: Vec<String> = failed_checks
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "## CI check: {}\nLink: {}\n\n```\n{}\n```",
-                            c.name, c.link, c.log_snippet
-                        )
-                    })
-                    .collect();
-                learning_loop.ingest_failure(WorkerState::Merging, "CI checks failed", evidence);
-                let ci_tpl = ci_failure_remediation_template();
-                let ci_result = run_agent_turn(AgentTurnInput {
-                    cfg,
-                    process_runner,
-                    scope,
-                    worktree_path: &req.worktree_path,
-                    factory: &factory,
-                    registry: &registry,
-                    learning_loop: &learning_loop,
-                    identity: &identity,
-                    state: WorkerState::Merging,
-                    task_summary: &req.task_summary,
-                    attempt_count: req.attempt_count,
-                    prompt_override: Some(&ci_tpl),
-                    on_event: Some(&on_adapter_event),
-                })?;
-                logs.push(log_event_from(&ci_result, WorkerState::Merging));
-                if ci_result.terminal == AgentTerminal::Failure
-                    && attempt + 1 >= MAX_MERGE_REMEDIATION
-                {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    let failure_reason = extract_failure_reason(&ci_result.payload);
-                    return Ok(WorkerRunSummary {
-                        worker_id: req.worker_id.clone(),
-                        session_id: req.session_id.clone(),
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason,
-                    });
-                }
-                continue;
-            }
-            (_, MergeStateStatus::Blocked) => {
-                append_run_log(
-                    "warn",
-                    "worker.merging.fallback_attempt",
-                    serde_json::json!({
-                        "worker_id": worker_id,
-                        "pr_number": pr,
-                        "attempt": attempt + 1,
-                        "mergeable": format!("{:?}", status.mergeable),
-                        "merge_state_status": format!("{:?}", status.merge_state_status)
-                    }),
-                );
-                let failed_checks = gh.fetch_failed_checks(pr).unwrap_or_default();
-                if !has_explicit_failed_checks(&failed_checks) {
-                    if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                        emit_worker_activity_state(
-                            worker_id,
-                            task_id,
-                            WorkerActivityState::Parked,
-                            on_event,
-                        );
-                        return Ok(WorkerRunSummary {
-                            worker_id: req.worker_id.clone(),
-                            session_id: req.session_id.clone(),
-                            final_state: WorkerState::Parked,
-                            logs,
-                            teardown: None,
-                            failure_reason: Some(
-                                "PR blocked by branch protection rules, parked for retry"
-                                    .to_string(),
-                            ),
-                        });
-                    }
-                    continue;
-                }
-                emit_worker_activity_state_with(
-                    worker_id,
-                    task_id,
-                    WorkerActivityState::CiFailureRemediation,
-                    serde_json::json!({ "pr_number": pr, "attempt": attempt + 1 }),
-                    on_event,
-                );
-                let evidence: Vec<String> = failed_checks
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "## CI check: {}\nLink: {}\n\n```\n{}\n```",
-                            c.name, c.link, c.log_snippet
-                        )
-                    })
-                    .collect();
-                learning_loop.ingest_failure(
-                    WorkerState::Merging,
-                    "required CI checks failed (Blocked)",
-                    evidence,
-                );
-                let ci_tpl = ci_failure_remediation_template();
-                let ci_result = run_agent_turn(AgentTurnInput {
-                    cfg,
-                    process_runner,
-                    scope,
-                    worktree_path: &req.worktree_path,
-                    factory: &factory,
-                    registry: &registry,
-                    learning_loop: &learning_loop,
-                    identity: &identity,
-                    state: WorkerState::Merging,
-                    task_summary: &req.task_summary,
-                    attempt_count: req.attempt_count,
-                    prompt_override: Some(&ci_tpl),
-                    on_event: Some(&on_adapter_event),
-                })?;
-                logs.push(log_event_from(&ci_result, WorkerState::Merging));
-                if ci_result.terminal == AgentTerminal::Failure
-                    && attempt + 1 >= MAX_MERGE_REMEDIATION
-                {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    let failure_reason = extract_failure_reason(&ci_result.payload);
-                    return Ok(WorkerRunSummary {
-                        worker_id: req.worker_id.clone(),
-                        session_id: req.session_id.clone(),
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason,
-                    });
-                }
-                continue;
-            }
-            _ => {
-                append_run_log(
-                    "warn",
-                    "worker.merging.fallback_attempt",
-                    serde_json::json!({
-                        "worker_id": worker_id,
-                        "pr_number": pr,
-                        "attempt": attempt + 1,
-                        "mergeable": format!("{:?}", status.mergeable),
-                        "merge_state_status": format!("{:?}", status.merge_state_status)
-                    }),
-                );
-                if let Err(err) = run_repo_validation_with_quality_guard(
-                    &repo_root_git,
-                    runtime_file_system,
-                    runtime_clock,
-                    cfg,
-                    scope,
-                ) {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    append_run_log(
-                        "error",
-                        "worker.merging.pre_validation_failed",
-                        serde_json::json!({
-                            "worker_id": worker_id,
-                            "task_id": task_id,
-                            "error": err.to_string()
-                        }),
-                    );
-                    return Ok(WorkerRunSummary {
-                        worker_id: req.worker_id.clone(),
-                        session_id: req.session_id.clone(),
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason: Some(format!("pre-merge validation failed: {err}")),
-                    });
-                }
-                emit_worker_tool_command(
-                    task_id,
-                    on_event,
-                    &format!("{} (pre-merge validation)", cfg.validation.command),
-                );
-                emit_worker_tool_command(task_id, on_event, &format!("gh pr merge {pr}"));
-                match gh.merge_pr(pr) {
-                    Ok(()) => {
-                        let view = retry_with_backoff(
-                            &RetryConfig {
-                                operation_name: "view_pr_after_merge",
-                                ..Default::default()
-                            },
-                            || gh.view_pr(pr),
-                        )?;
-                        let sha = view.merge_commit.map(|c| c.oid).unwrap_or_default();
-                        merge_output = MergingOutput {
-                            merged: true,
-                            merge_sha: Some(sha),
-                        };
-                        break;
-                    }
-                    Err(merge_err) => {
-                        if attempt + 1 >= MAX_MERGE_REMEDIATION {
-                            emit_worker_activity_state(
-                                worker_id,
-                                task_id,
-                                WorkerActivityState::Failed,
-                                on_event,
-                            );
-                            return Ok(WorkerRunSummary {
-                                worker_id: req.worker_id.clone(),
-                                session_id: req.session_id.clone(),
-                                final_state: WorkerState::Failed,
-                                logs,
-                                teardown: None,
-                                failure_reason: Some(format!(
-                                    "merge failed after {} attempts: {}",
-                                    MAX_MERGE_REMEDIATION, merge_err
-                                )),
-                            });
-                        }
-                    }
-                }
-            }
+            _ => {}
         }
-    }
+    };
 
+    let on_adapter_event = |agent_event: &crate::protocol::AgentEvent| {
+        emit_adapter_tool_event(task_id, on_event, agent_event);
+    };
+
+    let merge_outcome = run_merge_loop(&mut MergeLoopContext {
+        cfg,
+        process_runner,
+        scope,
+        worktree_path: &req.worktree_path,
+        factory: &factory,
+        registry: &registry,
+        learning_loop: &mut learning_loop,
+        identity: &identity,
+        task_summary: &req.task_summary,
+        attempt_count: req.attempt_count,
+        gh: &gh,
+        git: &git,
+        branch: &req.branch,
+        pr_number: req.pr_number,
+        validation_command: &cfg.validation.command,
+        pre_merge_validation: Some(&pre_merge_validation),
+        on_step: Some(&on_step),
+        on_agent_event: Some(&on_adapter_event),
+    })?;
+
+    // Handle non-merged outcomes.
+    let merge_sha = match merge_outcome {
+        MergeLoopOutcome::Merged { sha } => sha,
+        MergeLoopOutcome::Parked { reason } => {
+            emit_worker_activity_state(
+                worker_id,
+                task_id,
+                WorkerActivityState::Parked,
+                on_event,
+            );
+            return Ok(WorkerRunSummary {
+                worker_id: req.worker_id.clone(),
+                session_id: req.session_id.clone(),
+                final_state: WorkerState::Parked,
+                logs,
+                teardown: None,
+                failure_reason: Some(reason),
+            });
+        }
+        MergeLoopOutcome::Failed { reason } => {
+            emit_worker_activity_state(
+                worker_id,
+                task_id,
+                WorkerActivityState::Failed,
+                on_event,
+            );
+            return Ok(WorkerRunSummary {
+                worker_id: req.worker_id.clone(),
+                session_id: req.session_id.clone(),
+                final_state: WorkerState::Failed,
+                logs,
+                teardown: None,
+                failure_reason: Some(reason),
+            });
+        }
+    };
+
+    let merge_output = MergingOutput {
+        merged: true,
+        merge_sha: Some(merge_sha.clone()),
+    };
+
+    // Post-merge validation
     emit_worker_activity_state(
         worker_id,
         task_id,
@@ -687,6 +246,7 @@ pub(crate) fn execute_merge_phase(
         );
     }
 
+    // Friction analysis
     {
         let fa_run_id = crate::logging::current_run_id().unwrap_or_default();
         let fa_log_path = crate::logging::current_run_log_path()
@@ -759,6 +319,7 @@ pub(crate) fn execute_merge_phase(
         }
     }
 
+    // Teardown
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Teardown, on_event);
     let teardown = teardown_after_completion(
         &worktree_client,
@@ -790,124 +351,6 @@ pub(crate) fn execute_merge_phase(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn worker_merge_main_and_push(
-    _gh: &GhClient<'_>,
-    git: &GitClient<'_>,
-    learning_loop: &mut LearningLoop,
-    logs: &mut Vec<crate::worker::types::WorkerLogEvent>,
-    cfg: &AppConfig,
-    process_runner: &dyn ProcessRunner,
-    scope: &RuntimeScope,
-    req: &MergeRequest,
-    factory: &AdapterFactory,
-    registry: &PromptRegistry,
-    identity: &WorkerIdentity,
-    pr: u64,
-    branch: &str,
-    worker_id: &str,
-    task_id: &str,
-    attempt: u32,
-    on_event: Option<&dyn Fn(WorkerStreamEvent)>,
-) -> Result<(), GardenerError> {
-    if git.abort_merge_if_in_progress()? {
-        emit_worker_tool_command(task_id, on_event, "git merge --abort");
-        append_run_log(
-            "warn",
-            "worker.merging.merge_from_main.stale_merge_aborted",
-            serde_json::json!({
-                "worker_id": worker_id,
-                "pr_number": pr,
-                "attempt": attempt + 1
-            }),
-        );
-    }
-
-    emit_worker_tool_command(task_id, on_event, "git fetch origin main");
-    emit_worker_tool_command(task_id, on_event, "git merge origin/main --no-edit");
-    match git.try_merge_from_main() {
-        Ok(RebaseResult::Clean) => {
-            append_run_log(
-                "info",
-                "worker.merging.merge_from_main.clean",
-                serde_json::json!({
-                    "worker_id": worker_id,
-                    "pr_number": pr,
-                    "attempt": attempt + 1
-                }),
-            );
-            emit_worker_tool_command(task_id, on_event, &format!("git push origin {branch}"));
-            git.push_with_rebase_recovery(branch)?;
-            Ok(())
-        }
-        Ok(RebaseResult::Conflict { stderr }) => {
-            let on_adapter_event = |agent_event: &crate::protocol::AgentEvent| {
-                emit_adapter_tool_event(task_id, on_event, agent_event);
-            };
-            append_run_log(
-                "warn",
-                "worker.merging.merge_from_main.conflict",
-                serde_json::json!({
-                    "worker_id": worker_id,
-                    "pr_number": pr,
-                    "attempt": attempt + 1,
-                    "stderr": stderr
-                }),
-            );
-            learning_loop.ingest_failure(
-                WorkerState::Merging,
-                "merge from main had conflicts",
-                vec![format!("stderr={stderr}")],
-            );
-            let conflict_tpl = merge_main_conflict_resolution_template();
-            let conflict_result = run_agent_turn(AgentTurnInput {
-                cfg,
-                process_runner,
-                scope,
-                worktree_path: &req.worktree_path,
-                factory,
-                registry,
-                learning_loop,
-                identity,
-                state: WorkerState::Merging,
-                task_summary: &req.task_summary,
-                attempt_count: req.attempt_count,
-                prompt_override: Some(&conflict_tpl),
-                on_event: Some(&on_adapter_event),
-            })?;
-            logs.push(log_event_from(&conflict_result, WorkerState::Merging));
-            if conflict_result.terminal != AgentTerminal::Failure {
-                emit_worker_tool_command(
-                    task_id,
-                    on_event,
-                    "git add -A && git commit -m \"fix: merge main into branch\"",
-                );
-                git.commit_all("fix: merge main into branch")?;
-                emit_worker_tool_command(task_id, on_event, &format!("git push origin {branch}"));
-                git.push_with_rebase_recovery(branch)?;
-                Ok(())
-            } else {
-                Err(GardenerError::Process(
-                    "agent failed to resolve merge conflicts".to_string(),
-                ))
-            }
-        }
-        Err(e) => {
-            append_run_log(
-                "warn",
-                "worker.merging.merge_from_main.failed",
-                serde_json::json!({
-                    "worker_id": worker_id,
-                    "pr_number": pr,
-                    "attempt": attempt + 1,
-                    "error": e.to_string()
-                }),
-            );
-            Err(e)
-        }
-    }
-}
-
 fn run_repo_validation_with_quality_guard(
     repo_root_git: &GitClient<'_>,
     _runtime_file_system: &dyn FileSystem,
@@ -917,10 +360,6 @@ fn run_repo_validation_with_quality_guard(
 ) -> Result<(), GardenerError> {
     repo_root_git.pull_main().ok();
     repo_root_git.run_validation_command(&cfg.validation.command)
-}
-
-fn has_explicit_failed_checks(failed_checks: &[FailedCheck]) -> bool {
-    !failed_checks.is_empty()
 }
 
 fn teardown_after_completion(
@@ -961,10 +400,9 @@ fn teardown_after_completion(
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_merge_phase, has_explicit_failed_checks, teardown_after_completion};
+    use super::{execute_merge_phase, teardown_after_completion};
     use crate::config::AppConfig;
     use crate::fsm::MergingOutput;
-    use crate::gh::FailedCheck;
     use crate::git::GitClient;
     use crate::runtime::{FakeProcessRunner, ProcessOutput, ProductionClock, ProductionFileSystem};
     use crate::types::{RuntimeScope, WorkerState};
@@ -984,16 +422,19 @@ mod tests {
         let mut cfg = AppConfig::default();
         cfg.validation.command = "npm run validate".to_string();
 
+        // poll_mergeability → MERGEABLE/CLEAN
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
             stderr: String::new(),
         }));
+        // view_pr → not merged
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"{"mergedAt":null,"mergeCommit":null,"headRefName":"gardener/manual-test","state":"OPEN"}"#.to_string(),
             stderr: String::new(),
         }));
+        // required_checks_green → false (two responses for the check)
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: String::new(),
@@ -1014,6 +455,13 @@ mod tests {
             stdout: "false\n".to_string(),
             stderr: String::new(),
         }));
+        // pull_main (inside validation)
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // run_validation_command → fails
         runner.push_response(Ok(ProcessOutput {
             exit_code: 1,
             stdout: String::new(),
@@ -1067,16 +515,19 @@ mod tests {
         cfg.execution.test_mode = true;
         cfg.validation.command = "npm run validate".to_string();
 
+        // poll_mergeability → MERGEABLE/CLEAN
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"{"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN"}"#.to_string(),
             stderr: String::new(),
         }));
+        // view_pr → not merged
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"{"mergedAt":null,"mergeCommit":null,"headRefName":"gardener/manual-test","state":"OPEN"}"#.to_string(),
             stderr: String::new(),
         }));
+        // required_checks_green → true (skip pre-merge validation)
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"[{"bucket":"PASS"}]"#.to_string(),
@@ -1087,11 +538,19 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
+        // merge_pr → success
+        runner.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        // view_pr after merge → merged with sha
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: r#"{"mergedAt":"2026-03-06T12:00:00Z","mergeCommit":{"oid":"cafebabe"},"headRefName":"gardener/manual-test","state":"MERGED"}"#.to_string(),
             stderr: String::new(),
         }));
+        // post-merge validation: pull_main
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: "false\n".to_string(),
@@ -1112,6 +571,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }));
+        // post-merge validation: run_validation_command → fails
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: "false\n".to_string(),
@@ -1127,11 +587,13 @@ mod tests {
             stdout: String::new(),
             stderr: "failed validation".to_string(),
         }));
+        // teardown: worktree cleanup
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: String::new(),
             stderr: String::new(),
         }));
+        // teardown: pull_main_with_stashed_changes
         runner.push_response(Ok(ProcessOutput {
             exit_code: 0,
             stdout: String::new(),
@@ -1333,20 +795,5 @@ mod tests {
         assert!(!spawned
             .iter()
             .any(|request| request.args.first() == Some(&"stash".to_string())));
-    }
-
-    #[test]
-    fn blocked_state_without_explicit_failed_checks_is_not_remediated() {
-        assert!(!has_explicit_failed_checks(&[]));
-    }
-
-    #[test]
-    fn blocked_state_with_explicit_failed_checks_is_remediated() {
-        let failed = vec![FailedCheck {
-            name: "ci".to_string(),
-            link: "https://github.com/example/repo/actions/runs/1/job/2".to_string(),
-            log_snippet: "failing log".to_string(),
-        }];
-        assert!(has_explicit_failed_checks(&failed));
     }
 }

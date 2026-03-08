@@ -32,6 +32,8 @@ pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
         identity: &rt.identity,
         task_summary: &task,
         attempt_count: 1,
+        git: None,
+        pre_doing_sha: None,
         on_step: Some(&|label, detail| step("do-task", label, detail)),
         on_agent_event: Some(&|event| print_agent_event("do-task", event)),
     })?;

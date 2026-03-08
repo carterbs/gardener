@@ -26,42 +26,42 @@ role = "unit-core"
 [[file]]
 path = "tools/gardener/src/tui/terminal.rs"
 role = "boundary-orchestration"
-owning_tests = ["tui_live_smoke"]
+owning_tests = ["tui_live_integration"]
 boundary_modes = ["pty"]
 instrumentation = "required"
 
 [[file]]
 path = "tools/gardener/src/tui/quality.rs"
 role = "boundary-orchestration"
-owning_tests = ["tui_live_smoke"]
+owning_tests = ["tui_live_integration"]
 boundary_modes = ["pty"]
 instrumentation = "required"
 
 [[file]]
 path = "tools/gardener/src/tui/live/quality.rs"
 role = "boundary-orchestration"
-owning_tests = ["tui_live_smoke"]
+owning_tests = ["tui_live_integration"]
 boundary_modes = ["pty"]
 instrumentation = "required"
 
 [[file]]
 path = "tools/gardener/src/tui/live/seed_review.rs"
 role = "boundary-orchestration"
-owning_tests = ["tui_live_smoke"]
+owning_tests = ["tui_live_integration"]
 boundary_modes = ["pty"]
 instrumentation = "required"
 
 [[file]]
 path = "tools/gardener/src/tui/live/terminal.rs"
 role = "boundary-orchestration"
-owning_tests = ["tui_live_smoke"]
+owning_tests = ["tui_live_integration"]
 boundary_modes = ["pty"]
 instrumentation = "required"
 
 [[file]]
 path = "tools/gardener/src/tui/live/wizard.rs"
 role = "boundary-orchestration"
-owning_tests = ["tui_live_smoke"]
+owning_tests = ["tui_live_integration"]
 boundary_modes = ["pty"]
 instrumentation = "required"
 
@@ -96,7 +96,7 @@ role = "unit-core"
 [[file]]
 path = "tools/gardener/src/worktree_audit/live.rs"
 role = "boundary-orchestration"
-owning_tests = ["worktree_audit_live"]
+owning_tests = ["runtime_integration"]
 boundary_modes = ["temp-repo"]
 instrumentation = "required"
 

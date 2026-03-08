@@ -1,7 +1,7 @@
 ## Documentation Quality Assessment
 
 ### Repo-Wide Score: 84
-The repo has strong operator-facing documentation: a comprehensive root `README.md`, a usable docs index (`docs/README.md`), runbooks, and a repository map. Documentation drift is also guarded by executable checks (`scripts/doc-gardening.sh`, `tools/gardener/tests/docs_readme.rs`, CI running `./scripts/run-validate.sh`). The main gap is API-level Rust contract docs and missing rustdoc/missing-docs enforcement.
+The repo has strong operator-facing documentation: a comprehensive root `README.md`, a usable docs index (`docs/README.md`), runbooks, and a repository map. Documentation drift is also guarded by executable checks (`scripts/doc-gardening.sh`, `tools/gardener/tests/docs_integration.rs`, CI running `./scripts/run-validate.sh`). The main gap is API-level Rust contract docs and missing rustdoc/missing-docs enforcement.
 
 ### Per-Domain Scores
 - runtime-orchestration: 82 - Runtime behavior and workflows are well documented in `README.md` and runbooks, but core public Rust surfaces in `tools/gardener/src/config.rs`, `startup.rs`, and `worker_pool.rs` have limited module/API rustdoc.

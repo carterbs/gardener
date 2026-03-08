@@ -88,6 +88,11 @@ if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
   coverage_llvm_cov_args+=( --ignore-filename-regex "$COVERAGE_IGNORE_REGEX" )
 fi
 
+coverage_report_args=( report -p gardener )
+if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
+  coverage_report_args+=( --ignore-filename-regex "$COVERAGE_IGNORE_REGEX" )
+fi
+
 # Keep raw LLVM profiles out of the repo root when coverage-instrumented
 # subprocesses are spawned during tests.
 mkdir -p "$PROFILE_DIR"
@@ -97,10 +102,7 @@ coverage_report_file="$(mktemp)"
 changed_files_file="$(mktemp)"
 trap 'rm -f "$coverage_report_file" "$changed_files_file"' EXIT
 
-cargo_args=(llvm-cov -p gardener --all-targets --json --summary-only)
-if [[ -n "$COVERAGE_IGNORE_REGEX" ]]; then
-  cargo_args+=(--ignore-filename-regex "$COVERAGE_IGNORE_REGEX")
-fi
+cargo_args=(llvm-cov "${coverage_llvm_cov_args[@]}" --json --summary-only)
 
 report="$(cargo "${cargo_args[@]}")"
 printf '%s\n' "$report" > "$coverage_report_file"
@@ -138,7 +140,10 @@ def normalize_path(path: str) -> str:
     value = path.replace("\\", "/")
     root = repo_root.as_posix().rstrip("/")
     if value.startswith(root + "/"):
-        return value[len(root) + 1 :]
+        value = value[len(root) + 1 :]
+    src_root = "tools/gardener/src/"
+    if value.startswith(src_root):
+        return value[len(src_root) :]
     return value
 
 def parse_total_from_text(text: str) -> float:
@@ -173,19 +178,40 @@ data = payload.get("data") or []
 if not data:
     fail("coverage gate: coverage JSON did not include data entries")
 
+ignore_exact = set()
+ignore_dirs = []
+for line in manifest_path.read_text(encoding="utf-8").splitlines():
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    if line.endswith("/"):
+        ignore_dirs.append(line[:-1])
+    else:
+        ignore_exact.add(line)
+
+def is_ignored(path: str) -> bool:
+    if path in ignore_exact:
+        return True
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in ignore_dirs)
+
 files = {}
-totals = None
+total_lines = 0
+covered_lines = 0
 for datum in data:
-    if "totals" in datum:
-        totals = datum["totals"]
     for entry in datum.get("files", []):
         rel_path = normalize_path(entry.get("filename", ""))
-        files[rel_path] = entry.get("summary", {})
+        if is_ignored(rel_path):
+            continue
+        summary = entry.get("summary", {})
+        files[rel_path] = summary
+        lines = summary.get("lines", {})
+        total_lines += int(lines.get("count", 0))
+        covered_lines += int(lines.get("covered", 0))
 
-if totals is None:
-    fail("coverage gate: coverage JSON did not include totals")
+if total_lines == 0:
+    fail("coverage gate: no non-ignored source files were found in coverage JSON")
 
-line_cov = float(totals["lines"]["percent"])
+line_cov = (covered_lines / total_lines) * 100.0
 print(f"TOTAL line coverage: {line_cov:.2f}%")
 if line_cov < min_line:
     fail(
@@ -289,9 +315,9 @@ else:
 PY
 
 mkdir -p "$(dirname "$COVERAGE_LCOV_FILE")"
-cargo llvm-cov "${coverage_llvm_cov_args[@]}" --lcov --output-path "$COVERAGE_LCOV_FILE"
+cargo llvm-cov "${coverage_report_args[@]}" --lcov --output-path "$COVERAGE_LCOV_FILE"
 echo "coverage lcov report: $COVERAGE_LCOV_FILE"
 
 mkdir -p "$COVERAGE_HTML_DIR"
-cargo llvm-cov "${coverage_llvm_cov_args[@]}" --html --output-dir "$COVERAGE_HTML_DIR"
+cargo llvm-cov "${coverage_report_args[@]}" --html --output-dir "$COVERAGE_HTML_DIR"
 echo "coverage html report: $COVERAGE_HTML_DIR"

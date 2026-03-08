@@ -3,17 +3,14 @@ use gardener::logging::append_run_log;
 use gardener::phase_cli::{print_agent_event, step, PhaseRuntime};
 use gardener::plan_phase::{run_plan, PlanContext};
 
-fn main() -> Result<(), GardenerError> {
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
     append_run_log("info", "bin.plan.started", serde_json::json!({}));
-    let args: Vec<String> = std::env::args().collect();
-    let task = get_arg(&args, "--task").unwrap_or_else(|| {
-        eprintln!("Usage: plan --task <TASK_SUMMARY> --worktree <PATH>");
-        std::process::exit(1);
-    });
-    let worktree = get_arg(&args, "--worktree").unwrap_or_else(|| {
-        eprintln!("Usage: plan --task <TASK_SUMMARY> --worktree <PATH>");
-        std::process::exit(1);
-    });
+    let task = get_arg(args, "--task")
+        .ok_or_else(|| GardenerError::Cli("Usage: plan --task <TASK_SUMMARY> --worktree <PATH>".to_string()))?;
+    let worktree = get_arg(args, "--worktree")
+        .ok_or_else(|| {
+            GardenerError::Cli("Usage: plan --task <TASK_SUMMARY> --worktree <PATH>".to_string())
+        })?;
 
     let rt = PhaseRuntime::init("plan")?;
     let worktree_path = std::path::PathBuf::from(&worktree);
@@ -36,7 +33,7 @@ fn main() -> Result<(), GardenerError> {
     })?;
 
     step("plan", "DONE", "planning phase complete");
-    Ok(())
+    Ok(0)
 }
 
 fn get_arg(args: &[String], flag: &str) -> Option<String> {

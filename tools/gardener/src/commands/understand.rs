@@ -3,12 +3,11 @@ use gardener::logging::append_run_log;
 use gardener::phase_cli::{print_agent_event, step, PhaseRuntime};
 use gardener::understand_phase::{run_understand, UnderstandContext};
 
-fn main() -> Result<(), GardenerError> {
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
     append_run_log("info", "bin.understand.started", serde_json::json!({}));
-    let task = std::env::args().nth(2).unwrap_or_else(|| {
-        eprintln!("Usage: understand --task <TASK_SUMMARY>");
-        std::process::exit(1);
-    });
+    let task = get_arg(args, "--task").ok_or_else(|| {
+        GardenerError::Cli("Usage: understand --task <TASK_SUMMARY>".to_string())
+    })?;
 
     let rt = PhaseRuntime::init("understand")?;
 
@@ -34,10 +33,13 @@ fn main() -> Result<(), GardenerError> {
     step(
         "understand",
         "DONE",
-        &format!(
-            "category={:?} reasoning={}",
-            outcome.category, outcome.reasoning
-        ),
+        &format!("category={:?} reasoning={}", outcome.category, outcome.reasoning),
     );
-    Ok(())
+    Ok(0)
+}
+
+fn get_arg(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1).cloned())
 }

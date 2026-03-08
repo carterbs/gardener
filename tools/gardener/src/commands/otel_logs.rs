@@ -106,20 +106,10 @@ struct FilterEvent {
     payload: serde_json::Value,
 }
 
-fn main() {
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
     let _ = structured_fallback_line("otel_logs", "main", "started");
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn run() -> Result<i32, GardenerError> {
     let _ = structured_fallback_line("otel_logs", "run", "dispatching");
-    let args = Cli::parse();
+    let args = Cli::parse_from(args);
     let log_path = resolve_log_path(args.log_path)?;
 
     match args.command {

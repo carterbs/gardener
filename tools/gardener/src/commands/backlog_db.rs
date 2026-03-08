@@ -118,20 +118,10 @@ struct RetireArgs {
     json: bool,
 }
 
-fn main() {
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
     let _ = structured_fallback_line("backlog_db", "main", "started");
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn run() -> Result<i32, GardenerError> {
     let _ = structured_fallback_line("backlog_db", "run", "dispatching");
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(args);
     let db_path = resolve_db_path(cli.db)?;
 
     match cli.command {

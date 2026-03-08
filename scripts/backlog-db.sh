@@ -5,4 +5,4 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
 cd "${repo_root}"
-exec cargo run -q -p gardener --bin backlog-db -- "$@"
+exec cargo run -q -p gardener -- backlog-db "$@"

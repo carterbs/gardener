@@ -367,7 +367,7 @@ coverage_lcov="$coverage_output_dir/lcov.info"
 coverage_html_dir="$coverage_output_dir/html"
 cat > "$coverage_manifest" <<'EOF'
 runtime/mod.rs
-bin/review_pr.rs
+commands/review_pr.rs
 worker/
 EOF
 coverage_fake_cargo_args_file="$coverage_tmp_dir/cargo.args"
@@ -412,8 +412,10 @@ run_expect_exit_capture 0 "$coverage_output" \
     COVERAGE_FAKE_CARGO_ARGS_FILE="$coverage_fake_cargo_args_file" \
     "$SCRIPT_DIR/test-gardener-coverage.sh"
 assert_file_contains "$coverage_output" "coverage gate passed"
-assert_file_contains "$coverage_fake_cargo_args_file" '/tools/gardener/src/(bin\/review_pr\.rs|runtime\/mod\.rs|worker/.*)'
+assert_file_contains "$coverage_fake_cargo_args_file" "--all-targets"
+assert_file_contains "$coverage_fake_cargo_args_file" '/tools/gardener/src/(commands\/review_pr\.rs|runtime\/mod\.rs|worker/.*)'
 assert_file_contains "$coverage_fake_cargo_args_file" "--summary-only"
+assert_file_contains "$coverage_fake_cargo_args_file" "report"
 assert_file_contains "$coverage_fake_cargo_args_file" "--lcov"
 assert_file_contains "$coverage_fake_cargo_args_file" "--output-path"
 assert_file_contains "$coverage_fake_cargo_args_file" "$coverage_lcov"

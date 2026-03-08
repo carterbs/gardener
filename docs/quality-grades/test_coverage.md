@@ -15,7 +15,7 @@ Coverage is strong overall: most Rust runtime modules appear to include unit tes
 
 ### Deficiencies
 - **[CoverageGap | P1] Limited end-to-end scenario breadth**
-  - What: Only one explicit e2e file (`tools/gardener/tests/hotkey_pty_e2e.rs`) is present versus many integration/unit tests.
+  - What: Only one explicit e2e file (`tools/gardener/tests/tui_live/hotkey_pty_e2e.rs`) is present versus many integration/unit tests.
   - Agent impact: Cross-phase regressions can slip through until late, causing failed autonomous runs and expensive retry/debug cycles.
   - Fix: Add 3-5 additional e2e flows for full runtime execution (`gardener` bin), including multi-worker sync/quit paths and failure-recovery scenarios.
 

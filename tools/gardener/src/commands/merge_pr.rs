@@ -4,15 +4,11 @@ use gardener::git::GitClient;
 use gardener::merge_loop::{run_merge_loop, MergeLoopContext};
 use gardener::phase_cli::{print_agent_event, resolve_worktree_from_pr, step, PhaseRuntime};
 
-fn main() -> Result<(), GardenerError> {
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
     gardener::logging::append_run_log("info", "bin.merge_pr.started", serde_json::json!({}));
-    let pr: u64 = std::env::args()
-        .nth(2)
+    let pr: u64 = parse_pr_arg(args)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            eprintln!("Usage: merge-pr --pr <NUMBER>");
-            std::process::exit(1);
-        });
+        .ok_or_else(|| GardenerError::Cli("Usage: merge-pr [--pr <NUMBER>] <NUMBER>".to_string()))?;
 
     let mut rt = PhaseRuntime::init("merge-pr")?;
 
@@ -57,8 +53,21 @@ fn main() -> Result<(), GardenerError> {
         }
         gardener::merge_loop::MergeLoopOutcome::Failed { reason } => {
             step("merge-pr", "FAILED", reason);
-            std::process::exit(1);
+            return Err(GardenerError::Cli(reason.to_string()));
         }
     }
-    Ok(())
+    Ok(0)
+}
+
+fn parse_pr_arg(args: &[String]) -> Option<String> {
+    if let Some(i) = args.iter().position(|arg| arg == "--pr") {
+        return args.get(i + 1).cloned();
+    }
+    args.iter().skip(1).find_map(|arg| {
+        if arg.starts_with('-') {
+            None
+        } else {
+            Some(arg.clone())
+        }
+    })
 }

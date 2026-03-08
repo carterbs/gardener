@@ -35,18 +35,8 @@ struct Args {
     force_seed_backlog: bool,
 }
 
-fn main() {
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn run() -> Result<i32, GardenerError> {
-    let args = Args::parse();
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
+    let args = Args::parse_from(args);
     let cwd = std::env::current_dir().map_err(|e| GardenerError::Io(e.to_string()))?;
     let log_path = default_run_log_path(&cwd);
     init_run_logger(&log_path, &cwd);

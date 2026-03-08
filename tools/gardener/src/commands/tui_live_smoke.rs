@@ -8,16 +8,10 @@ use gardener::tui::{
 use gardener::seed_runner::SeedTask;
 use serde_json::json;
 
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), GardenerError> {
-    let mode = std::env::args()
-        .nth(1)
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
+    let mode = args
+        .get(1)
+        .cloned()
         .ok_or_else(|| GardenerError::Cli("missing mode".to_string()))?;
     append_run_log("debug", "bin.tui_live_smoke.run", json!({ "mode": mode }));
 
@@ -108,5 +102,5 @@ fn run() -> Result<(), GardenerError> {
     }
 
     close_live_terminal()?;
-    Ok(())
+    Ok(0)
 }

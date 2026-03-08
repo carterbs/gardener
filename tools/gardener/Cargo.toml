@@ -13,46 +13,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "gardener"
 path = "src/main.rs"
-
-[[bin]]
-name = "understand"
-path = "src/bin/understand.rs"
-
-[[bin]]
-name = "plan"
-path = "src/bin/plan.rs"
-
-[[bin]]
-name = "do-task"
-path = "src/bin/do_task.rs"
-
-[[bin]]
-name = "git-push"
-path = "src/bin/git_push.rs"
-
-[[bin]]
-name = "review-pr"
-path = "src/bin/review_pr.rs"
-
-[[bin]]
-name = "merge-pr"
-path = "src/bin/merge_pr.rs"
-
-[[bin]]
-name = "friction-analysis"
-path = "src/bin/friction_analysis.rs"
-
-[[bin]]
-name = "otel-logs"
-path = "src/bin/otel_logs.rs"
-
-[[bin]]
-name = "backlog-db"
-path = "src/bin/backlog_db.rs"
-
-[[bin]]
-name = "seed-backlog"
-path = "src/bin/seed_backlog.rs"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

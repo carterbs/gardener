@@ -1,0 +1,1184 @@
+use assert_cmd::cargo::cargo_bin_cmd;
+use gardener::config::{
+    effective_agent_for_state, effective_model_for_state, load_config, resolve_scope,
+    resolve_validation_command, AppConfig, CliOverrides, StateConfig,
+};
+use gardener::errors::GardenerError;
+use gardener::output_envelope::{parse_last_envelope, END_MARKER, START_MARKER};
+use gardener::runtime::{
+    Clock, FakeClock, FakeFileSystem, FakeProcessRunner, FakeTerminal, FileSystem, ProcessOutput,
+    ProcessRequest, ProcessRunner, ProductionClock, ProductionFileSystem, ProductionProcessRunner,
+    ProductionRuntime, Terminal,
+};
+use gardener::triage_agent_detection::{is_non_interactive, EnvMap};
+use gardener::types::{AgentKind, NonInteractiveReason, WorkerState};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tempfile::TempDir;
+
+fn default_profile_path(git_root: Option<&str>) -> PathBuf {
+    let repo_root = PathBuf::from(git_root.unwrap_or("/repo"));
+    let repo_name = repo_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("repo");
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join(".gardener")
+        .join(repo_name)
+        .join("repo-intelligence.toml")
+}
+
+fn runtime_with_config(config_text: &str, tty: bool, git_root: Option<&str>) -> ProductionRuntime {
+    let fs = FakeFileSystem::with_file("/config.toml", config_text);
+    let profile_path = default_profile_path(git_root);
+    fs.write_string(
+        profile_path.as_path(),
+        include_str!("../fixtures/triage/expected-profiles/phase03-profile.toml"),
+    )
+    .expect("seed profile");
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
+    if let Some(git_root) = git_root {
+        let working_dir_report_path = Path::new("/cwd").join("docs/quality-grades.md");
+        let report_path = Path::new(git_root).join("docs/quality-grades.md");
+        let working_dir_stamp_path = PathBuf::from(format!(
+            "{}.stamp",
+            working_dir_report_path.to_string_lossy()
+        ));
+        let report_stamp_path = PathBuf::from(format!("{}.stamp", report_path.to_string_lossy()));
+        fs.write_string(&report_path, "# Quality Grades\n")
+            .expect("seed quality report");
+        fs.write_string(&working_dir_report_path, "# Quality Grades\n")
+            .expect("seed quality report");
+        fs.write_string(&report_stamp_path, "10000")
+            .expect("seed quality report stamp");
+        fs.write_string(&working_dir_stamp_path, "10000")
+            .expect("seed quality report stamp");
+        // Sidecar GradeReport JSON cache (required since quality grading pipeline is non-optional)
+        let grade_cache_path = PathBuf::from(format!(
+            "{}.grade-report.json",
+            report_path.to_string_lossy()
+        ));
+        let working_dir_grade_cache_path = PathBuf::from(format!(
+            "{}.grade-report.json",
+            working_dir_report_path.to_string_lossy()
+        ));
+        let empty_grade_report = serde_json::json!({
+            "domain_grades": [],
+            "repo_grade": [50.0, "C"],
+            "deficiencies": [],
+            "primary_gap": "test_coverage",
+            "languages_detected": ["rust"],
+            "repo_wide_rationale": {}
+        });
+        fs.write_string(&grade_cache_path, &empty_grade_report.to_string())
+            .expect("seed grade report cache");
+        fs.write_string(
+            &working_dir_grade_cache_path,
+            &empty_grade_report.to_string(),
+        )
+        .expect("seed grade report cache");
+    }
+    let process = FakeProcessRunner::default();
+    let detect_root_stdout = git_root.unwrap_or_default().to_string();
+    for _ in 0..20 {
+        process.push_response(Ok(ProcessOutput {
+            exit_code: if git_root.is_some() { 0 } else { 1 },
+            stdout: if detect_root_stdout.is_empty() {
+                String::new()
+            } else {
+                format!("{detect_root_stdout}\n")
+            },
+            stderr: String::new(),
+        }));
+    }
+    let terminal = FakeTerminal::new(tty);
+
+    ProductionRuntime {
+        clock: Arc::new(FakeClock::new(now)),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process),
+        terminal: Arc::new(terminal),
+    }
+}
+
+struct FailingTerminal {
+    is_tty: bool,
+}
+
+impl Terminal for FailingTerminal {
+    fn stdin_is_tty(&self) -> bool {
+        self.is_tty
+    }
+
+    fn write_line(&self, _line: &str) -> Result<(), GardenerError> {
+        Err(GardenerError::Io("terminal write failed".to_string()))
+    }
+
+    fn draw(&self, _frame: &str) -> Result<(), GardenerError> {
+        Err(GardenerError::Io("terminal draw failed".to_string()))
+    }
+}
+
+fn runtime_with_failing_terminal() -> ProductionRuntime {
+    let fs = FakeFileSystem::with_file("/config.toml", "");
+    fs.write_string(
+        &default_profile_path(Some("/repo")),
+        include_str!("../fixtures/triage/expected-profiles/phase03-profile.toml"),
+    )
+    .expect("seed profile");
+    let process = FakeProcessRunner::default();
+    for _ in 0..12 {
+        process.push_response(Ok(ProcessOutput {
+            exit_code: 0,
+            stdout: "/repo\n".to_string(),
+            stderr: String::new(),
+        }));
+    }
+
+    ProductionRuntime {
+        clock: Arc::new(ProductionClock),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process),
+        terminal: Arc::new(FailingTerminal { is_tty: true }),
+    }
+}
+
+#[test]
+fn cli_help_contract() {
+    let help = gardener::render_help();
+    for flag in [
+        "--config",
+        "--working-dir",
+        "--num-workers",
+        "--worker-count",
+        "--task",
+        "--quit-after",
+        "--worker-mode",
+        "--prune-only",
+        "--backlog-only",
+        "--quality-grades-only",
+        "--validate",
+        "--validation-command",
+        "--agent",
+        "--retriage",
+        "--triage-only",
+        "--sync-only",
+    ] {
+        assert!(help.contains(flag));
+    }
+    assert!(!help.contains("--headless"));
+}
+
+fn fixture(path: &str) -> String {
+    format!("{}/tests/fixtures/{path}", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn binary_help_and_prune_smoke() {
+    let mut help = cargo_bin_cmd!("gardener");
+    help.arg("--help");
+    let out = help.assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).expect("utf8");
+    assert!(stdout.contains("--agent"));
+    assert!(!stdout.contains("--headless"));
+
+    let mut prune = cargo_bin_cmd!("gardener");
+    prune
+        .arg("--prune-only")
+        .arg("--config")
+        .arg(fixture("configs/phase01-minimal.toml"));
+    prune.assert().success();
+
+    let mut scoped = cargo_bin_cmd!("gardener");
+    scoped
+        .arg("--prune-only")
+        .arg("--config")
+        .arg(fixture("configs/phase01-minimal.toml"))
+        .arg("--working-dir")
+        .arg(fixture("repos/scoped-app/packages/functions/src"));
+    scoped.assert().success();
+}
+
+#[test]
+fn run_with_runtime_paths_and_errors() {
+    let dir = TempDir::new().expect("tempdir");
+    let repo_root = dir.path().to_str().expect("utf8").to_string();
+    let runtime = runtime_with_config(
+        "[execution]\ntest_mode = true\nworker_mode = \"normal\"\n\n[quality_report]\npath = \"docs/quality-grades.md\"\nstale_after_days = 7\n",
+        true,
+        Some(&repo_root),
+    );
+    let prune = vec![
+        "gardener".into(),
+        "--prune-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    assert_eq!(
+        gardener::run_with_runtime(&prune, &[], Path::new("/cwd"), &runtime)
+            .expect("test fixture should not fail"),
+        0
+    );
+
+    let backlog = vec![
+        "gardener".into(),
+        "--backlog-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let backlog_result = gardener::run_with_runtime(&backlog, &[], Path::new("/cwd"), &runtime);
+    eprintln!("backlog result: {backlog_result:?}");
+    assert_eq!(backlog_result.expect("test fixture should not fail"), 0);
+
+    let quality = vec![
+        "gardener".into(),
+        "--quality-grades-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let quality_result = gardener::run_with_runtime(&quality, &[], Path::new("/cwd"), &runtime);
+    eprintln!("quality result: {quality_result:?}");
+    assert_eq!(quality_result.expect("test fixture should not fail"), 0);
+
+    let validate = vec![
+        "gardener".into(),
+        "--validate".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime);
+    eprintln!("validate result: {validate_result:?}");
+    assert_eq!(validate_result.expect("test fixture should not fail"), 0);
+
+    let normal = vec!["gardener".into(), "--config".into(), "/config.toml".into()];
+    let normal_result = gardener::run_with_runtime(&normal, &[], Path::new("/cwd"), &runtime);
+    eprintln!("normal result: {normal_result:?}");
+    assert_eq!(normal_result.expect("test fixture should not fail"), 0);
+
+    let help = vec!["gardener".into(), "--help".into()];
+    assert_eq!(
+        gardener::run_with_runtime(&help, &[], Path::new("/cwd"), &runtime)
+            .expect("test fixture should not fail"),
+        0
+    );
+
+    let invalid = vec!["gardener".into(), "--agent".into(), "invalid".into()];
+    let err = gardener::run_with_runtime(&invalid, &[], Path::new("/cwd"), &runtime)
+        .expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Cli(_)));
+
+    let invalid_mode = vec![
+        "gardener".into(),
+        "--worker-mode".into(),
+        "unsupported".into(),
+    ];
+    let err = gardener::run_with_runtime(&invalid_mode, &[], Path::new("/cwd"), &runtime)
+        .expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Cli(_)));
+
+    let retriage = vec!["gardener".into(), "--retriage".into()];
+    let err = gardener::run_with_runtime(
+        &retriage,
+        &[("CI".into(), "1".into())],
+        Path::new("/cwd"),
+        &runtime,
+    )
+    .expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
+
+    let triage = vec!["gardener".into(), "--triage-only".into()];
+    let dir2 = TempDir::new().expect("tempdir");
+    let repo_root2 = dir2.path().to_str().expect("utf8").to_string();
+    let non_tty_runtime = runtime_with_config("", false, Some(&repo_root2));
+    let err = gardener::run_with_runtime(&triage, &[], Path::new("/cwd"), &non_tty_runtime)
+        .expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Cli(message) if message.contains("interactive")));
+}
+
+#[test]
+fn parse_worker_count_alias_emits_deprecation_warning() {
+    let fs = FakeFileSystem::default();
+    fs.write_string(Path::new("/config.toml"), "")
+        .expect("test fixture should not fail");
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let terminal = FakeTerminal::new(true);
+    let runtime = ProductionRuntime {
+        clock: Arc::new(ProductionClock),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process_runner),
+        terminal: Arc::new(terminal.clone()),
+    };
+
+    let args = vec![
+        "gardener".into(),
+        "--prune-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+        "--worker-count".into(),
+        "2".into(),
+    ];
+    assert_eq!(
+        gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime)
+            .expect("test fixture should not fail"),
+        0
+    );
+    let lines = terminal.written_lines();
+    assert!(lines
+        .iter()
+        .any(|line| line.contains("deprecated") && line.contains("--worker-count")));
+}
+
+#[test]
+fn run_with_runtime_backlog_only_failure_triggers_startup_diagnostics_capture() {
+    let fs = FakeFileSystem::with_file(
+        "/config.toml",
+        r#"
+[execution]
+test_mode = false
+"#,
+    );
+    let process = FakeProcessRunner::default();
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "captured\n".to_string(),
+        stderr: String::new(),
+    }));
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process.clone()),
+        terminal: Arc::new(FakeTerminal::new(true)),
+    };
+
+    let args = vec![
+        "gardener".into(),
+        "--backlog-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime)
+        .expect_err("failed startup should surface an error");
+
+    assert!(
+        matches!(err, GardenerError::Cli(message) if message.contains("No repo intelligence profile found"))
+    );
+
+    let spawned = process.spawned();
+    assert_eq!(spawned.len(), 2);
+    assert_eq!(spawned[0].program, "git");
+    assert_eq!(spawned[1].program, "bash");
+    assert_eq!(
+        spawned[1].args[0],
+        "/repo/scripts/startup-diagnostics.sh".to_string()
+    );
+    assert_eq!(spawned[1].args[1], "--stage".to_string());
+    assert_eq!(spawned[1].args[2], "backlog-only".to_string());
+    assert_eq!(spawned[1].args[3], "--run-id".to_string());
+    assert_eq!(spawned[1].args[5], "--log-path".to_string());
+    assert!(spawned[1].args[6].ends_with(".jsonl"));
+    assert_eq!(spawned[1].args[7], "--error".to_string());
+    assert!(spawned[1].args[8].contains("No repo intelligence profile found"));
+}
+
+#[test]
+fn run_with_runtime_validate_flag_runs_configured_validation_command() {
+    let fs = FakeFileSystem::with_file(
+        "/config.toml",
+        r#"
+[validation]
+command = "npm run validate"
+
+[quality_report]
+path = "quality.md"
+stale_after_days = 1
+"#,
+    );
+    fs.write_string(Path::new("/repo/quality.md"), "# Quality Grades\n")
+        .expect("seed quality report");
+    fs.write_string(Path::new("/repo/quality.md.stamp"), "0")
+        .expect("seed quality report stamp");
+    let process = FakeProcessRunner::default();
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 7,
+        stdout: String::new(),
+        stderr: "failed\n".to_string(),
+    }));
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process.clone()),
+        terminal: Arc::new(FakeTerminal::new(true)),
+    };
+
+    let validate = vec![
+        "gardener".into(),
+        "--validate".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime);
+    assert_eq!(validate_result.expect("test fixture should not fail"), 7);
+
+    let spawned = process.spawned();
+    assert_eq!(spawned.len(), 2);
+    assert_eq!(spawned[1].program, "sh");
+    assert_eq!(
+        spawned[1].args,
+        vec!["-lc".to_string(), "npm run validate".to_string()]
+    );
+    assert_eq!(spawned[1].cwd, Some(PathBuf::from("/repo")));
+}
+
+#[test]
+fn run_with_runtime_validate_ignores_quality_report_freshness() {
+    let fs = FakeFileSystem::with_file(
+        "/config.toml",
+        r#"
+[validation]
+command = "npm run validate"
+
+[quality_report]
+path = "quality.md"
+stale_after_days = 0
+"#,
+    );
+    fs.write_string(Path::new("/repo/quality.md"), "# Quality Grades\n")
+        .expect("seed quality report");
+    let process = FakeProcessRunner::default();
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+
+    let runtime = ProductionRuntime {
+        clock: Arc::new(FakeClock::default()),
+        file_system: Arc::new(fs),
+        process_runner: Arc::new(process.clone()),
+        terminal: Arc::new(FakeTerminal::new(true)),
+    };
+    let validate = vec![
+        "gardener".into(),
+        "--validate".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let validate_result = gardener::run_with_runtime(&validate, &[], Path::new("/cwd"), &runtime)
+        .expect("validation should run");
+    assert_eq!(validate_result, 0);
+    let spawned = process.spawned();
+    assert_eq!(spawned.len(), 2);
+    assert_eq!(spawned[0].program, "git");
+    assert_eq!(
+        spawned[0].args,
+        vec!["rev-parse".to_string(), "--show-toplevel".to_string()]
+    );
+    assert_eq!(spawned[1].program, "sh");
+    assert_eq!(
+        spawned[1].args,
+        vec!["-lc".to_string(), "npm run validate".to_string()]
+    );
+}
+
+#[test]
+fn run_with_runtime_propagates_write_and_config_errors() {
+    let runtime = runtime_with_failing_terminal();
+    let prune = vec![
+        "gardener".into(),
+        "--prune-only".into(),
+        "--config".into(),
+        "/config.toml".into(),
+    ];
+    let backlog = vec!["gardener".into(), "--backlog-only".into()];
+    let quality = vec!["gardener".into(), "--quality-grades-only".into()];
+    let normal = vec!["gardener".into()];
+
+    for args in [prune, backlog, quality, normal] {
+        let err = gardener::run_with_runtime(&args, &[], Path::new("/cwd"), &runtime)
+            .expect_err("test fixture should not fail");
+        assert!(
+            matches!(err, GardenerError::Io(message) if message.contains("terminal write failed") || message.contains("terminal draw failed"))
+        );
+    }
+
+    let ok_dir = TempDir::new().expect("tempdir");
+    let ok_repo_root = ok_dir.path().to_str().expect("utf8").to_string();
+    let ok_runtime = runtime_with_config("", true, Some(&ok_repo_root));
+    let missing_cfg = vec![
+        "gardener".into(),
+        "--prune-only".into(),
+        "--config".into(),
+        "/missing.toml".into(),
+    ];
+    let err = gardener::run_with_runtime(&missing_cfg, &[], Path::new("/cwd"), &ok_runtime)
+        .expect_err("test fixture should not fail");
+    assert!(matches!(err, GardenerError::Io(message) if message.contains("missing file")));
+}
+
+#[test]
+fn config_precedence_and_resolution_contracts() {
+    let config_toml = r#"
+[orchestrator]
+parallelism = 7
+
+[validation]
+command = "npm run validate:file"
+
+[agent]
+default = "claude"
+"#;
+    let fs = FakeFileSystem::with_file("/cfg.toml", config_toml);
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+
+    let overrides = CliOverrides {
+        config_path: Some(PathBuf::from("/cfg.toml")),
+        parallelism: Some(9),
+        validation_command: Some("npm run validate:cli".to_string()),
+        agent: Some(AgentKind::Codex),
+        ..CliOverrides::default()
+    };
+
+    let (cfg, _scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner)
+        .expect("test fixture should not fail");
+    assert_eq!(cfg.orchestrator.parallelism, 9);
+    assert_eq!(cfg.validation.command, "npm run validate:cli");
+    assert_eq!(cfg.agent.default, Some(AgentKind::Codex));
+
+    let worker_mode_override = CliOverrides {
+        config_path: Some(PathBuf::from("/cfg.toml")),
+        worker_mode: Some("stub_complete".to_string()),
+        ..CliOverrides::default()
+    };
+    let (cfg, _scope) = load_config(
+        &worker_mode_override,
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("test fixture should not fail");
+    assert_eq!(cfg.execution.worker_mode, "stub_complete");
+
+    let mut cfg2 = AppConfig::default();
+    cfg2.agent.default = Some(AgentKind::Claude);
+    cfg2.states.insert(
+        "doing".to_string(),
+        StateConfig {
+            backend: Some(AgentKind::Codex),
+            model: Some("gpt-5-codex".to_string()),
+        },
+    );
+    assert_eq!(
+        effective_agent_for_state(&cfg2, WorkerState::Doing),
+        Some(AgentKind::Codex)
+    );
+    assert_eq!(
+        effective_agent_for_state(&cfg2, WorkerState::Planning),
+        Some(AgentKind::Claude)
+    );
+    assert_eq!(
+        effective_model_for_state(&cfg2, WorkerState::Doing),
+        "gpt-5-codex"
+    );
+    assert_eq!(
+        effective_model_for_state(&cfg2, WorkerState::Planning),
+        cfg2.seeding.model
+    );
+
+    let resolved = resolve_validation_command(&cfg2, Some("npm run custom"));
+    assert_eq!(resolved.command, "npm run custom");
+
+    cfg2.validation.command.clear();
+    cfg2.startup.validation_command = Some("npm run startup".to_string());
+    let resolved = resolve_validation_command(&cfg2, None);
+    assert_eq!(resolved.command, "npm run startup");
+
+    cfg2.startup.validation_command = None;
+    let resolved = resolve_validation_command(&cfg2, None);
+    assert_eq!(resolved.command, "true");
+}
+
+#[test]
+fn config_exhaustive_overrides_and_validation_paths() {
+    let config_toml = r#"
+[scheduler]
+lease_timeout_seconds = 111
+heartbeat_interval_seconds = 22
+
+[prompts.turn_budget]
+understand = 10
+planning = 20
+doing = 30
+gitting = 40
+reviewing = 50
+merging = 60
+
+[learning]
+confidence_decay_per_day = 0.5
+deactivate_below_confidence = 0.7
+
+[seeding]
+backend = "claude"
+model = "claude-sonnet-4-6"
+max_turns = 99
+
+[execution]
+permissions_mode = "custom"
+worker_mode = "normal"
+test_mode = true
+"#;
+    let fs = FakeFileSystem::with_file("/cfg.toml", config_toml);
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: " \n".to_string(),
+        stderr: String::new(),
+    }));
+    let overrides = CliOverrides {
+        config_path: Some(PathBuf::from("/cfg.toml")),
+        ..CliOverrides::default()
+    };
+    let (cfg, scope) = load_config(&overrides, Path::new("/cwd"), &fs, &process_runner)
+        .expect("test fixture should not fail");
+    assert_eq!(cfg.scheduler.lease_timeout_seconds, 111);
+    assert_eq!(cfg.scheduler.heartbeat_interval_seconds, 22);
+    assert_eq!(cfg.prompts.turn_budget.understand, 10);
+    assert_eq!(cfg.prompts.turn_budget.planning, 20);
+    assert_eq!(cfg.prompts.turn_budget.doing, 30);
+    assert_eq!(cfg.prompts.turn_budget.gitting, 40);
+    assert_eq!(cfg.prompts.turn_budget.reviewing, 50);
+    assert_eq!(cfg.prompts.turn_budget.merging, 60);
+    assert_eq!(cfg.learning.confidence_decay_per_day, 0.5);
+    assert_eq!(cfg.learning.deactivate_below_confidence, 0.7);
+    assert_eq!(cfg.seeding.backend, AgentKind::Claude);
+    assert_eq!(cfg.seeding.model, "claude-sonnet-4-6");
+    assert_eq!(cfg.seeding.max_turns, 99);
+    assert_eq!(cfg.execution.permissions_mode, "custom");
+    assert_eq!(cfg.execution.worker_mode, "normal");
+    assert!(cfg.execution.test_mode);
+    assert_eq!(scope.repo_root, None);
+
+    let bad_parallel = FakeFileSystem::with_file("/bad1.toml", "[orchestrator]\nparallelism = 0\n");
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad1.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_parallel,
+        &FakeProcessRunner::default(),
+    )
+    .expect_err("test fixture should not fail");
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("parallelism"))
+    );
+
+    let bad_agent =
+        FakeFileSystem::with_file("/bad2.toml", "[agent]\n[states.doing]\nmodel = \"x\"\n");
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad2.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_agent,
+        &FakeProcessRunner::default(),
+    )
+    .expect_err("test fixture should not fail");
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("agent.default"))
+    );
+
+    let bad_model = FakeFileSystem::with_file(
+        "/bad3.toml",
+        "[seeding]\nmodel = \"...\"\nbackend = \"codex\"\nmax_turns = 1\n",
+    );
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad3.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_model,
+        &FakeProcessRunner::default(),
+    )
+    .expect_err("test fixture should not fail");
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("seeding.model"))
+    );
+
+    let bad_state_model = FakeFileSystem::with_file(
+        "/bad4.toml",
+        "[states.doing]\nbackend = \"codex\"\nmodel = \"...\"\n",
+    );
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad4.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_state_model,
+        &FakeProcessRunner::default(),
+    )
+    .expect_err("test fixture should not fail");
+    assert!(
+        matches!(err, GardenerError::InvalidConfig(message) if message.contains("states.doing.model"))
+    );
+
+    let bad_worker_mode =
+        FakeFileSystem::with_file("/bad5.toml", "[execution]\nworker_mode = \"unsupported\"\n");
+    let err = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/bad5.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &bad_worker_mode,
+        &FakeProcessRunner::default(),
+    )
+    .expect_err("test fixture should not fail");
+    assert!(matches!(
+        err,
+        GardenerError::InvalidConfig(message) if message.contains("execution.worker_mode")
+    ));
+
+    let mut cfg2 = AppConfig::default();
+    cfg2.agent.default = Some(AgentKind::Claude);
+    cfg2.states.insert(
+        "doing".to_string(),
+        StateConfig {
+            backend: None,
+            model: Some("x".to_string()),
+        },
+    );
+    assert_eq!(
+        effective_agent_for_state(&cfg2, WorkerState::Doing),
+        Some(AgentKind::Claude)
+    );
+    let _ = effective_agent_for_state(&cfg2, WorkerState::Understand);
+    let _ = effective_agent_for_state(&cfg2, WorkerState::Gitting);
+    let _ = effective_agent_for_state(&cfg2, WorkerState::Reviewing);
+    let _ = effective_agent_for_state(&cfg2, WorkerState::Merging);
+    let _ = effective_agent_for_state(&cfg2, WorkerState::Seeding);
+}
+
+#[test]
+fn default_config_is_discovered_from_repo_root_or_cwd() {
+    let fs = FakeFileSystem::with_file(
+        "/repo/gardener.toml",
+        "[orchestrator]\nparallelism = 1\n[seeding]\nbackend = \"codex\"\nmodel = \"gpt-5-codex\"\nmax_turns = 1\n",
+    );
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    let (cfg, scope) = load_config(
+        &CliOverrides::default(),
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("load config from repo root");
+    assert_eq!(cfg.orchestrator.parallelism, 1);
+    assert_eq!(scope.repo_root, Some(PathBuf::from("/repo")));
+
+    let fs = FakeFileSystem::with_file(
+        "/cwd/gardener.toml",
+        "[orchestrator]\nparallelism = 2\n[seeding]\nbackend = \"codex\"\nmodel = \"gpt-5-codex\"\nmax_turns = 1\n",
+    );
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let (cfg, scope) = load_config(
+        &CliOverrides::default(),
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("load config from cwd");
+    assert_eq!(cfg.orchestrator.parallelism, 2);
+    assert_eq!(scope.repo_root, None);
+}
+
+#[test]
+fn config_covers_prompts_without_budget_and_state_backend_present_validation_loop() {
+    let fs = FakeFileSystem::with_file("/p.toml", "[prompts]\n");
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let _ = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/p.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("test fixture should not fail");
+
+    let fs = FakeFileSystem::with_file(
+        "/s.toml",
+        "[agent]\n\n[states.doing]\nbackend = \"codex\"\nmodel = \"gpt-5-codex\"\n",
+    );
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let _ = load_config(
+        &CliOverrides {
+            config_path: Some(PathBuf::from("/s.toml")),
+            ..CliOverrides::default()
+        },
+        Path::new("/cwd"),
+        &fs,
+        &process_runner,
+    )
+    .expect("test fixture should not fail");
+}
+
+#[test]
+fn working_dir_resolution_contract() {
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    let cfg = AppConfig {
+        scope: gardener::config::ScopeConfig {
+            working_dir: Some(PathBuf::from("from-config")),
+        },
+        ..AppConfig::default()
+    };
+    let overrides = CliOverrides {
+        working_dir: Some(PathBuf::from("from-cli")),
+        ..CliOverrides::default()
+    };
+    let scope = resolve_scope(Path::new("/cwd"), &cfg, &overrides, &process_runner);
+    assert_eq!(scope.working_dir, PathBuf::from("/cwd/from-cli"));
+
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "/repo\n".to_string(),
+        stderr: String::new(),
+    }));
+    let scope = resolve_scope(
+        Path::new("/cwd"),
+        &AppConfig::default(),
+        &CliOverrides::default(),
+        &process_runner,
+    );
+    assert_eq!(scope.working_dir, PathBuf::from("/repo"));
+
+    let process_runner = FakeProcessRunner::default();
+    process_runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let scope = resolve_scope(
+        Path::new("/cwd"),
+        &AppConfig::default(),
+        &CliOverrides::default(),
+        &process_runner,
+    );
+    assert_eq!(scope.working_dir, PathBuf::from("/cwd"));
+}
+
+#[test]
+fn non_interactive_detection_contract() {
+    let tty = FakeTerminal::new(true);
+    let non_tty = FakeTerminal::new(false);
+
+    let mut env = EnvMap::new();
+    env.insert("CLAUDECODE".to_string(), "1".to_string());
+    assert_eq!(
+        is_non_interactive(&env, &tty),
+        Some(NonInteractiveReason::ClaudeCodeEnv)
+    );
+
+    let mut env = EnvMap::new();
+    env.insert("CODEX_THREAD_ID".to_string(), "abc".to_string());
+    assert_eq!(
+        is_non_interactive(&env, &tty),
+        Some(NonInteractiveReason::CodexThreadEnv)
+    );
+
+    let mut env = EnvMap::new();
+    env.insert("CI".to_string(), "1".to_string());
+    assert_eq!(
+        is_non_interactive(&env, &tty),
+        Some(NonInteractiveReason::CiEnv)
+    );
+
+    assert_eq!(
+        is_non_interactive(&EnvMap::new(), &non_tty),
+        Some(NonInteractiveReason::NonTtyStdin)
+    );
+    assert_eq!(is_non_interactive(&EnvMap::new(), &tty), None);
+}
+
+#[test]
+fn output_envelope_contract() {
+    let good = format!(
+        "x\n{START_MARKER}\n{{\"schema_version\":1,\"state\":\"doing\",\"payload\":{{\"ok\":true}}}}\n{END_MARKER}\n"
+    );
+    let parsed =
+        parse_last_envelope(&good, WorkerState::Doing).expect("test fixture should not fail");
+    assert_eq!(parsed.payload["ok"], true);
+
+    assert!(matches!(
+        parse_last_envelope("x", WorkerState::Doing).expect_err("test fixture should not fail"),
+        GardenerError::OutputEnvelope(_)
+    ));
+
+    let bad_json = format!("{START_MARKER} nope {END_MARKER}");
+    assert!(matches!(
+        parse_last_envelope(&bad_json, WorkerState::Doing)
+            .expect_err("test fixture should not fail"),
+        GardenerError::OutputEnvelope(_)
+    ));
+}
+
+#[test]
+fn output_envelope_error_contracts() {
+    let reversed = format!("{END_MARKER}{START_MARKER}");
+    assert!(matches!(
+        parse_last_envelope(&reversed, WorkerState::Doing).expect_err("test fixture should not fail"),
+        GardenerError::OutputEnvelope(message) if message.contains("before")
+    ));
+
+    let bad_schema = format!(
+        "{START_MARKER} {{\"schema_version\":2,\"state\":\"doing\",\"payload\":{{}}}} {END_MARKER}"
+    );
+    assert!(matches!(
+        parse_last_envelope(&bad_schema, WorkerState::Doing).expect_err("test fixture should not fail"),
+        GardenerError::OutputEnvelope(message) if message.contains("schema_version")
+    ));
+
+    let mismatch = format!(
+        "{START_MARKER} {{\"schema_version\":1,\"state\":\"planning\",\"payload\":{{}}}} {END_MARKER}"
+    );
+    assert!(matches!(
+        parse_last_envelope(&mismatch, WorkerState::Doing).expect_err("test fixture should not fail"),
+        GardenerError::OutputEnvelope(message) if message.contains("state mismatch")
+    ));
+}
+
+#[test]
+fn runtime_fake_contracts() {
+    let now = UNIX_EPOCH + Duration::from_secs(10);
+    let clock = FakeClock::new(now);
+    let deadline = UNIX_EPOCH + Duration::from_secs(20);
+    clock
+        .sleep_until(deadline)
+        .expect("test fixture should not fail");
+    assert_eq!(clock.now(), deadline);
+
+    let fs = FakeFileSystem::default();
+    let path = Path::new("a.txt");
+    fs.write_string(path, "hello")
+        .expect("test fixture should not fail");
+    assert_eq!(
+        fs.read_to_string(path)
+            .expect("test fixture should not fail"),
+        "hello"
+    );
+    fs.remove_file(path).expect("test fixture should not fail");
+    assert!(!fs.exists(path));
+    assert!(matches!(
+        fs.read_to_string(path)
+            .expect_err("test fixture should not fail"),
+        GardenerError::Io(_)
+    ));
+
+    let runner = FakeProcessRunner::default();
+    runner.push_response(Ok(ProcessOutput {
+        exit_code: 0,
+        stdout: "ok".to_string(),
+        stderr: String::new(),
+    }));
+    let out = runner
+        .run(ProcessRequest {
+            program: "git".to_string(),
+            args: vec![],
+            cwd: None,
+        })
+        .expect("test fixture should not fail");
+    assert_eq!(out.exit_code, 0);
+
+    let terminal = FakeTerminal::new(false);
+    terminal
+        .write_line("line")
+        .expect("test fixture should not fail");
+    terminal
+        .draw("frame")
+        .expect("test fixture should not fail");
+    assert!(!terminal.stdin_is_tty());
+}
+
+#[test]
+fn runtime_extra_branch_coverage() {
+    let fc = FakeClock::default();
+    assert_eq!(fc.sleeps().len(), 0);
+
+    let fs = FakeFileSystem::default();
+    fs.set_fail_next(GardenerError::Io("x".to_string()));
+    assert!(matches!(
+        fs.create_dir_all(Path::new("d"))
+            .expect_err("test fixture should not fail"),
+        GardenerError::Io(_)
+    ));
+    fs.create_dir_all(Path::new("d"))
+        .expect("test fixture should not fail");
+
+    let term = FakeTerminal::new(true);
+    term.write_line("a").expect("test fixture should not fail");
+    term.draw("b").expect("test fixture should not fail");
+    assert_eq!(term.written_lines(), vec!["a".to_string()]);
+    assert_eq!(term.drawn_frames(), vec!["b".to_string()]);
+
+    let runner = FakeProcessRunner::default();
+    runner.push_response(Ok(ProcessOutput {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: String::new(),
+    }));
+    let h = runner
+        .spawn(ProcessRequest {
+            program: "x".to_string(),
+            args: vec![],
+            cwd: None,
+        })
+        .expect("test fixture should not fail");
+    let _ = runner.wait(h).expect("test fixture should not fail");
+    runner.kill(h).expect("test fixture should not fail");
+    assert_eq!(runner.spawned().len(), 1);
+    assert_eq!(runner.waits(), vec![0]);
+    assert_eq!(runner.kills(), vec![0]);
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_production_contracts() {
+    let clock = ProductionClock;
+    clock
+        .sleep_until(clock.now())
+        .expect("test fixture should not fail");
+    clock
+        .sleep_until(clock.now() + Duration::from_millis(1))
+        .expect("test fixture should not fail");
+
+    let dir = tempfile::tempdir().expect("test fixture should not fail");
+    let path = dir.path().join("x.txt");
+    let fs = ProductionFileSystem;
+    let nested = dir.path().join("a/b/c");
+    fs.create_dir_all(&nested)
+        .expect("test fixture should not fail");
+    fs.write_string(&path, "abc")
+        .expect("test fixture should not fail");
+    assert_eq!(
+        fs.read_to_string(&path)
+            .expect("test fixture should not fail"),
+        "abc"
+    );
+    assert!(fs.exists(&path));
+    fs.remove_file(&path).expect("test fixture should not fail");
+
+    let runner = ProductionProcessRunner::new();
+    let _runner_default = ProductionProcessRunner::default();
+    let out = runner
+        .run(ProcessRequest {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "printf ok".to_string()],
+            cwd: None,
+        })
+        .expect("test fixture should not fail");
+    assert_eq!(out.stdout, "ok");
+
+    let handle = runner
+        .spawn(ProcessRequest {
+            program: "sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 1".to_string()],
+            cwd: None,
+        })
+        .expect("test fixture should not fail");
+    runner.kill(handle).expect("test fixture should not fail");
+    assert!(matches!(
+        runner.wait(999).expect_err("test fixture should not fail"),
+        GardenerError::Process(_)
+    ));
+    assert!(matches!(
+        runner.kill(999).expect_err("test fixture should not fail"),
+        GardenerError::Process(_)
+    ));
+
+    let rt = ProductionRuntime::new();
+    let _rt_default = ProductionRuntime::default();
+    let prod_terminal = gardener::runtime::ProductionTerminal;
+    prod_terminal
+        .draw("frame")
+        .expect("test fixture should not fail");
+    assert!(rt.terminal.stdin_is_tty() || !rt.terminal.stdin_is_tty());
+}
+
+#[test]
+fn cli_agent_from_impl_covers_both_variants() {
+    let claude: AgentKind = gardener::CliAgent::Claude.into();
+    let codex: AgentKind = gardener::CliAgent::Codex.into();
+    assert_eq!(claude, AgentKind::Claude);
+    assert_eq!(codex, AgentKind::Codex);
+}
+
+#[test]
+fn agent_kind_helpers() {
+    assert_eq!(AgentKind::Claude.as_str(), "claude");
+    assert_eq!(AgentKind::Codex.as_str(), "codex");
+}

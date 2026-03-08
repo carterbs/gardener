@@ -1,11 +1,11 @@
 agent_turn.rs
 backlog_store/
-bin/do_task.rs
-bin/friction_analysis.rs
-bin/git_push.rs
-bin/plan.rs
-bin/review_pr.rs
-bin/understand.rs
+commands/do_task.rs
+commands/friction_analysis.rs
+commands/git_push.rs
+commands/plan.rs
+commands/review_pr.rs
+commands/understand.rs
 do_phase.rs
 git.rs
 git_phase.rs

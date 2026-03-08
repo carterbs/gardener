@@ -60,18 +60,8 @@ struct Args {
     config: Option<PathBuf>,
 }
 
-fn main() {
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn run() -> Result<i32, gardener::errors::GardenerError> {
-    let args = Args::parse();
+pub fn run_with_args(args: &[String]) -> Result<i32, gardener::errors::GardenerError> {
+    let args = Args::parse_from(args);
 
     // Step 1: Extract timeline
     eprintln!(

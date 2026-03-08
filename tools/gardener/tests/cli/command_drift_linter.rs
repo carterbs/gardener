@@ -1,0 +1,323 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Clone, Copy, Debug)]
+enum CommandKind {
+    Gardener,
+    SeedBacklog,
+}
+
+#[derive(Debug)]
+struct CommandReference {
+    file: PathBuf,
+    line: usize,
+    command: String,
+    command_kind: CommandKind,
+    flag: Vec<String>,
+}
+
+#[derive(Debug)]
+struct CommandDrift {
+    file: PathBuf,
+    line: usize,
+    command: String,
+    missing_flags: Vec<String>,
+    unknown_command: Option<String>,
+}
+
+#[test]
+fn linter_agent_facing_commands_match_current_cli() {
+    let gardener_help = gardener::render_help();
+    let seed_backlog_help = seed_backlog_help();
+
+    let mentions = collect_command_references();
+    let mut drifts = Vec::new();
+
+    for reference in mentions {
+        match reference.command_kind {
+            CommandKind::Gardener => {
+                let mut missing_flags = Vec::new();
+                for flag in &reference.flag {
+                    if !help_contains_flag(&gardener_help, flag) {
+                        missing_flags.push(flag.clone());
+                    }
+                }
+
+                if !missing_flags.is_empty() {
+                    drifts.push(CommandDrift {
+                        file: reference.file,
+                        line: reference.line,
+                        command: reference.command,
+                        missing_flags,
+                        unknown_command: None,
+                    });
+                }
+            }
+            CommandKind::SeedBacklog => {
+                let mut missing_flags = Vec::new();
+                for flag in &reference.flag {
+                    if !help_contains_flag(&seed_backlog_help, flag) {
+                        missing_flags.push(flag.clone());
+                    }
+                }
+
+                if !missing_flags.is_empty() {
+                    drifts.push(CommandDrift {
+                        file: reference.file,
+                        line: reference.line,
+                        command: reference.command,
+                        missing_flags,
+                        unknown_command: None,
+                    });
+                }
+            }
+        }
+    }
+
+    if !drifts.is_empty() {
+        let mut message = String::new();
+        message.push_str("command-drift linter failed: command docs/reference text drifts from supported CLI flags\n\n");
+
+        for drift in drifts {
+            message.push_str(&format!(
+                "- {}:{}: {}\n",
+                drift.file.display(),
+                drift.line,
+                drift.command,
+            ));
+            if let Some(command) = drift.unknown_command {
+                message.push_str(&format!("  - unknown command `{command}`\n"));
+            }
+            if !drift.missing_flags.is_empty() {
+                for flag in drift.missing_flags {
+                    message.push_str(&format!("  - missing flag `{flag}`\n"));
+                }
+            }
+            message.push('\n');
+        }
+
+        panic!("{message}");
+    }
+}
+
+fn collect_command_references() -> Vec<CommandReference> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("crate lives under <repo_root>/tools/gardener");
+    let mut references = Vec::new();
+
+    const FILE_PATHS: &[&str] = &[
+        "AGENTS.md",
+        "README.md",
+        "docs/README.md",
+        "docs/conventions/workflow.md",
+        "tools/gardener/src/startup.rs",
+        "tools/gardener/src/triage.rs",
+    ];
+
+    for relative_path in FILE_PATHS {
+        let path = repo_root.join(relative_path);
+        let source = fs::read_to_string(&path).expect("read command-facing reference file");
+        references.extend(collect_command_mentions(&path, &source));
+    }
+
+    references
+}
+
+fn collect_command_mentions(path: &Path, source: &str) -> Vec<CommandReference> {
+    let mut references = Vec::new();
+    let is_markdown = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension == "md");
+
+    if is_markdown {
+        references.extend(collect_markdown_references(path, source));
+    } else {
+        references.extend(collect_inline_code_references(path, source));
+    }
+
+    references
+}
+
+fn collect_markdown_references(path: &Path, source: &str) -> Vec<CommandReference> {
+    let mut references = Vec::new();
+    let mut in_fence = false;
+
+    for (line_index, line) in source.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+
+        if in_fence {
+            if let Some(reference) = parse_command_reference(path, line_index + 1, line) {
+                references.push(reference);
+            }
+            continue;
+        }
+
+        references.extend(collect_inline_code_references_from_line(
+            line_index + 1,
+            path,
+            line,
+        ));
+    }
+
+    references
+}
+
+fn collect_inline_code_references(path: &Path, source: &str) -> Vec<CommandReference> {
+    let mut references = Vec::new();
+
+    for (line_index, line) in source.lines().enumerate() {
+        references.extend(collect_inline_code_references_from_line(
+            line_index + 1,
+            path,
+            line,
+        ));
+    }
+
+    references
+}
+
+fn collect_inline_code_references_from_line(
+    line_number: usize,
+    path: &Path,
+    line: &str,
+) -> Vec<CommandReference> {
+    let mut references = Vec::new();
+
+    let mut segments = line.split('`');
+    while let Some(_before) = segments.next() {
+        if let Some(raw) = segments.next() {
+            if let Some(reference) = parse_command_reference(path, line_number, raw) {
+                references.push(reference);
+            }
+        } else {
+            break;
+        }
+    }
+
+    references
+}
+
+fn parse_command_reference(
+    path: &Path,
+    line_number: usize,
+    command_line: &str,
+) -> Option<CommandReference> {
+    let cleaned = command_line.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    let parts: Vec<&str> = cleaned.split_whitespace().collect();
+    let normalized_parts: Vec<&str> = parts.iter().map(|part| normalize_token(part)).collect();
+    if normalized_parts.is_empty() {
+        return None;
+    }
+
+    let raw_command = normalized_parts[0];
+    let (command_kind, flag_parts): (CommandKind, Vec<&str>) = match raw_command {
+        "gardener" => (CommandKind::Gardener, parts[1..].to_vec()),
+        "seed-backlog" => (CommandKind::SeedBacklog, parts[1..].to_vec()),
+        "cargo" => {
+            let sep = normalized_parts.iter().position(|part| *part == "--")?;
+            let run_tokens = &normalized_parts[..sep];
+            let command_tokens = &parts[sep + 1..];
+            let is_gardener_run = run_tokens.contains(&"run")
+                && run_tokens
+                    .windows(2)
+                    .any(|window| window == ["-p", "gardener"])
+                && run_tokens
+                    .windows(2)
+                    .any(|window| window == ["--bin", "gardener"]);
+            if !is_gardener_run {
+                return None;
+            }
+            (CommandKind::Gardener, command_tokens.to_vec())
+        }
+        _ => return None,
+    };
+
+    let mut flags = Vec::new();
+    for part in flag_parts {
+        if !part.starts_with("--") {
+            continue;
+        }
+
+        let normalized = normalize_token(part);
+        if normalized == "--" {
+            continue;
+        }
+
+        let without_value = normalized
+            .split_once('=')
+            .map_or(normalized, |(before, _)| before);
+        if without_value.starts_with("--") {
+            flags.push(without_value.to_string());
+        }
+    }
+
+    Some(CommandReference {
+        file: path.to_path_buf(),
+        line: line_number,
+        command: cleaned.to_string(),
+        command_kind,
+        flag: flags,
+    })
+}
+
+fn normalize_token(token: &str) -> &str {
+    token.trim_matches(
+        &[
+            '[', ']', '(', ')', '{', '}', '<', '>', '`', ',', ';', ':', '.', '!',
+        ][..],
+    )
+}
+
+fn seed_backlog_help() -> String {
+    let log_path = std::env::temp_dir().join("gardener-command-drift-linter-otel-logs.jsonl");
+    let mut cmd = if let Ok(path) = std::env::var("CARGO_BIN_EXE_gardener") {
+        Command::new(path)
+    } else {
+        let mut cmd = Command::new("cargo");
+        cmd.args(["run", "-q", "-p", "gardener", "--"]);
+        cmd
+    };
+    cmd.env("GARDENER_LOG_PATH", &log_path);
+    cmd.arg("seed-backlog");
+    cmd.arg("--help");
+    let out = cmd.output().expect("seed-backlog --help");
+    assert!(out.status.success(), "seed-backlog --help should succeed");
+    String::from_utf8(out.stdout).expect("seed-backlog --help utf-8")
+}
+
+fn help_contains_flag(help: &str, flag: &str) -> bool {
+    let flag_with_equals = format!("{flag}=");
+    help.split_whitespace().any(|token| {
+        let normalized = normalize_token(token);
+        normalized == flag || normalized.starts_with(&flag_with_equals)
+    })
+}
+
+#[test]
+fn linter_includes_root_readme_commands() {
+    let references = collect_command_references();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("crate lives under <repo_root>/tools/gardener");
+    let expected = repo_root.join("README.md");
+    assert!(
+        references
+            .iter()
+            .any(|reference| reference.file == expected && reference.command == "gardener --help"),
+        "expected command-drift linter to include root README command references",
+    );
+}

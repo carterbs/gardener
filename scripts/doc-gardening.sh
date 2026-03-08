@@ -139,14 +139,8 @@ check_quality_grade_freshness() {
   echo "  ok: $name"
 }
 
-run_check "agent-doc integrity linter" \
-  cargo test -p gardener --test agent_doc_integrity_linter -- --exact linter_agent_docs_have_valid_links_and_command_targets
-
-run_check "command drift linter" \
-  cargo test -p gardener --test command_drift_linter -- --exact linter_agent_facing_commands_match_current_cli
-
-run_check "validation pipeline docs checks" \
-  cargo test -p gardener --test validation_pipeline_docs -- --exact validation_pipeline_docs_match_live_validation_hook
+run_check "doc/reference contract suite" \
+  cargo test -p gardener --test docs_integration --test cli_integration
 
 check_quality_grade_freshness
 

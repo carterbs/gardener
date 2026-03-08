@@ -34,10 +34,10 @@ This directory is the canonical index for agent-oriented repository navigation. 
 ### `tools/gardener/tests` (verification-harness)
 
 - Entry files
-  - [`tools/gardener/tests/docs_readme.rs`](../tools/gardener/tests/docs_readme.rs)
-  - [`tools/gardener/tests/cli_smoke.rs`](../tools/gardener/tests/cli_smoke.rs)
+  - [`tools/gardener/tests/docs_integration.rs`](../tools/gardener/tests/docs_integration.rs)
+  - [`tools/gardener/tests/cli_integration.rs`](../tools/gardener/tests/cli_integration.rs)
 - Start here command
-  - `cargo test -p gardener --test docs_readme`
+  - `cargo test -p gardener --test docs_integration`
 
 ### `scripts/fixtures` (repository-automation)
 

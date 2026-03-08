@@ -3,15 +3,11 @@ use gardener::logging::append_run_log;
 use gardener::phase_cli::{print_agent_event, resolve_worktree_from_pr, step, PhaseRuntime};
 use gardener::review_phase::{run_review, ReviewContext};
 
-fn main() -> Result<(), GardenerError> {
+pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
     append_run_log("info", "bin.review_pr.started", serde_json::json!({}));
-    let pr: u64 = std::env::args()
-        .nth(2)
+    let pr: u64 = parse_pr_arg(args)
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            eprintln!("Usage: review-pr --pr <NUMBER>");
-            std::process::exit(1);
-        });
+        .ok_or_else(|| GardenerError::Cli("Usage: review-pr [--pr <NUMBER>] <NUMBER>".to_string()))?;
 
     let rt = PhaseRuntime::init("review-pr")?;
 
@@ -54,5 +50,18 @@ fn main() -> Result<(), GardenerError> {
             outcome.suggestions.len()
         ),
     );
-    Ok(())
+    Ok(0)
+}
+
+fn parse_pr_arg(args: &[String]) -> Option<String> {
+    if let Some(i) = args.iter().position(|arg| arg == "--pr") {
+        return args.get(i + 1).cloned();
+    }
+    args.iter().skip(1).find_map(|arg| {
+        if arg.starts_with('-') {
+            None
+        } else {
+            Some(arg.clone())
+        }
+    })
 }

@@ -88,10 +88,8 @@ fi
 CUSTOM_LINTERS=(
   "scripts/doc-gardening.sh"
   "scripts/check-skills-sync.sh"
-  "scripts/check-no-warnings.sh"
   "scripts/check-migrations-wired.sh"
   "scripts/check-binary-blobs.sh"
-  "scripts/run-script-lint-fixture-tests.sh"
 )
 
 for linter in "${CUSTOM_LINTERS[@]}"; do
@@ -106,3 +104,13 @@ fi
 
 echo "Running project validation command: ./scripts/test-gardener-coverage.sh"
 ./scripts/test-gardener-coverage.sh
+
+CUSTOM_LINTERS=(
+  "scripts/check-no-warnings.sh"
+  "scripts/run-script-lint-fixture-tests.sh"
+)
+
+for linter in "${CUSTOM_LINTERS[@]}"; do
+  echo "Running custom linter: $linter"
+  "$linter"
+done

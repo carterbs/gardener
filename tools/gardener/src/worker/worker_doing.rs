@@ -7,6 +7,7 @@ use crate::fsm::{DoingOutput, FsmSnapshot, ReviewVerdict, MAX_REVIEW_LOOPS};
 use crate::git::GitClient;
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
+use crate::plan_phase::{run_plan, PlanContext};
 use crate::prompt_registry::pr_creation_template;
 use crate::protocol::AgentTerminal;
 use crate::retry::{retry_with_backoff, RetryConfig};
@@ -374,7 +375,8 @@ fn execute_task_live(
 
     if fsm.state == WorkerState::Planning {
         emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Planning, on_event);
-        let planning_result = run_agent_turn(AgentTurnInput {
+
+        let plan_ctx = PlanContext {
             cfg,
             process_runner,
             scope,
@@ -383,24 +385,26 @@ fn execute_task_live(
             registry: &registry,
             learning_loop: &learning_loop,
             identity: &identity,
-            state: WorkerState::Planning,
             task_summary,
             attempt_count,
-            prompt_override: None,
-            on_event: Some(&on_adapter_event),
-        })?;
-        logs.push(log_event_from(&planning_result, WorkerState::Planning));
-        if planning_result.terminal == AgentTerminal::Failure {
-            append_run_log(
-                "warn",
-                "worker.recovery.planning_terminal_skip",
-                json!({
-                    "worker_id": identity.worker_id,
-                    "task_id": task_id,
-                    "reason": extract_failure_reason(&planning_result.payload)
-                }),
+            on_step: None,
+            on_agent_event: Some(&on_adapter_event),
+        };
+
+        if let Err(e) = run_plan(&plan_ctx) {
+            emit_worker_activity_state(
+                worker_id,
+                task_id,
+                WorkerActivityState::Failed,
+                on_event,
             );
+            return Ok(WorkerOutcome::Completed(failed_summary(
+                &identity,
+                logs,
+                Some(e.to_string()),
+            )));
         }
+
         if let Err(err) = fsm.transition(WorkerState::Doing) {
             return Ok(fsm_failure_outcome(
                 err,

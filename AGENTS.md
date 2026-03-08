@@ -20,6 +20,14 @@ Use this matrix as the default validation path for agent work and human review.
 
 Legacy TypeScript orchestration entrypoints are not part of active runtime execution.
 
+## Act on signals immediately
+
+When a tool, compiler, test, or linter tells you something is wrong, fix it now. Do not "leave it and see", do not "check if it matters later", do not move on and hope it resolves itself. The signal exists because something needs to change — act on it before continuing.
+
+- Compiler warnings (dead code, unused imports, unused variables): remove the dead code immediately. Trace the full dependency chain — if removing function A makes import B or type C unused, remove those too. Keep going until the compiler is clean.
+- Test failures: diagnose and fix before moving on. Do not commit with known failures.
+- Zero warnings is the baseline, not a stretch goal.
+
 ## Commit policy
 
 - All commits MUST pass pre-commit hooks. `git commit --no-verify` is not allowed.

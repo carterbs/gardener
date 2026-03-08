@@ -36,56 +36,89 @@ pub(super) fn claim_tasks_for_available_workers(
     claimed.clear();
     let available_slots = available_doing_slots(parallelism, target, completed, active_merging);
     for idx in 0..available_slots {
-        let worker_id = workers[idx].worker_id.clone();
-        let claimed_task =
-            store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
-        let Some(task) = claimed_task else {
-            set_worker_idle(&mut workers[idx], "waiting for claim");
-            continue;
-        };
-        claimed_any = true;
-        let task_age_ms = run_started_at_ms.saturating_sub(task.created_at);
-        let inserted_after_run_start = task.created_at >= run_started_at_ms;
+        if let Some(task) = claim_task_for_worker_slot(
+            workers,
+            idx,
+            last_worker_state_line,
+            last_activity_pulse,
+            run_started_at_ms,
+            store,
+            cfg,
+            terminal,
+            hb,
+            lt,
+        )? {
+            claimed_any = true;
+            claimed.push((idx, task));
+        }
+    }
+    Ok(claimed_any)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn claim_task_for_worker_slot(
+    workers: &mut [WorkerRow],
+    idx: usize,
+    last_worker_state_line: usize,
+    last_activity_pulse: &mut [Instant],
+    run_started_at_ms: i64,
+    store: &BacklogStore,
+    cfg: &AppConfig,
+    terminal: &dyn Terminal,
+    hb: u64,
+    lt: u64,
+) -> Result<Option<BacklogTask>, GardenerError> {
+    let worker_id = workers[idx].worker_id.clone();
+    let claimed_task = store.claim_next(&worker_id, cfg.scheduler.lease_timeout_seconds as i64)?;
+    let Some(task) = claimed_task else {
+        set_worker_idle(&mut workers[idx], "waiting for claim");
+        return Ok(None);
+    };
+    let task_age_ms = run_started_at_ms.saturating_sub(task.created_at);
+    let inserted_after_run_start = task.created_at >= run_started_at_ms;
+    append_run_log(
+        "info",
+        "worker.task.claimed",
+        json!({
+            "worker_id": worker_id,
+            "task_id": task.task_id,
+            "title": task.title,
+            "task_created_at": task.created_at,
+            "task_last_updated": task.last_updated,
+            "run_started_at_ms": run_started_at_ms,
+            "task_age_ms": task_age_ms,
+            "inserted_after_run_start": inserted_after_run_start
+        }),
+    );
+    let moved_to_in_progress = store.mark_in_progress(&task.task_id, &worker_id)?;
+    if !moved_to_in_progress {
         append_run_log(
-            "info",
-            "worker.task.claimed",
+            "error",
+            "worker.task.claim_transition_rejected",
             json!({
                 "worker_id": worker_id,
                 "task_id": task.task_id,
-                "title": task.title,
-                "task_created_at": task.created_at,
-                "task_last_updated": task.last_updated,
-                "run_started_at_ms": run_started_at_ms,
-                "task_age_ms": task_age_ms,
-                "inserted_after_run_start": inserted_after_run_start
+                "transition": "mark_in_progress",
             }),
         );
-        let moved_to_in_progress = store.mark_in_progress(&task.task_id, &worker_id)?;
-        if !moved_to_in_progress {
-            append_run_log(
-                "error",
-                "worker.task.claim_transition_rejected",
-                json!({
-                    "worker_id": worker_id,
-                    "task_id": task.task_id,
-                    "transition": "mark_in_progress",
-                }),
-            );
-            continue;
-        }
-        workers[idx].state = "claimed".to_string();
-        workers[idx].task_title = task.title.clone();
-        workers[idx].tool_line = "claimed".to_string();
-        workers[idx].task_id = Some(task.task_id.clone());
-        workers[idx].last_state_line = last_worker_state_line;
-        workers[idx].breadcrumb = "claim>claimed".to_string();
-        workers[idx].lease_held = true;
-        append_worker_command(&mut workers[idx], "claimed");
-        refresh_worker_heartbeats(workers, last_activity_pulse);
-        render(terminal, workers, &dashboard_snapshot(store)?, hb, lt)?;
-        claimed.push((idx, task));
+        return Ok(None);
     }
-    Ok(claimed_any)
+    workers[idx].state = "claimed".to_string();
+    workers[idx].task_title = task.title.clone();
+    workers[idx].tool_line = "claimed".to_string();
+    workers[idx].task_id = Some(task.task_id.clone());
+    workers[idx].last_state_line = last_worker_state_line;
+    workers[idx].breadcrumb = "claim>claimed".to_string();
+    workers[idx].lease_held = true;
+    append_worker_command(&mut workers[idx], "claimed");
+    if let Some(pulse) = last_activity_pulse.get_mut(idx) {
+        *pulse = Instant::now();
+    }
+    workers[idx].last_heartbeat_secs = 0;
+    workers[idx].session_age_secs = 0;
+    refresh_worker_heartbeats(workers, last_activity_pulse);
+    render(terminal, workers, &dashboard_snapshot(store)?, hb, lt)?;
+    Ok(Some(task))
 }
 
 pub(super) fn mark_merge_worker_busy(

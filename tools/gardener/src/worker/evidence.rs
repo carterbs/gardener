@@ -1,5 +1,4 @@
 use crate::agent_turn::AgentTurnOutput;
-use crate::fsm::ReviewingOutput;
 use crate::logging::{
     append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines,
 };
@@ -21,15 +20,6 @@ pub(crate) struct HandoffRunEvidenceBundle {
     run_log_path: Option<String>,
     worker_log_events: Vec<WorkerLogEvent>,
     recent_worker_log_lines: Vec<String>,
-    recorded_at_unix_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ReviewArtifact {
-    task_id: String,
-    worker_id: String,
-    verdict: String,
-    suggestions: Vec<String>,
     recorded_at_unix_ms: i64,
 }
 
@@ -136,90 +126,6 @@ pub(crate) fn collect_handoff_evidence_bundle(
     }
 }
 
-pub(crate) fn log_and_persist_review_output(
-    scope: &RuntimeScope,
-    task_id: &str,
-    worker_id: &str,
-    reviewing_output: &ReviewingOutput,
-) {
-    let artifact = ReviewArtifact {
-        task_id: task_id.to_string(),
-        worker_id: worker_id.to_string(),
-        verdict: match reviewing_output.verdict {
-            crate::fsm::ReviewVerdict::Approve => "approve".to_string(),
-            crate::fsm::ReviewVerdict::NeedsChanges => "needs_changes".to_string(),
-        },
-        suggestions: reviewing_output.suggestions.clone(),
-        recorded_at_unix_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0),
-    };
-    let artifact_path = review_artifact_path(scope, task_id);
-    if let Some(parent) = artifact_path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            append_run_log(
-                "warn",
-                "worker.review.persist_failed",
-                serde_json::json!({
-                    "task_id": task_id,
-                    "worker_id": worker_id,
-                    "path": artifact_path.display().to_string(),
-                    "error": err.to_string(),
-                }),
-            );
-            return;
-        }
-    }
-    match serde_json::to_string_pretty(&artifact) {
-        Ok(payload) => {
-            if let Err(err) = std::fs::write(&artifact_path, payload) {
-                append_run_log(
-                    "warn",
-                    "worker.review.persist_failed",
-                    serde_json::json!({
-                        "task_id": task_id,
-                        "worker_id": worker_id,
-                        "path": artifact_path.display().to_string(),
-                        "error": err.to_string(),
-                    }),
-                );
-                return;
-            }
-            append_run_log(
-                "info",
-                "worker.review.persisted",
-                serde_json::json!({
-                    "task_id": task_id,
-                    "worker_id": worker_id,
-                    "verdict": artifact.verdict,
-                    "suggestions_count": artifact.suggestions.len(),
-                    "path": artifact_path.display().to_string(),
-                }),
-            );
-        }
-        Err(err) => {
-            append_run_log(
-                "warn",
-                "worker.review.persist_failed",
-                serde_json::json!({
-                    "task_id": task_id,
-                    "worker_id": worker_id,
-                    "path": artifact_path.display().to_string(),
-                    "error": err.to_string(),
-                }),
-            );
-        }
-    }
-}
-
-pub(crate) fn review_artifact_path(scope: &RuntimeScope, task_id: &str) -> std::path::PathBuf {
-    scope
-        .working_dir
-        .join(".cache/gardener/reviews")
-        .join(format!("{}.json", worktree_slug_for_task(task_id)))
-}
-
 pub(crate) fn log_event_from(output: &AgentTurnOutput, state: WorkerState) -> WorkerLogEvent {
     WorkerLogEvent {
         state,
@@ -230,29 +136,11 @@ pub(crate) fn log_event_from(output: &AgentTurnOutput, state: WorkerState) -> Wo
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_handoff_evidence_bundle, review_artifact_path};
+    use super::collect_handoff_evidence_bundle;
     use crate::logging;
     use crate::types::{RuntimeScope, WorkerState};
     use crate::worker::types::WorkerLogEvent;
     use serde_json::json;
-    use std::path::PathBuf;
-
-    #[test]
-    fn review_artifact_path_is_task_scoped_and_git_safe() {
-        let scope = RuntimeScope {
-            process_cwd: PathBuf::from("/repo"),
-            repo_root: Some(PathBuf::from("/repo")),
-            working_dir: PathBuf::from("/repo"),
-        };
-        let path = review_artifact_path(&scope, "manual:tui:GARD-01");
-        assert_eq!(
-            path.display().to_string(),
-            format!(
-                "/repo/.cache/gardener/reviews/{}.json",
-                super::worktree_slug_for_task("manual:tui:GARD-01")
-            )
-        );
-    }
 
     #[test]
     fn collect_handoff_evidence_bundle_persists_runnable_artifact() {

@@ -9,6 +9,7 @@ use crate::prompt_registry::PromptRegistry;
 use crate::protocol::AgentTerminal;
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerState};
+use crate::worker::worktree_slug_for_task;
 use crate::worker_identity::WorkerIdentity;
 use serde::Serialize;
 use serde_json::json;
@@ -158,7 +159,7 @@ fn persist_review_artifact(ctx: &ReviewContext<'_>, reviewing_output: &Reviewing
         .scope
         .working_dir
         .join(".cache/gardener/reviews")
-        .join(format!("{}.json", ctx.task_id));
+        .join(format!("{}.json", worktree_slug_for_task(ctx.task_id)));
     if let Some(parent) = artifact_path.parent() {
         if std::fs::create_dir_all(parent).is_err() {
             return;

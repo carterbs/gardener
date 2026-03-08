@@ -11,13 +11,11 @@ use crate::plan_phase::{run_plan, PlanContext};
 use crate::prompt_registry::pr_creation_template;
 use crate::protocol::AgentTerminal;
 use crate::retry::{retry_with_backoff, RetryConfig};
-use crate::review_phase::parse_reviewing_output;
+use crate::review_phase::{run_review, ReviewContext};
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::understand_phase::{run_understand, UnderstandContext};
-use crate::worker::evidence::{
-    collect_handoff_evidence_bundle, log_and_persist_review_output, log_event_from,
-};
+use crate::worker::evidence::{collect_handoff_evidence_bundle, log_event_from};
 use crate::worker::simulated::execute_task_simulated;
 use crate::worker::stream_events::{
     emit_adapter_tool_event, emit_worker_activity_state, extract_failure_reason,
@@ -674,7 +672,8 @@ fn execute_task_live(
         ));
     }
     emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Reviewing, on_event);
-    let reviewing_result = run_agent_turn(AgentTurnInput {
+
+    let review_ctx = ReviewContext {
         cfg,
         process_runner,
         scope,
@@ -683,66 +682,71 @@ fn execute_task_live(
         registry: &registry,
         learning_loop: &learning_loop,
         identity: &identity,
-        state: WorkerState::Reviewing,
         task_summary,
         attempt_count,
-        prompt_override: None,
-        on_event: Some(&on_adapter_event),
-    })?;
-    logs.push(log_event_from(&reviewing_result, WorkerState::Reviewing));
-    if reviewing_result.terminal == AgentTerminal::Failure {
-        append_run_log(
-            "warn",
-            "worker.recovery.review_terminal_parked",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "pr_number": pr_number,
-                "reason": extract_failure_reason(&reviewing_result.payload)
-            }),
-        );
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
-        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Parked,
-            logs,
-            teardown: None,
-            failure_reason: Some("review agent failed after PR creation".to_string()),
-        }));
-    }
-    let reviewing_output = parse_reviewing_output(&reviewing_result.payload);
-    log_and_persist_review_output(scope, task_id, &identity.worker_id, &reviewing_output);
-    if reviewing_output.verdict == ReviewVerdict::NeedsChanges {
-        let action = decide_review_action(reviewing_output.verdict, fsm.review_loops);
-        append_run_log(
-            "info",
-            "worker.review.needs_changes",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "review_loops": fsm.review_loops,
-                "max_review_loops": MAX_REVIEW_LOOPS,
-                "suggestions_count": reviewing_output.suggestions.len(),
-                "suggestions": reviewing_output.suggestions
-            }),
-        );
-        if let Err(err) = fsm.on_review_loop_back() {
-            return Ok(fsm_failure_outcome(
-                err,
-                "review_loop_back",
+        pr_number,
+        branch: &branch,
+        task_id,
+        on_step: None,
+        on_agent_event: Some(&on_adapter_event),
+    };
+
+    let review_outcome = match run_review(&review_ctx) {
+        Ok(outcome) => {
+            logs.push(WorkerLogEvent {
+                state: WorkerState::Reviewing,
+                prompt_version: outcome.prompt_version.clone(),
+                context_manifest_hash: outcome.context_manifest_hash.clone(),
+            });
+            outcome
+        }
+        Err(e) => {
+            append_run_log(
+                "warn",
+                "worker.recovery.review_terminal_parked",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "pr_number": pr_number,
+                    "reason": e.to_string()
+                }),
+            );
+            emit_worker_activity_state(
                 worker_id,
                 task_id,
-                &identity,
-                logs,
+                WorkerActivityState::Parked,
                 on_event,
-            ));
+            );
+            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Parked,
+                logs,
+                teardown: None,
+                failure_reason: Some("review agent failed after PR creation".to_string()),
+            }));
         }
-        if fsm.state != WorkerState::Parked {
-            if let Err(err) = fsm.transition(WorkerState::Parked) {
+    };
+
+    match review_outcome.verdict {
+        ReviewVerdict::NeedsChanges => {
+            let action = decide_review_action(review_outcome.verdict, fsm.review_loops);
+            append_run_log(
+                "info",
+                "worker.review.needs_changes",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "review_loops": fsm.review_loops,
+                    "max_review_loops": MAX_REVIEW_LOOPS,
+                    "suggestions_count": review_outcome.suggestions.len(),
+                    "suggestions": review_outcome.suggestions
+                }),
+            );
+            if let Err(err) = fsm.on_review_loop_back() {
                 return Ok(fsm_failure_outcome(
                     err,
-                    "reviewing_to_parked",
+                    "review_loop_back",
                     worker_id,
                     task_id,
                     &identity,
@@ -750,55 +754,79 @@ fn execute_task_live(
                     on_event,
                 ));
             }
-        }
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Parked, on_event);
-        let reason = match action {
-            ReviewAction::Rework => "review requested changes",
-            ReviewAction::Parked => "review loop cap reached",
-            ReviewAction::Handoff => "review requested changes",
-        };
-        append_run_log(
-            "warn",
-            "worker.review.rework_required",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "review_loops": fsm.review_loops,
-                "reason": reason,
-            }),
-        );
-        return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-            worker_id: identity.worker_id,
-            session_id: identity.session.session_id,
-            final_state: WorkerState::Parked,
-            logs,
-            teardown: None,
-            failure_reason: Some(reason.to_string()),
-        }));
-    } else {
-        append_run_log(
-            "info",
-            "worker.review.approved",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "review_loops": fsm.review_loops,
-                "suggestions_count": reviewing_output.suggestions.len(),
-                "suggestions": reviewing_output.suggestions
-            }),
-        );
-        if let Err(err) = fsm.transition(WorkerState::Merging) {
-            return Ok(fsm_failure_outcome(
-                err,
-                "reviewing_to_merging",
+            if fsm.state != WorkerState::Parked {
+                if let Err(err) = fsm.transition(WorkerState::Parked) {
+                    return Ok(fsm_failure_outcome(
+                        err,
+                        "reviewing_to_parked",
+                        worker_id,
+                        task_id,
+                        &identity,
+                        logs,
+                        on_event,
+                    ));
+                }
+            }
+            emit_worker_activity_state(
                 worker_id,
                 task_id,
-                &identity,
-                logs,
+                WorkerActivityState::Parked,
                 on_event,
-            ));
+            );
+            let reason = match action {
+                ReviewAction::Rework => "review requested changes",
+                ReviewAction::Parked => "review loop cap reached",
+                ReviewAction::Handoff => "review requested changes",
+            };
+            append_run_log(
+                "warn",
+                "worker.review.rework_required",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "review_loops": fsm.review_loops,
+                    "reason": reason,
+                }),
+            );
+            return Ok(WorkerOutcome::Completed(WorkerRunSummary {
+                worker_id: identity.worker_id,
+                session_id: identity.session.session_id,
+                final_state: WorkerState::Parked,
+                logs,
+                teardown: None,
+                failure_reason: Some(reason.to_string()),
+            }));
         }
-        emit_worker_activity_state(worker_id, task_id, WorkerActivityState::Merging, on_event);
+        ReviewVerdict::Approve => {
+            append_run_log(
+                "info",
+                "worker.review.approved",
+                json!({
+                    "worker_id": identity.worker_id,
+                    "task_id": task_id,
+                    "review_loops": fsm.review_loops,
+                    "suggestions_count": review_outcome.suggestions.len(),
+                    "suggestions": review_outcome.suggestions
+                }),
+            );
+            if let Err(err) = fsm.transition(WorkerState::Merging) {
+                return Ok(fsm_failure_outcome(
+                    err,
+                    "reviewing_to_merging",
+                    worker_id,
+                    task_id,
+                    &identity,
+                    logs,
+                    on_event,
+                ));
+            }
+            emit_worker_activity_state(
+                worker_id,
+                task_id,
+                WorkerActivityState::Merging,
+                on_event,
+            );
+        }
     }
 
     append_run_log(

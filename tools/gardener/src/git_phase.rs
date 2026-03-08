@@ -30,6 +30,9 @@ pub struct GitPushContext<'a> {
     pub attempt_count: i64,
     pub branch: &'a str,
     pub commit_message: &'a str,
+    /// When true, skip the initial `git.commit_all` at phase start.
+    /// Use when the caller has already committed (e.g. worker safety-net commit).
+    pub skip_initial_commit: bool,
     #[allow(clippy::type_complexity)]
     pub on_step: Option<&'a dyn Fn(&str, &str)>,
     pub on_agent_event: Option<&'a dyn Fn(&crate::protocol::AgentEvent)>,
@@ -43,10 +46,12 @@ pub struct GitPushOutcome {
 pub fn run_git_push(ctx: &GitPushContext<'_>) -> Result<GitPushOutcome, GardenerError> {
     let git = GitClient::new(ctx.process_runner, ctx.worktree_path);
 
-    if let Some(on_step) = ctx.on_step {
-        on_step("GIT", "committing changes");
+    if !ctx.skip_initial_commit {
+        if let Some(on_step) = ctx.on_step {
+            on_step("GIT", "committing changes");
+        }
+        git.commit_all(ctx.commit_message)?;
     }
-    git.commit_all(ctx.commit_message)?;
 
     if let Some(on_step) = ctx.on_step {
         on_step("GIT", &format!("pushing to branch {}", ctx.branch));

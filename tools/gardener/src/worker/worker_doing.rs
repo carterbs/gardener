@@ -5,12 +5,11 @@ use crate::do_phase::{fallback_commit_message, run_do, DoContext};
 use crate::errors::GardenerError;
 use crate::fsm::{FsmSnapshot, ReviewVerdict, MAX_REVIEW_LOOPS};
 use crate::git::GitClient;
+use crate::git_phase::{run_git_push, GitPushContext};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::plan_phase::{run_plan, PlanContext};
-use crate::prompt_registry::pr_creation_template;
 use crate::protocol::AgentTerminal;
-use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::review_phase::{run_review, ReviewContext};
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
@@ -27,8 +26,6 @@ use crate::worker::worktree_naming::{worktree_branch_for, worktree_path_for};
 use crate::worker_identity::WorkerIdentity;
 use crate::worktree::WorktreeClient;
 use serde_json::json;
-
-const MAX_GITTING_REMEDIATION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReviewAction {
@@ -234,7 +231,7 @@ fn execute_task_live(
     let registry = crate::prompt_registry::PromptRegistry::v1().with_retry_rebase(attempt_count);
     let identity = WorkerIdentity::new(worker_id);
     let mut fsm = FsmSnapshot::default();
-    let mut learning_loop = LearningLoop::default();
+    let learning_loop = LearningLoop::default();
     let mut logs = Vec::new();
     let factory = AdapterFactory::with_defaults();
     let repo_root = scope.repo_root.as_ref().unwrap_or(&scope.working_dir);
@@ -469,127 +466,7 @@ fn execute_task_live(
         }),
     );
 
-    for attempt in 0..MAX_GITTING_REMEDIATION {
-        match git.push_with_rebase_recovery(&branch) {
-            Ok(()) => {
-                append_run_log(
-                    "info",
-                    "worker.gitting.deterministic.succeeded",
-                    json!({
-                        "worker_id": identity.worker_id,
-                        "task_id": task_id,
-                        "branch": branch,
-                        "attempt": attempt + 1
-                    }),
-                );
-                break;
-            }
-            Err(push_err) => {
-                if attempt + 1 >= MAX_GITTING_REMEDIATION {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    append_run_log(
-                        "error",
-                        "worker.gitting.deterministic.exhausted",
-                        json!({
-                            "worker_id": identity.worker_id,
-                            "task_id": task_id,
-                            "branch": branch,
-                            "attempts": MAX_GITTING_REMEDIATION,
-                            "error": push_err.to_string()
-                        }),
-                    );
-                    return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-                        worker_id: identity.worker_id,
-                        session_id: identity.session.session_id,
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason: Some(format!(
-                            "gitting failed after {} remediation attempts: {}",
-                            MAX_GITTING_REMEDIATION, push_err
-                        )),
-                    }));
-                }
-
-                append_run_log(
-                    "warn",
-                    "worker.gitting.deterministic.remediation",
-                    json!({
-                        "worker_id": identity.worker_id,
-                        "task_id": task_id,
-                        "branch": branch,
-                        "attempt": attempt + 1,
-                        "error": push_err.to_string()
-                    }),
-                );
-                learning_loop.ingest_failure(
-                    WorkerState::Gitting,
-                    "deterministic push failed",
-                    vec![
-                        format!("branch={branch}"),
-                        format!("attempt={}", attempt + 1),
-                        format!("error={push_err}"),
-                    ],
-                );
-                emit_worker_activity_state(
-                    worker_id,
-                    task_id,
-                    WorkerActivityState::GittingRemediation,
-                    on_event,
-                );
-                let remediation_result = run_agent_turn(AgentTurnInput {
-                    cfg,
-                    process_runner,
-                    scope,
-                    worktree_path: &worktree_path,
-                    factory: &factory,
-                    registry: &registry,
-                    learning_loop: &learning_loop,
-                    identity: &identity,
-                    state: WorkerState::Gitting,
-                    task_summary,
-                    attempt_count,
-                    prompt_override: None,
-                    on_event: Some(&on_adapter_event),
-                })?;
-                logs.push(log_event_from(&remediation_result, WorkerState::Gitting));
-                if remediation_result.terminal == AgentTerminal::Failure {
-                    emit_worker_activity_state(
-                        worker_id,
-                        task_id,
-                        WorkerActivityState::Failed,
-                        on_event,
-                    );
-                    let failure_reason = extract_failure_reason(&remediation_result.payload);
-                    return Ok(WorkerOutcome::Completed(WorkerRunSummary {
-                        worker_id: identity.worker_id,
-                        session_id: identity.session.session_id,
-                        final_state: WorkerState::Failed,
-                        logs,
-                        teardown: None,
-                        failure_reason,
-                    }));
-                }
-
-                git.commit_all("fix: gitting remediation")?;
-            }
-        }
-    }
-
-    let gh = crate::gh::GhClient::new(process_runner, &worktree_path);
-    emit_worker_activity_state(
-        worker_id,
-        task_id,
-        WorkerActivityState::PrCreating,
-        on_event,
-    );
-    let pr_tpl = pr_creation_template();
-    let pr_result = run_agent_turn(AgentTurnInput {
+    let git_ctx = GitPushContext {
         cfg,
         process_runner,
         scope,
@@ -598,26 +475,32 @@ fn execute_task_live(
         registry: &registry,
         learning_loop: &learning_loop,
         identity: &identity,
-        state: WorkerState::Gitting,
         task_summary,
         attempt_count,
-        prompt_override: Some(&pr_tpl),
-        on_event: Some(&on_adapter_event),
-    })?;
-    if pr_result.terminal == AgentTerminal::Failure {
-        append_run_log(
-            "warn",
-            "worker.recovery.pr_creation_deterministic_fallback",
-            json!({
-                "worker_id": identity.worker_id,
-                "task_id": task_id,
-                "reason": extract_failure_reason(&pr_result.payload)
-            }),
-        );
-        let title = fallback_commit_message(task_summary);
-        let body = format!("Automated PR for task: {task_summary}");
-        gh.create_pr(&title, &body).map(|_| ())?;
-    }
+        branch: &branch,
+        commit_message: &fallback_commit_message(task_summary),
+        skip_initial_commit: true,
+        on_step: None,
+        on_agent_event: Some(&on_adapter_event),
+    };
+
+    let git_outcome = match run_git_push(&git_ctx) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            emit_worker_activity_state(
+                worker_id,
+                task_id,
+                WorkerActivityState::Failed,
+                on_event,
+            );
+            return Ok(WorkerOutcome::Completed(failed_summary(
+                &identity,
+                logs,
+                Some(e.to_string()),
+            )));
+        }
+    };
+
     if should_complete_merged_pr_without_diff(
         process_runner,
         &worktree_path,
@@ -642,20 +525,14 @@ fn execute_task_live(
             failure_reason: None,
         }));
     }
-    let (number, _url) = retry_with_backoff(
-        &RetryConfig {
-            operation_name: "find_pr_for_branch",
-            ..Default::default()
-        },
-        || gh.find_pr_for_branch(&branch),
-    )?;
-    let pr_number = number;
+
+    let pr_number = git_outcome.pr_number;
     append_run_log(
         "info",
         "worker.gitting.deterministic.pr_created",
         json!({
             "worker_id": identity.worker_id,
-            "pr_number": number,
+            "pr_number": pr_number,
             "branch": branch
         }),
     );

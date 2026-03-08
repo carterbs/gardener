@@ -35,6 +35,7 @@ pub fn run_with_args(args: &[String]) -> Result<i32, GardenerError> {
         attempt_count: 1,
         branch: &branch,
         commit_message: &format!("feat: {task}"),
+        skip_initial_commit: false,
         on_step: Some(&|label, detail| step("git-push", label, detail)),
         on_agent_event: Some(&|event| print_agent_event("git-push", event)),
     })?;

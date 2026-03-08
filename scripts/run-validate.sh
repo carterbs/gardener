@@ -85,6 +85,26 @@ if [[ "${1-}" != "" ]]; then
   exit 64
 fi
 
+_validate_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")"
+VALIDATE_LOG="/tmp/gardener-validate-${_validate_branch//\//-}.log"
+: > "$VALIDATE_LOG"
+
+run_step() {
+  local name="$1"
+  shift
+  local start_sec
+  start_sec="$(date +%s)"
+  if "$@" >> "$VALIDATE_LOG" 2>&1; then
+    local elapsed=$(( $(date +%s) - start_sec ))
+    printf '[%s]: OK (%ds)\n' "$name" "$elapsed"
+  else
+    local rc=$?
+    local elapsed=$(( $(date +%s) - start_sec ))
+    printf '[%s]: FAILED (%ds) — full log at %s\n' "$name" "$elapsed" "$VALIDATE_LOG" >&2
+    exit $rc
+  fi
+}
+
 CUSTOM_LINTERS=(
   "scripts/doc-gardening.sh"
   "scripts/check-skills-sync.sh"
@@ -93,17 +113,12 @@ CUSTOM_LINTERS=(
 )
 
 for linter in "${CUSTOM_LINTERS[@]}"; do
-  echo "Running custom linter: $linter"
-  "$linter"
+  run_step "${linter#scripts/}" "$linter"
 done
 
-if ! run_preflight; then
-  echo "Cannot proceed to full validation without required tooling." >&2
-  exit 1
-fi
+run_step "preflight" run_preflight
 
-echo "Running project validation command: ./scripts/test-gardener-coverage.sh"
-./scripts/test-gardener-coverage.sh
+run_step "test-gardener-coverage" ./scripts/test-gardener-coverage.sh
 
 CUSTOM_LINTERS=(
   "scripts/check-no-warnings.sh"
@@ -111,6 +126,5 @@ CUSTOM_LINTERS=(
 )
 
 for linter in "${CUSTOM_LINTERS[@]}"; do
-  echo "Running custom linter: $linter"
-  "$linter"
+  run_step "${linter#scripts/}" "$linter"
 done

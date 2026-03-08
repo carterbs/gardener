@@ -196,21 +196,6 @@ fn worker_state_details(state: &str, payload: Option<&serde_json::Value>) -> Str
     details.join(", ")
 }
 
-pub(crate) fn extract_failure_reason(payload: &serde_json::Value) -> Option<String> {
-    let raw = payload
-        .get("reason")
-        .or_else(|| payload.get("message"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|s| !s.is_empty())?;
-    // The message may be a JSON-encoded string like {"detail":"..."}
-    if let Ok(inner) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(detail) = inner.get("detail").and_then(serde_json::Value::as_str) {
-            return Some(detail.to_string());
-        }
-    }
-    Some(raw.to_string())
-}
-
 pub(crate) fn emit_worker_activity_state(
     worker_id: &str,
     task_id: &str,
@@ -254,22 +239,4 @@ pub(crate) fn emit_worker_activity_state_with(
         }
     });
     append_run_log("info", "worker.activity.state_changed", payload);
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::extract_failure_reason;
-
-    #[test]
-    fn extract_failure_reason_parses_nested_detail_field() {
-        let detail = extract_failure_reason(
-            &serde_json::json!({"message":"{\"detail\":\"merge conflicted\"}"}),
-        );
-        assert_eq!(detail.as_deref(), Some("merge conflicted"));
-
-        let plain = extract_failure_reason(&serde_json::json!({"reason":"hook failed"}));
-        assert_eq!(plain.as_deref(), Some("hook failed"));
-        assert!(extract_failure_reason(&serde_json::json!({"other":123})).is_none());
-    }
 }

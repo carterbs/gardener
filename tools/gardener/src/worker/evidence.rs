@@ -1,8 +1,7 @@
-use crate::agent_turn::AgentTurnOutput;
 use crate::logging::{
     append_run_log, current_run_id, current_run_log_path, recent_worker_log_lines,
 };
-use crate::types::{RuntimeScope, WorkerState};
+use crate::types::RuntimeScope;
 use crate::worker::types::WorkerLogEvent;
 use crate::worker::worktree_naming::worktree_slug_for_task;
 use serde::Serialize;
@@ -123,14 +122,6 @@ pub(crate) fn collect_handoff_evidence_bundle(
             );
             None
         }
-    }
-}
-
-pub(crate) fn log_event_from(output: &AgentTurnOutput, state: WorkerState) -> WorkerLogEvent {
-    WorkerLogEvent {
-        state,
-        prompt_version: output.prompt_version.clone(),
-        context_manifest_hash: output.context_manifest_hash.clone(),
     }
 }
 

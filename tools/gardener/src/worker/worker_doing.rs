@@ -1,5 +1,4 @@
 use crate::agent::factory::AdapterFactory;
-use crate::agent_turn::{run_agent_turn, AgentTurnInput};
 use crate::config::AppConfig;
 use crate::do_phase::{fallback_commit_message, run_do, DoContext};
 use crate::errors::GardenerError;
@@ -9,16 +8,13 @@ use crate::git_phase::{run_git_push, GitPushContext};
 use crate::learning_loop::LearningLoop;
 use crate::logging::append_run_log;
 use crate::plan_phase::{run_plan, PlanContext};
-use crate::protocol::AgentTerminal;
 use crate::review_phase::{run_review, ReviewContext};
 use crate::runtime::ProcessRunner;
 use crate::types::{RuntimeScope, WorkerActivityState, WorkerState};
 use crate::understand_phase::{run_understand, UnderstandContext};
-use crate::worker::evidence::{collect_handoff_evidence_bundle, log_event_from};
+use crate::worker::evidence::collect_handoff_evidence_bundle;
 use crate::worker::simulated::execute_task_simulated;
-use crate::worker::stream_events::{
-    emit_adapter_tool_event, emit_worker_activity_state, extract_failure_reason,
-};
+use crate::worker::stream_events::{emit_adapter_tool_event, emit_worker_activity_state};
 use crate::worker::types::{
     MergeRequest, WorkerLogEvent, WorkerOutcome, WorkerRunSummary, WorkerStreamEvent,
 };
